@@ -152,6 +152,18 @@ class TestRequiredElements:
         assert "AUDIOWORKLET TEST" in text
         assert "peak amplitude" in text
 
+    def test_the_probe_reports_the_playback_rate(self):
+        """The 24 kHz question is browser- and device-dependent.
+
+        It made the voice sound like a different person on some setups, so the
+        probe has to answer it directly rather than leaving it to be guessed at
+        from a recording.
+        """
+        text = (WEB / "mic-probe.html").read_text(encoding="utf-8")
+        assert "PLAYBACK CONTEXT" in text
+        assert "requested rate" in text and "granted rate" in text
+        assert "24 kHz REFUSED" in text
+
     def test_the_archive_controls_exist(self, html):
         for element_id in ("archiveToggle", "archiveList", "archivePurge", "confirmModal"):
             assert f'id="{element_id}"' in html

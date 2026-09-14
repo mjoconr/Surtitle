@@ -93,6 +93,41 @@ document.getElementById('go').onclick = async () => {
       log("WORKLET: ERROR " + e.name + ": " + e.message);
     }
 
+    // ---- Does this browser honour the 24 kHz we ask for on output? --------
+    // This is the difference between the voice sounding right and sounding like
+    // a different, higher person. An AudioBufferSourceNode resamples its buffer
+    // into the context's rate, so if the context refuses 24 kHz the *buffer* must
+    // still be declared at 24 kHz. Reported here because it is browser- and
+    // device-dependent, and therefore intermittent.
+    log("\n=== PLAYBACK CONTEXT (speech output) ===");
+    try {
+      const appRequests = 24000;
+      const pctx = new AudioContext({ sampleRate: appRequests });
+      const granted = pctx.sampleRate;
+      log("requested rate     : " + appRequests + " Hz");
+      log("granted rate       : " + granted + " Hz");
+      if (granted === appRequests) {
+        log("VERDICT: PASS (24 kHz honoured; decode rate and context rate agree)");
+      } else {
+        const factor = granted / appRequests;
+        const semitones = 12 * Math.log2(factor);
+        log("VERDICT: 24 kHz REFUSED by this browser");
+        log("  A 1 s buffer declared at the context rate would last " +
+            (1 / factor).toFixed(3) + " s and play " + factor.toFixed(2) +
+            "x fast, " + semitones.toFixed(1) + " semitones high.");
+        log("  The app declares buffers at the synthesis rate and lets the context");
+        log("  resample, so this is handled -- but if you hear a high, fast voice");
+        log("  this line is the reason to check.");
+      }
+      // Prove the correct declaration survives an odd context rate.
+      const buffer = pctx.createBuffer(1, appRequests, appRequests);
+      log("1 s of synthesised audio declared at " + appRequests +
+          " Hz measures " + buffer.duration.toFixed(3) + " s (must be 1.000)");
+      await pctx.close();
+    } catch (e) {
+      log("PLAYBACK CONTEXT: ERROR " + e.name + ": " + e.message);
+    }
+
     stream.getTracks().forEach(t => t.stop());
     ctx.close();
   } catch (e) {
