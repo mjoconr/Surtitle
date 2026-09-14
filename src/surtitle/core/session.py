@@ -13,6 +13,7 @@ through the loop into any running tool subprocess.
 
 from __future__ import annotations
 
+import array
 import asyncio
 import base64
 import contextlib
@@ -44,6 +45,27 @@ _HISTORY_LIMIT = 40
 # Audio opcodes for binary WebSocket frames.
 _OP_AUDIO_IN = 0x01
 _OP_AUDIO_OUT = 0x02
+
+# Peak amplitude below which a listening session counts as silent. Roughly the
+# noise floor of a muted or unconnected microphone; speech is far above it.
+_SILENCE_PEAK = 0.005
+
+
+def _peak_level(frame: bytes) -> float:
+    """Loudest absolute sample in a PCM16 little-endian frame, as 0..1.
+
+    Uses ``array`` and the built-in ``min``/``max`` so the scan runs at C speed.
+    A malformed odd-length frame is truncated rather than raising; diagnostics must
+    never be the thing that breaks a session.
+    """
+    usable = len(frame) - (len(frame) % 2)
+    if usable <= 0:
+        return 0.0
+    samples = array.array("h")
+    samples.frombytes(frame[:usable])
+    if not samples:
+        return 0.0
+    return max(max(samples), -min(samples)) / 32768.0
 
 
 @dataclass(slots=True)
@@ -82,6 +104,8 @@ class Session:
     # how many times the microphone has been opened.
     _frames_in: int = 0
     _mic_opens: int = 0
+    # Loudest sample (0..1) seen this listening session.
+    _peak_in: float = 0.0
     # True while the agent's own voice is playing, and whether anything has been
     # transcribed since it began. Loudness cannot tell a person from the speakers;
     # a transcript can, and only a transcript may interrupt a turn.
@@ -259,6 +283,10 @@ class Session:
             return
         self._frames_in += 1
         self._audio_seconds += len(frame) / 2 / self.settings.stt_sample_rate
+        # Track the loudest sample seen. Frame counts alone cannot tell a working
+        # microphone from one delivering silence, and that distinction decides
+        # whether a missing transcript is a capture problem or a recognition one.
+        self._peak_in = max(self._peak_in, _peak_level(frame))
         if self.stt is None:
             # Reported once per session: audio arriving with no recogniser means
             # voice is disabled or the key is missing, not that capture failed.
@@ -280,6 +308,7 @@ class Session:
             # toggle describes that attempt rather than the session total.
             self._frames_in = 0
             self._audio_seconds = 0.0
+            self._peak_in = 0.0
             self._mic_opens += 1
             log.info(
                 "microphone opened (#%d); awaiting audio%s",
@@ -287,16 +316,25 @@ class Session:
                 "" if self.stt is not None else " -- but speech recognition is not running",
             )
         else:
+            silent = self._peak_in < _SILENCE_PEAK
             log.info(
-                "microphone closed (#%d); received %d frame(s), %.2fs of audio",
+                "microphone closed (#%d); received %d frame(s), %.2fs of audio, peak %.3f%s",
                 self._mic_opens,
                 self._frames_in,
                 self._audio_seconds,
+                self._peak_in,
+                " -- the browser sent silence" if silent and self._frames_in else "",
             )
             if self._frames_in == 0:
                 log.warning(
                     "no audio arrived for this listening session -- the problem is in "
                     "the browser's capture, not recognition"
+                )
+            elif silent:
+                log.warning(
+                    "all %d frame(s) were silent -- capture is running but delivering no "
+                    "signal, so a missing transcript is a capture problem",
+                    self._frames_in,
                 )
         if self.stt is None:
             return

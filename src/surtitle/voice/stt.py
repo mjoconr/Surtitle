@@ -219,6 +219,11 @@ class SpeechToText:
 
         Dropping is the right failure here: buffering indefinitely would make
         transcription lag the speaker, which is worse than a clipped phoneme.
+
+        Dropping is also the *only* symptom of a stalled sender, so it is logged.
+        A backing-up queue means audio is arriving faster than it is being sent,
+        which means the send half is not running — previously that happened with no
+        output whatsoever, and the recogniser simply stopped producing text.
         """
         if self._stopped.is_set() or not frame:
             return
@@ -226,6 +231,12 @@ class SpeechToText:
             self._queue.put_nowait(frame)
         except asyncio.QueueFull:
             self._dropped_frames += 1
+            if self._dropped_frames == 1 or self._dropped_frames % 200 == 0:
+                log.warning(
+                    "speech audio backing up: %d frame(s) dropped — is the send half "
+                    "of the recognition socket still running?",
+                    self._dropped_frames,
+                )
             with contextlib.suppress(asyncio.QueueEmpty):
                 self._queue.get_nowait()
             with contextlib.suppress(asyncio.QueueFull):
@@ -290,13 +301,31 @@ class SpeechToText:
                 self.settings.stt_api,
                 self.settings.stt_model,
             )
+            self._dropped_frames = 0
             sender = asyncio.create_task(self._send_loop(socket))
+            receiver = asyncio.create_task(self._receive_loop(socket))
             try:
-                await self._receive_loop(socket)
+                # Wait for *either* half, and surface how it ended.
+                #
+                # Awaiting only the receiver was a silent, permanent failure: if
+                # `socket.send()` raised, the sender task died while the receive
+                # loop kept waiting on a socket that was still open — the library's
+                # ping/pong held it up, so nothing raised and nothing reconnected.
+                # Audio queued and was then dropped as the bounded queue filled, so
+                # the recogniser went deaf mid-session with no log line at all: the
+                # frames were counted on arrival and never transcribed, and
+                # toggling the microphone did not help because the dead task was
+                # never replaced.
+                done, _pending = await asyncio.wait(
+                    {sender, receiver}, return_when=asyncio.FIRST_COMPLETED
+                )
+                for task in done:
+                    task.result()
+                raise RuntimeError("speech socket closed")
             finally:
-                sender.cancel()
-                with contextlib.suppress(asyncio.CancelledError, Exception):
-                    await sender
+                for task in (sender, receiver):
+                    task.cancel()
+                await asyncio.gather(sender, receiver, return_exceptions=True)
                 with contextlib.suppress(Exception):
                     await socket.send(json.dumps({"type": "CloseStream"}))
 

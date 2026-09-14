@@ -463,6 +463,115 @@ class TestSendLoopControlMessages:
         assert sent == []
 
 
+class TestTheSenderIsSupervised:
+    """A dead send half must end the connection, not go unnoticed.
+
+    This is the "microphone captures but nothing is transcribed after the first
+    cycle" bug. `_connect_and_pump` awaited only the receive loop, so when
+    `socket.send()` raised, the sender task died while the receive loop kept
+    waiting on a socket that was still open — the library's ping/pong held it up,
+    so nothing raised and nothing reconnected. Queued audio was then dropped as
+    the bounded queue filled, and the recogniser went permanently deaf with no log
+    line at all: frames were counted on arrival and never transcribed, which is
+    exactly what the log showed. Toggling the microphone did not help because the
+    dead task was never replaced.
+    """
+
+    @staticmethod
+    def _service():
+        return SpeechToText(make_settings(stt_api="v2"), on_transcript=lambda event: None)
+
+    @staticmethod
+    def _fake_connect(monkeypatch):
+        class FakeSocket:
+            async def send(self, payload):
+                return None
+
+        class FakeConnect:
+            async def __aenter__(self):
+                return FakeSocket()
+
+            async def __aexit__(self, *exc):
+                return False
+
+        monkeypatch.setattr(
+            "surtitle.voice.stt.websockets.connect", lambda *a, **k: FakeConnect()
+        )
+
+    async def test_a_failing_sender_ends_the_connection(self, monkeypatch):
+        """The failure must propagate so `_run` reconnects."""
+        import asyncio
+
+        service = self._service()
+
+        async def dead_send_loop(_socket):
+            raise RuntimeError("send failed")
+
+        async def never_receives(_socket):
+            # Stands in for a receive loop parked on an open socket.
+            await asyncio.sleep(3600)
+
+        monkeypatch.setattr(service, "_send_loop", dead_send_loop)
+        monkeypatch.setattr(service, "_receive_loop", never_receives)
+        self._fake_connect(monkeypatch)
+
+        with pytest.raises(RuntimeError, match="send failed"):
+            await asyncio.wait_for(service._connect_and_pump(), timeout=5.0)
+
+    async def test_a_dead_receiver_also_ends_the_connection(self, monkeypatch):
+        import asyncio
+
+        service = self._service()
+
+        async def never_sends(_socket):
+            await asyncio.sleep(3600)
+
+        async def dead_receive_loop(_socket):
+            raise RuntimeError("socket closed by peer")
+
+        monkeypatch.setattr(service, "_send_loop", never_sends)
+        monkeypatch.setattr(service, "_receive_loop", dead_receive_loop)
+        self._fake_connect(monkeypatch)
+
+        with pytest.raises(RuntimeError, match="closed by peer"):
+            await asyncio.wait_for(service._connect_and_pump(), timeout=5.0)
+
+    async def test_a_send_loop_that_returns_still_ends_the_connection(self, monkeypatch):
+        """A silently finished sender must not leave a parked receiver either."""
+        import asyncio
+
+        service = self._service()
+
+        async def ends_immediately(_socket):
+            return None
+
+        async def never_receives(_socket):
+            await asyncio.sleep(3600)
+
+        monkeypatch.setattr(service, "_send_loop", ends_immediately)
+        monkeypatch.setattr(service, "_receive_loop", never_receives)
+        self._fake_connect(monkeypatch)
+
+        with pytest.raises(RuntimeError, match="socket closed"):
+            await asyncio.wait_for(service._connect_and_pump(), timeout=5.0)
+
+
+class TestStalledSenderIsVisible:
+    """A backing-up queue is the only symptom of a stalled sender."""
+
+    async def test_dropping_frames_is_logged(self, caplog):
+        from surtitle.voice.stt import _QUEUE_MAX
+
+        service = SpeechToText(make_settings(stt_api="v2"), on_transcript=lambda event: None)
+
+        with caplog.at_level("WARNING"):
+            for _ in range(_QUEUE_MAX + 3):
+                service.push_audio(b"\x00\x01")
+
+        assert service._dropped_frames == 3
+        assert "backing up" in caplog.text, "a stalled sender must not be silent"
+
+
 class TestFluxResponseHandling:
     """Parsing against payloads captured from the live Flux endpoint.
 

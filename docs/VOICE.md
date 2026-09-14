@@ -387,10 +387,43 @@ one utterance cannot fire several barge-ins in a row.
 | Failure | Behaviour |
 |---|---|
 | STT socket drops | Reconnect with capped backoff (0.5s → 8s); a notice is surfaced, the session continues. |
+| STT send half fails | Treated as a dropped socket, so it reconnects. See below. |
 | TTS socket drops | Reconnect with backoff and re-queue the sentence once, so it is not silently lost. |
 | TTS unavailable | The turn still completes and the transcript is complete; only audio is missing. |
 | Microphone denied | Text-only mode; the error explains that typing still works. |
 | No Deepgram key | Voice disabled at startup; the mic button is disabled. |
+
+### Why a dead send half used to be permanent
+
+`_connect_and_pump` awaited **only** the receive loop. If `socket.send()` raised,
+the sender task died while the receive loop kept waiting on a socket that was
+still open — the library's ping/pong held it up, so nothing raised and nothing
+reconnected.
+
+The result was the worst kind of failure: audio kept arriving and being queued,
+the bounded queue filled, and frames were dropped. The recogniser went deaf for the
+rest of the session **with no log line at all**. The symptom was "the microphone is
+listening, the first question worked, and nothing is transcribed after that" —
+and toggling the microphone did not help, because the dead task was never replaced.
+
+Both halves are now waited on together and whichever ends is surfaced, so the
+failure reaches the reconnect path. A backing-up queue is also logged, because
+dropped frames are the only visible sign of a stalled sender.
+
+### Attributing a missing transcript
+
+A frame count cannot tell a working microphone from one delivering silence, and
+that distinction decides which layer to investigate. Each listening session now
+reports the **peak amplitude** it received:
+
+```
+microphone closed (#2); received 1348 frame(s), 43.14s of audio, peak 0.000 -- the browser sent silence
+microphone closed (#3); received  109 frame(s),  3.49s of audio, peak 0.712
+```
+
+The second line means capture is fine and the audio reached recognition; the first
+means the browser delivered nothing but zeros, so the fault is in capture. Sessions
+with silence are logged as a warning naming capture as the cause.
 
 ## Tuning
 
