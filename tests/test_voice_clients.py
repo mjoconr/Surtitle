@@ -14,6 +14,7 @@ a bogus key still reveals parameter validation (400 = bad parameters,
 
 from __future__ import annotations
 
+import contextlib
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -242,3 +243,229 @@ class TestSharedUrlBuilders:
             urlparse(speak_url(make_settings(tts_speed=1.25), speed_supported=False)).query
         )
         assert "speed" not in params
+
+
+class TestSendLoopControlMessages:
+    """Only audio may be sent on the live socket during a session.
+
+    Regression test for a connect/disconnect loop: the send loop used to emit a
+    keep-alive during quiet stretches. Nova accepts that message; Flux rejects it
+    and closes the connection, with
+
+        unknown variant `KeepAlive`, expected one of
+        `CloseStream`, `ForceEndTurn`, `Configure`
+
+    Because the helper loops roughly once a second while idle, the result was a
+    reconnect every second. The safe keep-alive is silence.
+    """
+
+    @staticmethod
+    def _service():
+        settings = make_settings(stt_api="v2")
+        return SpeechToText(settings, on_transcript=lambda event: None)
+
+    async def test_idle_send_loop_emits_no_control_messages(self):
+        import asyncio
+        import json as jsonlib
+
+        service = self._service()
+        sent: list[bytes | str] = []
+
+        class FakeSocket:
+            async def send(self, payload):
+                sent.append(payload)
+
+        # One audio frame so we can prove forwarding still works...
+        service._queue.put_nowait(b"\x01\x02\x03")
+        task = asyncio.create_task(service._send_loop(FakeSocket()))
+
+        # ...then sit idle past the internal timeout, which is where the
+        # keep-alive used to be sent.
+        await asyncio.sleep(1.4)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+        assert sent, "the audio frame was not forwarded"
+        assert sent == [b"\x01\x02\x03"], f"unexpected frames sent: {sent!r}"
+
+        control = [item for item in sent if not isinstance(item, (bytes, bytearray))]
+        assert control == [], f"control messages must not be sent mid-session: {control}"
+        for item in sent:
+            if isinstance(item, str):
+                assert jsonlib.loads(item).get("type") != "KeepAlive"
+
+    async def test_audio_frames_are_forwarded_verbatim(self):
+        import asyncio
+
+        service = self._service()
+        sent: list[bytes | str] = []
+
+        class FakeSocket:
+            async def send(self, payload):
+                sent.append(payload)
+
+        frames = [b"first-frame", b"second-frame"]
+        for frame in frames:
+            service._queue.put_nowait(frame)
+
+        task = asyncio.create_task(service._send_loop(FakeSocket()))
+        await asyncio.sleep(0.2)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+        assert sent == frames
+
+    async def test_a_none_sentinel_ends_the_send_loop(self):
+        import asyncio
+
+        service = self._service()
+        sent: list[bytes | str] = []
+
+        class FakeSocket:
+            async def send(self, payload):
+                sent.append(payload)
+
+        service._queue.put_nowait(None)
+        await asyncio.wait_for(service._send_loop(FakeSocket()), timeout=2.0)
+        assert sent == []
+
+
+class TestFluxResponseHandling:
+    """Parsing against payloads captured from the live Flux endpoint.
+
+    The schema was unknown when this was written, so it was guessed defensively.
+    These fixtures are the real thing, recorded from a live socket streaming
+    silence at 16 kHz:
+
+        {"type": "TurnInfo", "event": "Update", "turn_index": 0,
+         "audio_window_start": 0.0, "audio_window_end": 0.24,
+         "transcript": "", "words": [],
+         "end_of_turn_confidence": 0.0044, "sequence_id": 1}
+
+    Note there is no Nova-style ``channel.alternatives`` envelope: the transcript
+    is a top-level field.
+    """
+
+    @staticmethod
+    def _collector():
+        captured: list = []
+
+        async def on_transcript(event):
+            captured.append(event)
+
+        settings = make_settings(stt_api="v2")
+        return SpeechToText(settings, on_transcript=on_transcript), captured
+
+    def _live_silence_payload(self) -> dict:
+        """Verbatim from the endpoint, including the empty transcript."""
+        return {
+            "type": "TurnInfo",
+            "request_id": "01a09f13-7ad6-71f0-a672-c9fd3861d18a",
+            "event": "Update",
+            "turn_index": 0,
+            "audio_window_start": 0.0,
+            "audio_window_end": 0.24,
+            "transcript": "",
+            "words": [],
+            "end_of_turn_confidence": 0.0044,
+            "sequence_id": 1,
+        }
+
+    async def test_silence_update_produces_no_caption(self):
+        service, captured = self._collector()
+        await service._handle_flux_turn(self._live_silence_payload())
+        assert captured == [], "an empty transcript must not become a caption"
+
+    async def test_in_progress_text_becomes_a_live_caption(self):
+        service, captured = self._collector()
+        await service._handle_flux_turn(
+            {
+                "type": "TurnInfo",
+                "event": "Update",
+                "turn_index": 0,
+                "transcript": "what is the through",
+                "words": [],
+                "end_of_turn_confidence": 0.42,
+            }
+        )
+        assert len(captured) == 1
+        assert captured[0].text == "what is the through"
+        assert captured[0].final is False
+        assert captured[0].is_end_of_turn is False
+
+    async def test_end_of_turn_starts_the_turn(self):
+        service, captured = self._collector()
+        await service._handle_flux_turn(
+            {
+                "type": "TurnInfo",
+                "event": "EndOfTurn",
+                "turn_index": 0,
+                "transcript": "what is the throughput of the line",
+                "words": [],
+                "end_of_turn_confidence": 0.91,
+            }
+        )
+        assert len(captured) == 1
+        event = captured[0]
+        assert event.text == "what is the throughput of the line"
+        assert event.final is True
+        assert event.is_end_of_turn is True
+        # end_of_turn_confidence is the meaningful figure on Flux.
+        assert event.confidence == pytest.approx(0.91)
+
+    async def test_end_of_turn_with_no_text_is_still_a_boundary(self):
+        service, captured = self._collector()
+        await service._handle_flux_turn(
+            {
+                "type": "TurnInfo",
+                "event": "EndOfTurn",
+                "transcript": "",
+                "words": [],
+                "end_of_turn_confidence": 0.9,
+            }
+        )
+        assert len(captured) == 1
+        assert captured[0].text == ""
+        assert captured[0].is_end_of_turn is True
+
+    async def test_playback_suppression_drops_flux_transcripts(self):
+        """The agent must not transcribe its own voice through Flux either."""
+        service, captured = self._collector()
+        service.set_suppression(True)
+        await service._handle_flux_turn(
+            {
+                "type": "TurnInfo",
+                "event": "Update",
+                "transcript": "the agent hearing itself",
+                "words": [],
+            }
+        )
+        assert captured == []
+
+    async def test_words_only_payload_is_rebuilt(self):
+        """Some revisions carry words without a transcript field."""
+        service, captured = self._collector()
+        await service._handle_flux_turn(
+            {
+                "type": "TurnInfo",
+                "event": "Update",
+                "words": [{"word": "hello"}, {"word": "there"}],
+            }
+        )
+        assert captured and captured[0].text == "hello there"
+
+    async def test_the_confirmed_shape_is_not_mistaken_for_nova(self):
+        """TurnInfo has no channel envelope, so it must route to the Flux handler."""
+        from surtitle.voice.stt import _looks_like_flux_turn, _looks_like_nova_results
+
+        payload = self._live_silence_payload()
+        assert _looks_like_nova_results(payload) is False
+        assert _looks_like_flux_turn(payload) is True
+
+    async def test_turn_info_type_is_routed_by_the_receive_loop(self):
+        """The dispatcher must recognise `TurnInfo`, the type the service sends."""
+        from surtitle.voice.stt import _FLUX_TURN_TYPES
+
+        assert "TurnInfo" in _FLUX_TURN_TYPES

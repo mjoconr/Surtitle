@@ -61,6 +61,11 @@ _END_OF_TURN_TYPES = frozenset(
 # _looks_like_flux_turn for the shape-based fallback.
 _FLUX_TURN_TYPES = frozenset({"TurnInfo", "turn_info", "Turn", "transcript"})
 
+# Flux lifecycle events that mean the speaker has finished. Confirmed shape uses
+# "Update" while talking; "EndOfTurn" closes the turn. Normalised: lowercase, no
+# underscores.
+_FLUX_END_EVENTS = frozenset({"endofturn", "end", "turnended", "endofspeech"})
+
 # Fields whose presence indicates a turn-shaped payload regardless of its
 # declared type, so a renamed event still produces captions and turn boundaries.
 _FLUX_MARKER_FIELDS = ("transcript", "words", "end_of_turn", "turn_event")
@@ -296,14 +301,26 @@ class SpeechToText:
                     await socket.send(json.dumps({"type": "CloseStream"}))
 
     async def _send_loop(self, socket: Any) -> None:
-        """Forward queued audio until stopped."""
+        """Forward queued audio until stopped.
+
+        Nothing is sent during quiet stretches. A keep-alive message would be the
+        obvious way to hold the socket open, but the two backends disagree about
+        it: Nova accepts ``KeepAlive`` while Flux rejects it outright, closing the
+        connection with
+
+            unknown variant `KeepAlive`, expected one of
+            `CloseStream`, `ForceEndTurn`, `Configure`
+
+        which produced a connect/disconnect loop roughly once a second. Silence is
+        the safe keep-alive: the microphone is open continuously, so audio frames
+        keep flowing and the socket stays healthy on both backends. The websockets
+        ping/pong (see ``ping_interval``) covers true liveness.
+        """
         while not self._stopped.is_set():
             try:
                 frame = await asyncio.wait_for(self._queue.get(), timeout=1.0)
             except TimeoutError:
-                # Keep the socket warm during quiet stretches.
-                with contextlib.suppress(Exception):
-                    await socket.send(json.dumps({"type": "KeepAlive"}))
+                # Deliberately idle; no control message is portable across backends.
                 continue
             if frame is None:
                 return
@@ -390,10 +407,16 @@ class SpeechToText:
     async def _handle_flux_turn(self, payload: dict[str, Any]) -> None:
         """Handle a Flux turn update.
 
-        Flux reports the in-progress transcript and, separately, when the turn
-        has ended. Field names are read defensively and fall back across the
-        plausible spellings so a schema revision degrades to "captions keep
-        working" instead of an exception.
+        The real message shape, captured from the live endpoint::
+
+            {"type": "TurnInfo", "event": "Update", "turn_index": 0,
+             "transcript": "…", "words": [...],
+             "end_of_turn_confidence": 0.0044, "sequence_id": 1}
+
+        ``event`` distinguishes the lifecycle stage, and ``EndOfTurn`` is what
+        starts the agent's turn. Field access stays defensive because this
+        vocabulary has changed between revisions, and a rename should degrade to
+        "captions keep working" rather than dropping every transcript.
         """
         text = _first_string(payload, "transcript", "text")
         if text is None:
@@ -401,18 +424,23 @@ class SpeechToText:
 
         event_type = _first_string(payload, "event", "turn_event", "reason") or ""
         end_reason = _first_string(payload, "end_of_turn_reason", "turn_end_reason") or ""
-        confidence = _first_float(payload, "confidence", "avg_confidence") or 0.0
+        normalised = str(event_type).lower().replace("_", "")
 
         is_end = (
             bool(payload.get("end_of_turn"))
             or bool(payload.get("is_end_of_turn"))
-            or str(event_type).lower().replace("_", "") in {"endofturn", "end"}
+            or normalised in _FLUX_END_EVENTS
             or str(end_reason).lower() not in {"", "none"}
         )
 
+        # On Flux the useful confidence is end-of-turn confidence: how sure the
+        # model is that the speaker has finished. Nova's alternative confidence is
+        # a different quantity and is not present here.
+        confidence = _first_float(payload, "end_of_turn_confidence", "confidence") or 0.0
+
         if not text:
-            # An end-of-turn with no text is still a valid boundary: the user
-            # may have said something that produced no transcript.
+            # An end-of-turn with no text is still a valid boundary: the speaker
+            # may have produced nothing transcribable.
             if is_end and not self._suppress_finals:
                 await self._on_transcript(TranscriptEvent(text="", final=True, is_end_of_turn=True))
             return

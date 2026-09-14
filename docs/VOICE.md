@@ -62,10 +62,40 @@ must be that you have finished; higher waits longer) and
 **`v1` — Nova** with `endpointing`. Kept as a fallback for accounts or regions where
 Flux is unavailable, and useful when you want to tune the silence threshold directly.
 
-The receive loop parses defensively. An exact `type` match is tried first, and any
-payload carrying turn-shaped fields (`transcript`, `words`, `end_of_turn`) is routed
-to the turn handler as well. A renamed server event therefore degrades to "captions
-still work" instead of silently dropping every transcript.
+### The Flux response shape
+
+Confirmed by capturing a live socket streaming silence at 16 kHz. There is **no
+Nova-style `channel.alternatives` envelope** — the transcript is a top-level field:
+
+```json
+{"type": "TurnInfo", "event": "Update", "turn_index": 0,
+ "audio_window_start": 0.0, "audio_window_end": 0.24,
+ "transcript": "what is the throughput of the line", "words": [...],
+ "end_of_turn_confidence": 0.91, "sequence_id": 1}
+```
+
+- `event: "Update"` carries an in-progress transcript — this drives the live
+  captions.
+- `event: "EndOfTurn"` closes the turn and starts the agent's turn.
+- A **zero-length transcript with `Update` is normal** while the channel is open
+  (it was every message during silence). It must be ignored rather than treated as
+  an empty utterance, or the agent would respond to nothing.
+- `end_of_turn_confidence` is how sure the model is that you have finished. It is
+  *not* the same quantity as Nova's transcript confidence, so it is what gets
+  surfaced as the confidence figure on the Flux path.
+- Valid client control messages are only `CloseStream`, `ForceEndTurn` and
+  `Configure`. `KeepAlive` is accepted by Nova and **rejected by Flux**, which
+  closes the connection — that caused a reconnect every second. The send loop
+  therefore sends nothing while idle; an open microphone keeps the socket alive by
+  streaming audio.
+
+The receive loop still parses defensively: an exact `type` match is tried first, then
+any payload carrying turn-shaped fields (`transcript`, `words`, `end_of_turn`) is
+routed to the turn handler, and finally the Nova envelope. A renamed server event
+therefore degrades to "captions still work" instead of dropping every transcript.
+
+The tests for this use payloads captured verbatim from the live endpoint rather than
+invented ones, in `tests/test_voice_clients.py`.
 
 ### Echo control
 
