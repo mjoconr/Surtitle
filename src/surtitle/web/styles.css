@@ -599,6 +599,16 @@ button, input, textarea, select {
 
 .captions__hint { color: var(--dsw-alias-label-caption); }
 
+/* A capture problem must not look like a caption: it needs to be acted on. */
+.captions__problem {
+  color: var(--dsw-alias-state-warn-label);
+  background: var(--dsw-alias-state-warn-tertiary);
+  border-radius: 8px;
+  padding: 4px 10px;
+  display: inline-block;
+  font-size: 13px;
+}
+
 .state {
   display: inline-flex;
   align-items: center;

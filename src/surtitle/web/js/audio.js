@@ -38,7 +38,7 @@ export class Capture {
   }
 
   async start() {
-    if (this.active) return true;
+    if (this.active) return { running: true };
 
     this.stream = await navigator.mediaDevices.getUserMedia({
       audio: {
@@ -51,9 +51,29 @@ export class Capture {
       },
     });
 
-    this.context = new AudioContext();
+    // One context per page, reused across mic toggles. Creating a fresh context
+    // each time eventually hits the browser's per-page AudioContext limit and
+    // then fails outright.
+    if (!this.context) {
+      this.context = new AudioContext();
+      this.moduleLoaded = this.context.audioWorklet.addModule(WORKLET_URL);
+    }
+
+    // An AudioContext created outside a user gesture starts suspended, and a
+    // suspended context never runs the worklet — so nothing is captured and the
+    // level meter never moves. That looks exactly like a muted microphone.
+    // Resume first, and report the state so the caller can tell the user.
+    if (this.context.state === "suspended") {
+      await this.context.resume().catch(() => {});
+    }
     // Deepgram expects 16 kHz linear16; the worklet resamples to it.
-    await this.context.audioWorklet.addModule(WORKLET_URL);
+    await this.moduleLoaded;
+
+    // The awaited module load can outlive the activation that started it, so
+    // check again once the worklet is ready.
+    if (this.context.state === "suspended") {
+      await this.context.resume().catch(() => {});
+    }
 
     this.source = this.context.createMediaStreamSource(this.stream);
     this.node = new AudioWorkletNode(this.context, "capture-processor", {
@@ -64,17 +84,36 @@ export class Capture {
     this.node.port.onmessage = (event) => this._handle(event.data);
     this.source.connect(this.node);
 
+    // Count what actually arrives, so "the microphone is open" can be told apart
+    // from "audio is reaching the application".
+    this.framesReceived = 0;
+    this.maxLevel = 0;
+
     this.active = true;
     this.setMuted(false);
-    return true;
+    return { running: this.context.state === "running" };
+  }
+
+  /** Diagnostics for the caller after opening the microphone. */
+  get status() {
+    return {
+      running: Boolean(this.context && this.context.state === "running"),
+      framesReceived: this.framesReceived,
+      maxLevel: this.maxLevel,
+      // True when the worklet has never produced a buffer, which means capture is
+      // not running at all rather than the room merely being quiet.
+      silent: this.framesReceived === 0,
+    };
   }
 
   _handle(message) {
     if (!message) return;
-    if (message.type === "audio" && this.onAudio) {
-      this.onAudio(new Uint8Array(message.buffer));
-    } else if (message.type === "level" && this.onLevel) {
-      this.onLevel(message.value);
+    if (message.type === "audio") {
+      this.framesReceived = (this.framesReceived || 0) + 1;
+      if (this.onAudio) this.onAudio(new Uint8Array(message.buffer));
+    } else if (message.type === "level") {
+      this.maxLevel = Math.max(this.maxLevel || 0, message.value || 0);
+      if (this.onLevel) this.onLevel(message.value);
     } else if (message.type === "speech-start" && this.onSpeechStart) {
       this.onSpeechStart();
     }
@@ -104,9 +143,17 @@ export class Capture {
       for (const track of this.stream.getTracks()) track.stop();
       this.stream = null;
     }
+    // The context is intentionally left open: it is reused on the next start, and
+    // closing it here is what previously forced a new one per toggle.
+  }
+
+  /** Release the capture context entirely. Only for page teardown. */
+  async dispose() {
+    await this.stop();
     if (this.context) {
       await this.context.close().catch(() => {});
       this.context = null;
+      this.moduleLoaded = null;
     }
   }
 }

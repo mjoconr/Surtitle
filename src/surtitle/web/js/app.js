@@ -693,7 +693,7 @@ async function toggleMic() {
       );
     }
 
-    await capture.start();
+    const captureState = await capture.start();
     state.micOpen = true;
     el.micButton.dataset.active = "true";
     el.micButton.setAttribute("aria-pressed", "true");
@@ -702,6 +702,34 @@ async function toggleMic() {
     setAgentState("listening");
     el.captions.replaceChildren();
     el.captions.append(node("span", "captions__hint", "Listening…"));
+
+    // Distinguish "the microphone is open" from "audio is reaching the app".
+    // Without this the two look identical, and a silently suspended audio context
+    // is indistinguishable from a mute microphone.
+    if (!captureState || captureState.running === false) {
+      toast(
+        "The browser is not running audio capture. Click anywhere on the page, then toggle the mic again.",
+        "error",
+      );
+    }
+    window.setTimeout(() => {
+      if (!state.micOpen) return;
+      const status = capture.status;
+      let problem = null;
+      if (status.silent) {
+        problem =
+          "No audio is reaching the app. Check the browser's microphone permission, " +
+          "then the input device in macOS System Settings → Sound.";
+      } else if (status.maxLevel < 0.01) {
+        problem = "Your microphone is connected but the signal is silent. Raise the input level.";
+      }
+      if (problem) {
+        // Shown in the caption band as well as a toast: that is where the user is
+        // already looking, and it persists instead of disappearing.
+        el.captions.replaceChildren(node("span", "captions__problem", problem));
+        toast(problem, "error");
+      }
+    }, 3500);
   } catch (error) {
     // A denied microphone must not block the text-only path.
     toast(
@@ -969,7 +997,7 @@ async function main() {
 
 window.addEventListener("beforeunload", () => {
   connection.close();
-  capture.stop().catch(() => {});
+  capture.dispose().catch(() => {});
   playback.close().catch(() => {});
 });
 
