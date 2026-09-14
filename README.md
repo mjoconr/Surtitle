@@ -133,15 +133,27 @@ Priming is layered, and you can add to it without touching code:
 | **Work memory** | Each turn records `[work this turn]`, so the agent can see what it already read or ran |
 | **Project instructions** | `AGENTS.md`, `CLAUDE.md`, `.cursorrules`, `CONTRIBUTING.md`, and `instructions` in `.surtitle.json` — loaded automatically every turn |
 | **Project notebook** | `.surtitle/notes.md`, written by the agent's own `remember` tool and injected into every future session |
+| **Conversation search** | SQLite FTS5 over every stored message, via the `search_history` tool — finds what the notebook did not record |
 | Project briefing | The working directory and its top-level entries |
 
-The notebook is the important one for recurring work: it is how knowledge
-accumulates across conversations instead of each new chat re-deriving everything.
-The agent records conclusions — which machine is down, where a command lives, what
-a term means — and sees them again next time.
+The notebook is how knowledge accumulates across conversations instead of each new
+chat re-deriving everything: the agent records conclusions — which machine is down,
+where a command lives, what a term means — and sees them again next time.
 
-Editing `AGENTS.md` mid-session takes effect on the very next turn. Both are
-capped, so neither can crowd out the conversation.
+Two layers, deliberately: the **notebook** holds what the agent chose to write down,
+and **search** finds what it did not. Searching is a tool call rather than an
+automatic context injection, so it costs nothing until it is useful, and the current
+session is excluded so the agent is not handed its own last utterance as memory.
+
+Documents are read from the project root **and** `docs/`, because a project that
+keeps its orientation material there was otherwise invisible — including the file
+that documented how to reach its own systems. Only the routing layer (typically
+`AGENTS.md` plus safety rules) is kept resident; the rest is named so the agent
+reads what it needs. A document too large to show honestly is named rather than
+truncated, since a fragment reads as the whole thing.
+
+Editing `AGENTS.md` mid-session takes effect on the very next turn. Everything is
+capped, so nothing can crowd out the conversation.
 
 ### Attachments
 

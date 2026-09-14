@@ -114,26 +114,40 @@ class TestApprovalMemory:
         assert config.requirements == ["six"]
 
 
-class TestVersionedEnvironment:
-    async def test_creating_an_environment_yields_an_interpreter(self, tmp_path):
-        python = await ensure_venv(tmp_path)
-        assert python.is_file()
-        assert project_env_python(tmp_path) == python
-        assert python.parent.parent == venv_dir(tmp_path)
+@pytest.fixture(scope="class")
+def shared_project(tmp_path_factory):
+    """A project whose environment is built once for the whole class.
 
-    async def test_creating_twice_reuses_the_same_environment(self, tmp_path):
-        first = await ensure_venv(tmp_path)
-        second = await ensure_venv(tmp_path)
+    Creating a virtual environment costs seconds, and several tests here only need
+    *an* environment rather than a fresh one. ``ensure_venv`` is idempotent, so this
+    builds it a single time on its own event loop and every test in the class
+    reuses it. Tests that must start from nothing take their own ``tmp_path``.
+    """
+    project = tmp_path_factory.mktemp("shared-env")
+    asyncio.run(ensure_venv(project))
+    return project
+
+
+class TestVersionedEnvironment:
+    async def test_creating_an_environment_yields_an_interpreter(self, shared_project):
+        python = await ensure_venv(shared_project)
+        assert python.is_file()
+        assert project_env_python(shared_project) == python
+        assert python.parent.parent == venv_dir(shared_project)
+
+    async def test_creating_twice_reuses_the_same_environment(self, shared_project):
+        first = await ensure_venv(shared_project)
+        second = await ensure_venv(shared_project)
         assert first == second
 
-    async def test_the_environment_is_isolated_from_the_application(self, tmp_path):
+    async def test_the_environment_is_isolated_from_the_application(self, shared_project):
         """The project interpreter must not be the application's interpreter."""
-        python = await ensure_venv(tmp_path)
+        python = await ensure_venv(shared_project)
         app_prefix = Path(sys.prefix).resolve()
         project_prefix = python.parent.parent.resolve()
         assert project_prefix != app_prefix
         # And it lives inside the project, so deleting the project removes it.
-        assert tmp_path.resolve() in project_prefix.parents
+        assert shared_project.resolve() in project_prefix.parents
 
     async def test_status_before_any_environment(self, tmp_path):
         status = await environment.project_env_status(tmp_path)
@@ -141,9 +155,8 @@ class TestVersionedEnvironment:
         assert status.python is None
         assert status.package_count == 0
 
-    async def test_status_after_creating_an_environment(self, tmp_path):
-        await ensure_venv(tmp_path)
-        status = await environment.project_env_status(tmp_path)
+    async def test_status_after_creating_an_environment(self, shared_project):
+        status = await environment.project_env_status(shared_project)
         assert status.exists is True
         payload = status.to_dict()
         assert payload["isolated"] is True
