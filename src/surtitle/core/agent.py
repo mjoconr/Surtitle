@@ -93,6 +93,38 @@ Example of a good turn:
 
 ## How to work
 
+**Check what you already did before doing it again.** Your previous turns are in
+the conversation, and each one records the work it performed under
+`[work this turn]`. If a file has already been read or a command already run,
+use that result. Re-reading the same files and re-running the same commands every
+turn wastes the user's time and money, and it is the single most common way to be
+useless here.
+
+**Say what you know, and mark what you are assuming.** Before answering, be clear
+with yourself which of these is true:
+
+- You read it in a file this session, or saw it in a command output.
+- Someone told you, in a file or from the user.
+- You are inferring it.
+
+Only the first is established. When you answer from inference, say so — "I have
+not confirmed this, but ..." — and offer to check. Guessing at the state of a
+machine, then stating it as fact, is worse than saying you do not know yet.
+
+**Work in an order, and say what it is.** For anything beyond a single lookup:
+
+1. Understand the question well enough to know what evidence would answer it.
+2. Find that evidence — the specific file, command or tool that carries it.
+3. Read the evidence before drawing a conclusion.
+4. Answer, and name what you based it on.
+
+Do not narrate this as a plan and then skip it. Two or three tool calls that
+establish the facts beat ten that circle around them.
+
+**Do not re-derive what is already established.** If earlier in this conversation
+you found that a machine is down, or a value, or where a file lives, carry that
+forward rather than rediscovering it.
+
 - Read the relevant files before answering questions about them. Do not guess
   at the contents of a document you have not opened.
 - Prefer the dedicated tools over writing code: make_pdf, make_spreadsheet and
@@ -223,6 +255,11 @@ class _TurnState:
     step: int = 0
     assistant_text: list[str] = field(default_factory=list)
     spoken_text: list[str] = field(default_factory=list)
+    # One line per tool call, so the transcript records the work as well as the
+    # answer. Without this the model rebuilds history from bare prose, cannot see
+    # that it already read a file or ran a command, and re-does everything on every
+    # turn — which is exactly what happened in practice.
+    actions: list[str] = field(default_factory=list)
 
 
 class AgentLoop:
@@ -356,7 +393,7 @@ class AgentLoop:
                     self.store.add_message(
                         self.session_id,
                         "assistant",
-                        "".join(state.assistant_text),
+                        _with_actions("".join(state.assistant_text), state.actions),
                         spoken=" ".join(state.spoken_text) or None,
                     )
                 yield self._event(EventKind.DONE, steps=state.step)
@@ -553,6 +590,7 @@ class AgentLoop:
                         display=f"{call.name} declined",
                     )
                     state.messages.append(self._tool_message(call, result))
+                    state.actions.append(f"{call.name} — declined by the user")
                     yield self._event(
                         EventKind.TOOL_RESULT,
                         call_id=self._call_id(call),
@@ -599,6 +637,7 @@ class AgentLoop:
                 )
 
             state.messages.append(self._tool_message(call, result))
+            state.actions.append(_action_line(call.name, arguments, result))
 
             yield self._event(
                 EventKind.TOOL_RESULT,
@@ -658,6 +697,47 @@ def _title_from(user_text: str, *, limit: int = 60) -> str:
     # Prefer cutting at a word boundary so the title does not end mid-word.
     truncated = cleaned[:limit].rsplit(" ", 1)[0]
     return f"{truncated or cleaned[:limit]}…"
+
+
+def _action_line(name: str, arguments: dict[str, Any], result: ToolResult) -> str:
+    """One compact line describing a tool call, for the persisted transcript.
+
+    Deliberately terse: it is replayed into the model's context on every later
+    turn, so it has to earn its tokens. The value is that the model can see it has
+    *already* looked somewhere or run something, which is what stops it repeating
+    the same reads and commands turn after turn.
+    """
+    target = ""
+    for key in ("path", "pattern", "command", "source"):
+        value = arguments.get(key)
+        if isinstance(value, str) and value.strip():
+            target = " ".join(value.split())
+            break
+    if len(target) > 100:
+        target = f"{target[:100]}…"
+
+    status = result.display or ("ok" if result.ok else (result.error or "failed"))
+    status = " ".join(str(status).split())
+    if len(status) > 100:
+        status = f"{status[:100]}…"
+
+    if not result.ok:
+        status = f"FAILED: {status}"
+    return f"{name}({target}) -> {status}" if target else f"{name} -> {status}"
+
+
+def _with_actions(text: str, actions: list[str]) -> str:
+    """Append the turn's tool activity to its answer.
+
+    Stored with the answer rather than as separate messages because it is context
+    for the model, not a conversational turn: the transcript should read as
+    work-then-answer, and this is what the model sees when history is rebuilt.
+    """
+    if not actions:
+        return text
+    listing = "\n".join(f"- {action}" for action in actions)
+    block = f"[work this turn]\n{listing}"
+    return f"{text}\n\n{block}" if text.strip() else block
 
 
 def _redact_arguments(arguments: dict[str, Any]) -> dict[str, Any]:

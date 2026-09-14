@@ -41,6 +41,7 @@ from surtitle.tools.project_config import (
 
 __all__ = [
     "ENV_DIR_NAME",
+    "NOTES_FILENAME",
     "EnvironmentError_",
     "EnvironmentStatus",
     "PackageSearchResult",
@@ -49,7 +50,10 @@ __all__ = [
     "list_installed",
     "project_env_python",
     "project_env_status",
+    "project_notes",
+    "read_notes",
     "search_pypi",
+    "write_notes",
 ]
 
 log = logging.getLogger(__name__)
@@ -375,6 +379,64 @@ def environment_summary(root: Path) -> dict[str, object]:
         "approved": approved_requirements(root),
         "package_count": packages,
     }
+
+
+# A notebook the agent keeps about the project, and that is injected into its
+# system prompt on every turn. Without somewhere durable to write, every session
+# starts from zero and knowledge like "this machine is down" cannot accumulate.
+NOTES_FILENAME = "notes.md"
+NOTES_MAX_CHARS = 8000
+
+
+def notes_path(root: Path) -> Path:
+    """Where the project notebook lives."""
+    return env_dir(root) / NOTES_FILENAME
+
+
+def read_notes(root: Path) -> str:
+    """Current notebook contents, or an empty string."""
+    path = notes_path(root)
+    if not path.is_file():
+        return ""
+    try:
+        return path.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return ""
+
+
+def project_notes(root: Path) -> str:
+    """The notebook, capped so it cannot crowd out the conversation.
+
+    Truncation keeps the *newest* content, because a notebook grows by appending
+    and the most recent findings are the ones most likely to matter.
+    """
+    text = read_notes(root)
+    if len(text) <= NOTES_MAX_CHARS:
+        return text
+    return "... [earlier notes elided]\n" + text[-NOTES_MAX_CHARS:]
+
+
+def write_notes(root: Path, text: str, *, append: bool = True) -> tuple[bool, str]:
+    """Write or append to the notebook.
+
+    Returns ``(ok, message)``. Appending is the default because the value of a
+    notebook is accumulation; replacing it is a deliberate act.
+    """
+    path = notes_path(root)
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return False, "There is nothing to record."
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if append and path.is_file():
+            existing = path.read_text(encoding="utf-8", errors="replace").rstrip()
+            payload = f"{existing}\n{cleaned}\n" if existing else f"{cleaned}\n"
+        else:
+            payload = f"{cleaned}\n"
+        path.write_text(payload, encoding="utf-8")
+    except OSError as exc:
+        return False, f"Could not write the project notebook: {exc}"
+    return True, ""
 
 
 async def project_env_status(root: Path) -> EnvironmentStatus:

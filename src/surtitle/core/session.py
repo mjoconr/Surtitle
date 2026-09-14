@@ -379,6 +379,7 @@ class Session:
             approvals=self.approvals,
             client=self.deepseek,
             registry=self.registry,
+            system_prompt=self._system_prompt(),
         )
         loop.set_emitter(self._emit_side_channel)
 
@@ -420,6 +421,99 @@ class Session:
             # session, and clearing them here is what made a failed second attempt
             # look identical to a failed first one.
             pass
+
+    # Instructions a project already documents, read once per session.
+    # Conventional locations, in the order a human would consult them.
+    _INSTRUCTION_FILES = (
+        "AGENTS.md",
+        "CLAUDE.md",
+        ".cursorrules",
+        "CONTRIBUTING.md",
+    )
+    _INSTRUCTION_MAX_CHARS = 6000
+
+    def _system_prompt(self) -> str:
+        """Build the system prompt, including the project's own instructions.
+
+        A project that documents how to work in it — AGENTS.md, a current-state
+        note, a house style — should not have to hope the agent thinks to read it.
+        Loading it up front means the agent starts primed with the project's own
+        conventions instead of discovering them by trial and error, and it makes
+        those files a supported way to steer the agent.
+
+        Deliberately capped: these are instructions, not documents to reason over,
+        and an unbounded file would crowd out the conversation.
+        """
+        from surtitle.core.agent import build_system_prompt
+
+        prompt = build_system_prompt(self.root.name)
+        sections: list[str] = []
+
+        # The project notebook: durable facts the agent recorded in earlier
+        # sessions. This is what lets knowledge accumulate across conversations
+        # instead of every chat re-deriving the same things.
+        from surtitle.tools.environment import project_notes
+
+        notes = project_notes(self.root)
+        if notes:
+            sections.append(
+                "## Project notebook\n"
+                "Facts recorded in earlier sessions. Treat these as established "
+                "unless they conflict with something you observe now; if a note is "
+                "wrong, correct it with the remember tool.\n\n" + notes
+            )
+
+        # A one-line brief on the project itself, so the agent is not blind for the
+        # first turn. Capped hard: this is orientation, not content.
+        try:
+            listing = sorted(
+                entry.name for entry in self.root.iterdir() if not entry.name.startswith(".")
+            )[:40]
+        except OSError:
+            listing = []
+        if listing:
+            sections.append(
+                f"## Project briefing\nWorking directory: {self.root}\n"
+                f"Top level: {', '.join(listing)}"
+            )
+
+        config = self.project_config
+        if config is not None and config.instructions:
+            sections.append(
+                "## Project instructions (from .surtitle.json)\n" + config.instructions.strip()
+            )
+
+        loaded: list[str] = []
+        budget = self._INSTRUCTION_MAX_CHARS
+        for name in self._INSTRUCTION_FILES:
+            candidate = self.root / name
+            if not candidate.is_file():
+                continue
+            try:
+                text = candidate.read_text(encoding="utf-8", errors="replace").strip()
+            except OSError:
+                continue
+            if not text:
+                continue
+            # Truncate to what is *left*, not to the original budget: several files
+            # each under the cap can still exceed it together, and a single large
+            # file must not be admitted whole.
+            if len(text) > budget:
+                text = f"{text[:budget]}\n... [truncated; read the file for the rest]"
+            budget -= len(text) + len(name)
+            loaded.append(f"### {name}\n{text}")
+            if budget <= 0:
+                break
+
+        if loaded:
+            sections.append(
+                "## Project instructions (from files in the project)\n"
+                "These are the project's own conventions and current state. Follow "
+                "them, and prefer them over your assumptions about how the project "
+                "works.\n\n" + "\n\n".join(loaded)
+            )
+
+        return f"{prompt}\n\n" + "\n\n".join(sections) if sections else prompt
 
     async def _emit_or_queue(self, event: Event) -> None:
         """Send a control-flow event, mirroring only what the UI needs."""

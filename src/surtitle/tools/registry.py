@@ -657,6 +657,43 @@ async def _install_packages_handler(
     )
 
 
+async def _remember_handler(ctx: ToolContext, note: str, *, replace: bool = False) -> ToolResult:
+    """Append to the project notebook, which is injected into every future turn."""
+    cleaned = (note or "").strip()
+    if not cleaned:
+        return ToolResult(ok=False, error="Provide something to record.")
+
+    ok, error = environment.write_notes(ctx.root, cleaned, append=not replace)
+    if not ok:
+        return ToolResult(ok=False, error=error)
+
+    stored = environment.read_notes(ctx.root)
+    return ToolResult(
+        ok=True,
+        data={"recorded": cleaned, "notebook_chars": len(stored), "replaced": bool(replace)},
+        display=(
+            f"{'Replaced' if replace else 'Added to'} the project notebook "
+            f"({len(stored)} characters total)"
+        ),
+    )
+
+
+async def _read_notes_handler(ctx: ToolContext) -> ToolResult:
+    """Read back the project notebook."""
+    text = environment.read_notes(ctx.root)
+    if not text:
+        return ToolResult(
+            ok=True,
+            data={"notes": "", "exists": False},
+            display="The project notebook is empty",
+        )
+    return ToolResult(
+        ok=True,
+        data={"notes": text, "exists": True, "characters": len(text)},
+        display=f"Read {len(text)} characters of project notes",
+    )
+
+
 async def _environment_info_handler(ctx: ToolContext) -> ToolResult:
     """Describe the interpreter run_python will use."""
     status = await environment.project_env_status(ctx.root)
@@ -801,6 +838,57 @@ _ENVIRONMENT_INFO = Tool(
 )
 
 
+_REMEMBER = Tool(
+    name="remember",
+    description=(
+        "Record a durable fact about this project in its notebook. The notebook is "
+        "shown to you at the start of every future conversation, so use it for what "
+        "you would otherwise have to rediscover: which machine is down, where a "
+        "file or command lives, what a term means, decisions already made. Record "
+        "conclusions and locations, not a transcript of what you did."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "note": _string(
+                "One short, self-contained fact. Include the detail needed to act on "
+                "it later without re-deriving it."
+            ),
+            "replace": _boolean(
+                "Replace the whole notebook instead of appending. Use only to correct "
+                "notes that have become wrong.",
+                default=False,
+            ),
+        },
+        "required": ["note"],
+    },
+    handler=_remember_handler,
+    approval="never",
+    summary="Record a project note",
+    mutating=True,
+)
+
+_READ_NOTES = Tool(
+    name="read_notes",
+    description=(
+        "Read the project notebook. Its contents are already shown to you at the "
+        "start of each conversation, so this is only needed to re-read it in full "
+        "after it has grown."
+    ),
+    parameters={"type": "object", "properties": {}, "required": []},
+    handler=_read_notes_handler,
+    approval="never",
+    summary="Read the project notebook",
+)
+
+
 def all_tools() -> list[Tool]:
     """Every tool the agent may use, including the ones declared last."""
-    return [*default_tool_list(), _SEARCH_PACKAGES, _INSTALL_PACKAGES, _ENVIRONMENT_INFO]
+    return [
+        *default_tool_list(),
+        _SEARCH_PACKAGES,
+        _INSTALL_PACKAGES,
+        _ENVIRONMENT_INFO,
+        _REMEMBER,
+        _READ_NOTES,
+    ]

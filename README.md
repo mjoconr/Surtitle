@@ -120,6 +120,27 @@ Agent: <say>I need pandas for this. Installing it now.</say>
 Installing a package runs third-party code, which is exactly why it is gated and
 why the environment is isolated.
 
+### What the agent is primed with
+
+Priming is layered, and you can add to it without touching code:
+
+| Layer | Where it comes from |
+|---|---|
+| Voice contract | The system prompt — what to speak versus show |
+| Process rules | "Check what you already did", "mark what you are assuming", work in an order |
+| **Work memory** | Each turn records `[work this turn]`, so the agent can see what it already read or ran |
+| **Project instructions** | `AGENTS.md`, `CLAUDE.md`, `.cursorrules`, `CONTRIBUTING.md`, and `instructions` in `.surtitle.json` — loaded automatically every turn |
+| **Project notebook** | `.surtitle/notes.md`, written by the agent's own `remember` tool and injected into every future session |
+| Project briefing | The working directory and its top-level entries |
+
+The notebook is the important one for recurring work: it is how knowledge
+accumulates across conversations instead of each new chat re-deriving everything.
+The agent records conclusions — which machine is down, where a command lives, what
+a term means — and sees them again next time.
+
+Editing `AGENTS.md` mid-session takes effect on the very next turn. Both are
+capped, so neither can crowd out the conversation.
+
 ### Attachments
 
 Drag files onto the window, paste a screenshot, or use the **+** button. Files are
