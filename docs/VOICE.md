@@ -163,6 +163,40 @@ If you hear nothing: click once anywhere on the page (that grants activation) an
 try again. If you see the "audio is blocked" notice, that is this path reporting
 itself rather than failing quietly.
 
+## Diagnosing a silent microphone
+
+Measured on the development machine, which is a useful worked example because the
+fault looked like a muted microphone but was not:
+
+| Layer | Evidence | Verdict |
+|---|---|---|
+| Hardware | macOS `MacBook Pro Microphone`, 8 inputs including a RØDE, VB-Cable, Zoom and Teams virtual devices | Chrome picked the real built-in mic |
+| Browser | `/static/mic-probe.html` measured peak amplitude **0.73** (Chrome) and **0.92** (Vivaldi) | The browser receives strong audio |
+| Application | Activity panel: `frames=0` | Capture never ran inside the app |
+
+`web/mic-probe.html` (served at `/static/mic-probe.html`) exists precisely to draw
+that third line: it grants the microphone, names the chosen device, lists every
+input, and measures the real peak amplitude over three seconds, entirely
+independently of this application. Without it, "the browser has no signal" and
+"the application mishandles the signal" are indistinguishable, and they have
+opposite fixes.
+
+The Activity panel reports what capture negotiated, so the app can be diagnosed
+without a console:
+
+```
+Microphone opened      device="MacBook Pro Microphone" context=running track=live
+Capture check (3.5 s)  frames=142 peak=0.0412 context=running
+```
+
+`frames=0` means the worklet never ran. `frames>0` with `peak≈0` means capture ran
+and the room was quiet. Those are different faults.
+
+Browsers also differ in whether a capture context starts suspended: Chrome began
+`suspended` and only ran after an explicit `resume()`, while Vivaldi began
+`running`. A suspended context silently produces nothing, so the capture path
+resumes before and after loading the worklet and reports the state.
+
 ## Barge-in
 
 Interrupting mid-sentence is the behaviour users judge a voice agent on. When the
