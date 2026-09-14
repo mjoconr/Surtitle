@@ -83,6 +83,38 @@ class TranscriptEvent:
 TranscriptHandler = Callable[[TranscriptEvent], Awaitable[None]]
 
 
+def _looks_like_nova_results(payload: dict[str, Any]) -> bool:
+    """True when a payload carries the v1/Nova transcript envelope."""
+    channel = payload.get("channel")
+    if isinstance(channel, list):
+        channel = channel[0] if channel else None
+    if not isinstance(channel, dict):
+        return False
+    alternatives = channel.get("alternatives")
+    return isinstance(alternatives, list) and bool(alternatives)
+
+
+def _explain(exc: BaseException) -> str:
+    """Summarise a connection failure, including the server's own reason.
+
+    An HTTP rejection is the most likely failure, and its response body names the
+    exact problem ("Unknown query parameters: channels"). A bare exception class
+    hides that, which is why the first real run produced an opaque reconnect loop
+    instead of a fixable message.
+    """
+    response = getattr(exc, "response", None)
+    status = getattr(response, "status_code", None)
+    if response is not None and status is not None:
+        detail = ""
+        with contextlib.suppress(Exception):
+            detail = bytes(response.body or b"").decode("utf-8", errors="replace")[:200]
+        message = ""
+        with contextlib.suppress(Exception):
+            message = str(json.loads(detail).get("err_msg") or "")
+        return f"HTTP {status}: {message or detail}"
+    return f"{type(exc).__name__}: {exc}"
+
+
 class SpeechToText:
     """A single streaming transcription session."""
 
@@ -115,17 +147,25 @@ class SpeechToText:
     def url(self) -> str:
         """The socket URL, with the parameter set each backend expects.
 
-        The two APIs take different parameters: Flux performs its own turn
-        detection and rejects ``endpointing``/``utterance_end_ms``, so sending
-        the v1 parameter set on the v2 path would silently break turn taking.
+        The two APIs take **different** parameters, and the difference is not
+        optional — Flux rejects anything it does not recognise with HTTP 400.
+        Verified against the live endpoint: ``channels``, ``language``,
+        ``interim_results``, ``punctuate``, ``smart_format``, ``vad_events``,
+        ``endpointing``, ``utterance_end_ms`` and ``multichannel`` are all
+        refused on ``/v2/listen``. Building one query string for both is what
+        produced a permanent reconnect loop on the first real run.
         """
         if self.uses_flux:
+            # `encoding` and `sample_rate` must be supplied together.
             params: dict[str, object] = {
                 "model": self.settings.stt_model,
                 "encoding": "linear16",
                 "sample_rate": self.settings.stt_sample_rate,
-                "channels": 1,
             }
+            if self.settings.eot_threshold is not None:
+                params["eot_threshold"] = self.settings.eot_threshold
+            if self.settings.eot_timeout_ms is not None:
+                params["eot_timeout_ms"] = self.settings.eot_timeout_ms
             return f"{DEEPGRAM_LISTEN_V2_URL}?{urlencode(params)}"
 
         params = {
@@ -206,7 +246,9 @@ class SpeechToText:
                     return
                 delay = _BACKOFF_SCHEDULE[min(attempt, len(_BACKOFF_SCHEDULE) - 1)]
                 attempt += 1
-                log.warning("Deepgram STT disconnected (%s); retrying in %.1fs", exc, delay)
+                log.warning(
+                    "Deepgram STT disconnected (%s); retrying in %.1fs", _explain(exc), delay
+                )
                 if self._on_error:
                     if connected_once:
                         notice = "Speech recognition dropped; reconnecting."
@@ -287,8 +329,20 @@ class SpeechToText:
                     )
             elif message_type == "Error":
                 raise RuntimeError(f"Deepgram error: {payload.get('description') or payload}")
+            elif _looks_like_nova_results(payload):
+                # Flux may reuse the v1 results envelope. Accepting both shapes
+                # means the pipeline works whichever the service sends, which
+                # matters because Flux's exact schema could not be confirmed
+                # without live credentials.
+                await self._handle_v1_results(payload)
             elif message_type in _FLUX_TURN_TYPES or _looks_like_flux_turn(payload):
                 await self._handle_flux_turn(payload)
+            else:
+                log.debug(
+                    "Deepgram STT: unhandled %r event, keys=%s",
+                    message_type or "(none)",
+                    list(payload)[:8],
+                )
             # Metadata, SpeechStarted and unknown informational types are ignored
             # rather than treated as failures, so a new server-side event cannot
             # break an otherwise working session.
@@ -296,6 +350,8 @@ class SpeechToText:
     # --- v1 (Nova) -------------------------------------------------------
     async def _handle_v1_results(self, payload: dict[str, Any]) -> None:
         channel = payload.get("channel") or {}
+        if isinstance(channel, list):
+            channel = channel[0] if channel else {}
         alternatives = channel.get("alternatives") or []
         if not alternatives:
             return

@@ -41,9 +41,23 @@ Two backends, selectable with `SURTITLE_STT_API`:
 
 **`v2` (default) — Flux.** A model trained for *contextual* end-of-turn detection. It
 uses the linguistic content, not just silence, so it does not cut you off mid-thought
-and does not make you wait out a fixed timeout after you finish. Because it does its
-own turn detection, it **rejects** the v1 parameters (`endpointing`,
-`utterance_end_ms`), which is why the two paths build different query strings.
+and does not make you wait out a fixed timeout after you finish.
+
+Flux takes a much smaller parameter set than Nova and **rejects anything it does not
+recognise with HTTP 400**. Verified against the live endpoint, these are refused on
+`/v2/listen`: `channels`, `language`, `interim_results`, `punctuate`, `smart_format`,
+`vad_events`, `endpointing`, `utterance_end_ms` and `multichannel`. Accepted:
+`model`, `encoding` + `sample_rate` (together), `keyterm`, `numerals`, `eot_threshold`
+and `eot_timeout_ms`.
+
+This is not a detail to get subtly wrong — building one query string for both backends
+produced a permanent reconnect loop on the first real run, which is why
+`tests/test_voice_clients.py` asserts the exact parameter sets.
+
+The consequence for configuration: **`SURTITLE_ENDPOINTING_MS` does nothing on
+v2.** Tune turn boundaries with `SURTITLE_EOT_THRESHOLD` (how confident the model
+must be that you have finished; higher waits longer) and
+`SURTITLE_EOT_TIMEOUT_MS` (the ceiling on how long a turn stays open).
 
 **`v1` — Nova** with `endpointing`. Kept as a fallback for accounts or regions where
 Flux is unavailable, and useful when you want to tune the silence threshold directly.

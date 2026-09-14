@@ -97,6 +97,11 @@ class Settings(BaseSettings):
     # Milliseconds of silence before the turn is declared finished. Only used on
     # the v1 path, where no contextual turn detector is available.
     endpointing_ms: int = Field(default=300, alias="SURTITLE_ENDPOINTING_MS")
+    # Flux end-of-turn tuning. `threshold` is how confident the model must be
+    # that you have finished before it ends the turn (higher = waits longer);
+    # `timeout` is the ceiling on how long it will keep a turn open.
+    eot_threshold: float | None = Field(default=None, alias="SURTITLE_EOT_THRESHOLD")
+    eot_timeout_ms: int | None = Field(default=None, alias="SURTITLE_EOT_TIMEOUT_MS")
     tts_model: str = Field(default=DEEPGRAM_TTS_MODEL, alias="DEEPGRAM_TTS_MODEL")
     # 1.0 == natural speed. Deepgram accepts a speed multiplier; playback-rate
     # scaling in the browser is the fallback if a model rejects it.
