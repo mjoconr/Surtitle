@@ -77,6 +77,30 @@ Nova-style `channel.alternatives` envelope** — the transcript is a top-level f
 - `event: "Update"` carries an in-progress transcript — this drives the live
   captions.
 - `event: "EndOfTurn"` closes the turn and starts the agent's turn.
+- **Each update is the transcript for the turn so far, and it is revised.**
+  Measured on a real utterance, the sequence grew and was corrected in place:
+
+  ```
+  3 words  "Read this part"
+  3 words  "Read this project"        <- "part" revised to "project"
+  4 words  "Read this project and"
+  5 words  "Read this project and tell"
+  4 words  "Read this project until"  <- revised back, and shorter
+  6 words  "Read this project and tell me"
+  …        "Read this project and tell me, uh, if the current status of it"
+  ```
+
+  So merging is **replace, never append**. Appending produced this visible
+  failure, where the delivered instruction was:
+
+  ```
+  "Read this part Read this project Read this project and Read this …"
+  ```
+
+  A shorter update still wins, because it is a *correction* of the same utterance
+  rather than a fragment of it. The one thing replacement must not do is accept an
+  empty update: the end-of-turn message carries no transcript, and treating it as
+  the new text discarded everything spoken before it.
 - A **zero-length transcript with `Update` is normal** while the channel is open
   (it was every message during silence). It must be ignored rather than treated as
   an empty utterance, or the agent would respond to nothing.

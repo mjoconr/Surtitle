@@ -270,33 +270,36 @@ class Session:
 
     @staticmethod
     def _accumulate(existing: str, incoming: str) -> str:
-        """Merge a transcription update into what we already have.
+        """Merge a transcription update into the running transcript.
 
-        Covers both shapes without needing to know which backend produced them:
+        The rule is **replace, not append**, because each update already *is* the
+        transcript for the turn so far. Measured against the live Flux endpoint on
+        a real utterance, the sequence grew and was revised in place:
 
-        * **Cumulative** ("what is the" then "what is the throughput"): the
-          incoming text extends what we have, so it replaces it.
-        * **Fragmented** ("what is" then "the throughput"): the incoming text is
-          new, so it appends.
+            3 words  "Read this part"
+            3 words  "Read this project"      <- "part" revised to "project"
+            4 words  "Read this project and"
+            5 words  "Read this project and tell"
+            4 words  "Read this project until" <- revised back, shorter
+            6 words  "Read this project and tell me"
+            …
+           13 words  "Read this project and tell me, uh, if the current status of it"
 
-        Replacement is detected by prefix, which also makes a repeated update
-        idempotent.
+        Appending these produces the duplication this method used to cause:
+
+            "Read this part Read this project Read this project and Read this …"
+
+        The incoming text wins even when it is shorter, because a shorter update is
+        a *correction* of the same utterance rather than a fragment of it.
+
+        The one thing replacement must not do is accept an empty update: the
+        end-of-turn message carries no transcript, and treating that as the new
+        text discarded everything spoken before it — the original bug.
         """
-        if not incoming:
+        if not incoming or not incoming.strip():
+            # Never let an empty update erase what has been transcribed.
             return existing
-        if not existing:
-            return incoming
-        if incoming.startswith(existing) or existing.startswith(incoming):
-            # Cumulative (or a correction): keep the longer, more complete text.
-            return incoming if len(incoming) >= len(existing) else existing
-        if incoming.strip() in existing:
-            return existing
-        joiner = (
-            ""
-            if existing.endswith((" ", "-")) or incoming.startswith((" ", ".", ",", "!", "?", "-"))
-            else " "
-        )
-        return f"{existing}{joiner}{incoming}"
+        return incoming
 
     # --- the turn --------------------------------------------------------
     async def _run_turn(self, user_text: str) -> None:
@@ -383,8 +386,25 @@ class Session:
         cannot drift out of sync with what is actually being played.
         """
         self._set_state(SessionState.SPEAKING)
+
+        # Anything the user said while the previous turn was finishing must be
+        # handed over BEFORE suppression starts. Suppression exists to stop the
+        # agent transcribing its own voice, but a transcript already captured is
+        # the user's, and dropping it makes an utterance vanish — which is what
+        # happened on a second attempt to speak.
+        pending = self._state.interim.strip()
+        self._state.interim = ""
+        if pending and not self._turn_in_flight():
+            log.info("delivering speech captured before playback: %r", pending[:80])
+            await self.emit(EventKind.USER_TEXT, text=pending, source="voice")
+            self._turn = asyncio.create_task(self._run_turn(pending), name="agent-turn")
+
         if self.stt is not None:
             self.stt.set_suppression(True)
+
+    def _turn_in_flight(self) -> bool:
+        """True while an agent turn is still running."""
+        return self._turn is not None and not self._turn.done()
 
     async def _on_speaking_finished(self) -> None:
         """Return to idle once the last sentence has been synthesised."""

@@ -15,6 +15,7 @@ a bogus key still reveals parameter validation (400 = bad parameters,
 from __future__ import annotations
 
 import contextlib
+from typing import ClassVar
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -471,61 +472,74 @@ class TestFluxResponseHandling:
         assert "TurnInfo" in _FLUX_TURN_TYPES
 
 
-class TestTranscriptAccumulation:
-    """Spoken words must be accumulated, not overwritten.
+class TestTranscriptMerging:
+    """Transcription updates are cumulative and get revised, so merging REPLACES.
 
-    Regression test for a correctness bug that also explains "I can't see what I
-    said": the session replaced its interim text on every update, so the model
-    received only the final fragment of a sentence. Both backends are covered,
-    because they report differently and the accumulator must not care which.
+    These cases come from a real utterance captured through the live Flux
+    endpoint. The word counts are the point: 3, 3, 4, 5, 4, 6, 7, 8, 13. The text
+    grows, and earlier words are revised in place — "part" became "project", and
+    "and tell" briefly became "until" before reverting.
+
+    Appending these produced a visible failure:
+
+        "Read this part Read this project Read this project and Read this ..."
+
+    while replacing yields the sentence the user actually said.
     """
 
+    # Verbatim from the live session, in arrival order.
+    LIVE_SEQUENCE: ClassVar[tuple[str, ...]] = (
+        "Read this part",
+        "Read this project",
+        "Read this project and",
+        "Read this project and tell",
+        "Read this project until",
+        "Read this project and tell me",
+        "Read this project and tell me, uh",
+        "Read this project and tell me, uh, if",
+        "Read this project and tell me, uh, if the current status of it",
+    )
+
     @staticmethod
-    def _accumulate(existing: str, incoming: str) -> str:
+    def _merge(existing: str, incoming: str) -> str:
         from surtitle.core.session import Session
 
         return Session._accumulate(existing, incoming)
 
-    def test_cumulative_updates_are_not_duplicated(self):
-        """Flux sends the turn so far, growing each time."""
+    def test_the_live_sequence_produces_the_sentence_the_user_said(self):
         text = ""
-        for update in ("what is", "what is the", "what is the throughput"):
-            text = self._accumulate(text, update)
-        assert text == "what is the throughput"
+        for update in self.LIVE_SEQUENCE:
+            text = self._merge(text, update)
+        assert text == "Read this project and tell me, uh, if the current status of it"
 
-    def test_fragmented_updates_are_joined(self):
-        """A word-level backend sends successive fragments."""
+    def test_no_duplication_survives_the_live_sequence(self):
+        """The concrete bug: repeated fragments in the delivered transcript."""
         text = ""
-        for update in ("what is", "the throughput", "of the line"):
-            text = self._accumulate(text, update)
-        assert text == "what is the throughput of the line"
+        for update in self.LIVE_SEQUENCE:
+            text = self._merge(text, update)
+        assert text.count("Read this") == 1, f"fragment duplicated: {text!r}"
+        assert text.count("project") == 1, f"fragment duplicated: {text!r}"
 
-    def test_a_repeated_update_is_idempotent(self):
-        text = self._accumulate("hello world", "hello world")
-        assert text == "hello world"
+    def test_a_revision_wins_even_when_it_is_shorter(self):
+        """`and tell` -> `until` is a correction, not a fragment."""
+        assert self._merge("Read this project and tell", "Read this project until") == (
+            "Read this project until"
+        )
 
-    def test_a_prefix_correction_keeps_the_longer_text(self):
-        text = self._accumulate("throughout", "through")
-        assert text == "throughout"
+    def test_an_empty_update_never_erases_the_transcript(self):
+        """The original bug: the empty end-of-turn message wiped everything."""
+        assert self._merge("Read this project", "") == "Read this project"
+        assert self._merge("Read this project", "   ") == "Read this project"
 
-    def test_empty_updates_do_not_clear_accumulated_text(self):
-        text = self._accumulate("keep me", "")
-        assert text == "keep me"
+    def test_the_first_update_seeds_the_transcript(self):
+        assert self._merge("", "Read this") == "Read this"
 
-    def test_an_existing_fragment_is_not_appended_twice(self):
-        text = self._accumulate("the throughput of the line", "throughput")
-        assert text == "the throughput of the line"
-
-    def test_no_spurious_space_before_punctuation(self):
-        text = self._accumulate("hello", ", world")
-        assert text == "hello, world"
-
-    def test_first_update_becomes_the_text(self):
-        assert self._accumulate("", "first words") == "first words"
-
-    def test_accumulation_is_independent_of_word_level_updates(self):
-        """The end-to-end shape: fragments then a cumulative final."""
+    def test_each_update_replaces_rather_than_accumulates(self):
         text = ""
-        for update in ("what", "what is", "what is the throughput"):
-            text = self._accumulate(text, update)
-        assert text == "what is the throughput"
+        for update in ("one", "one two", "one two three"):
+            text = self._merge(text, update)
+        assert text == "one two three"
+
+    def test_a_single_word_is_not_duplicated_by_a_punctuation_revision(self):
+        assert self._merge("Hello", "Hello.") == "Hello."
+        assert self._merge("Hello.", "Hello?") == "Hello?"
