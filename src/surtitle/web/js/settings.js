@@ -22,9 +22,13 @@ const SECTION_LABELS = {
 const SECTION_ORDER = ["model", "agent", "voice", "general"];
 
 export class SettingsPanel {
-  constructor({ onSaved, onToast }) {
+  constructor({ onSaved, onToast, onMicrophoneChange, onSpeakerChange, playback }) {
     this.onSaved = onSaved;
     this.onToast = onToast;
+    this.onMicrophoneChange = onMicrophoneChange;
+    this.onSpeakerChange = onSpeakerChange;
+    // Needed to ask whether this browser supports output selection at all.
+    this.playback = playback;
     this.described = null;
     this.activeSection = "model";
     this.pending = new Set();
@@ -73,11 +77,16 @@ export class SettingsPanel {
     );
 
     this.nav.replaceChildren();
-    for (const section of [...ordered, "providers"]) {
+    for (const section of [...ordered, "microphone", "providers"]) {
       const button = document.createElement("button");
       button.type = "button";
       button.className = "modal__navItem";
-      button.textContent = section === "providers" ? "API keys" : SECTION_LABELS[section] || section;
+      button.textContent =
+        section === "providers"
+          ? "API keys"
+          : section === "microphone"
+            ? "Microphone"
+            : SECTION_LABELS[section] || section;
       button.setAttribute("aria-current", String(this.activeSection === section));
       button.addEventListener("click", () => {
         this.activeSection = section;
@@ -92,13 +101,284 @@ export class SettingsPanel {
     this.title.textContent =
       this.activeSection === "providers"
         ? "API keys"
-        : SECTION_LABELS[this.activeSection] || this.activeSection;
+        : this.activeSection === "microphone"
+          ? "Microphone"
+          : SECTION_LABELS[this.activeSection] || this.activeSection;
     this.body.replaceChildren();
 
     if (this.activeSection === "providers") {
       this.renderProviders();
+    } else if (this.activeSection === "microphone") {
+      this.renderMicrophone();
     } else {
       this.renderFields(this.described.sections[this.activeSection] || []);
+    }
+  }
+
+  /**
+   * Input-device picker.
+   *
+   * Relying on the browser's default input is wrong on any machine with virtual
+   * audio devices — Teams, Zoom, VB-Cable, loopback drivers — where the default
+   * can be a device that never carries the microphone. This lets the user name
+   * the device instead of hoping.
+   *
+   * Device *labels* are only exposed after microphone permission is granted, so
+   * the list may be anonymous until the mic has been opened once; the picker says
+   * so rather than showing an unexplained empty list.
+   */
+  renderMicrophone() {
+    const row = document.createElement("div");
+    row.className = "setting";
+
+    const text = document.createElement("div");
+    text.className = "setting__text";
+    const label = document.createElement("label");
+    label.className = "setting__title";
+    label.textContent = "Input device";
+    label.htmlFor = "micDevice";
+    const desc = document.createElement("span");
+    desc.className = "setting__desc";
+    desc.textContent =
+      "Which microphone the agent listens to. Devices are listed by name once the " +
+      "microphone has been opened at least once.";
+    text.append(label, desc);
+
+    const control = document.createElement("div");
+    control.className = "setting__control";
+
+    const select = document.createElement("select");
+    select.className = "select";
+    select.id = "micDevice";
+    control.append(select);
+
+    row.append(text, control);
+    this.body.append(row);
+
+    const status = document.createElement("p");
+    status.className = "notice";
+    this.body.append(status);
+
+    const refresh = document.createElement("button");
+    refresh.type = "button";
+    refresh.className = "button button--ghost";
+    refresh.textContent = "Refresh device list";
+    refresh.style.marginTop = "10px";
+    refresh.addEventListener("click", () => this.populateMicrophones(select, status, refresh));
+    this.body.append(refresh);
+
+    this.populateMicrophones(select, status, refresh);
+
+    this.body.append(document.createElement("hr")).style.cssText =
+      "border:none;border-top:0.5px solid var(--dsw-alias-border-l2);margin:18px 0";
+
+    this.renderSpeaker();
+  }
+
+  /**
+   * Output-device picker.
+   *
+   * Web Audio cannot choose an output device, so spoken audio is routed through
+   * an <audio> element and this uses setSinkId(). Support is genuinely partial —
+   * Firefox does not implement it — so an unsupported browser gets a clear
+   * explanation instead of a control that silently does nothing.
+   */
+  renderSpeaker() {
+    const supported = this.playback ? this.playback.canSelectOutput : false;
+
+    const row = document.createElement("div");
+    row.className = "setting";
+
+    const text = document.createElement("div");
+    text.className = "setting__text";
+    const label = document.createElement("label");
+    label.className = "setting__title";
+    label.textContent = "Output device";
+    label.htmlFor = "speakerDevice";
+    const desc = document.createElement("span");
+    desc.className = "setting__desc";
+    desc.textContent = supported
+      ? "Where the agent's voice is played."
+      : "This browser cannot choose an output device, so the system default is used. Chrome, Edge and other Chromium browsers support this.";
+    text.append(label, desc);
+
+    const control = document.createElement("div");
+    control.className = "setting__control";
+    const select = document.createElement("select");
+    select.className = "select";
+    select.id = "speakerDevice";
+    select.disabled = !supported;
+    control.append(select);
+
+    row.append(text, control);
+    this.body.append(row);
+
+    const status = document.createElement("p");
+    status.className = "notice";
+    this.body.append(status);
+
+    if (!supported) {
+      select.append(new Option("System default", ""));
+      status.textContent = "Output selection is unavailable in this browser.";
+      return;
+    }
+
+    const refresh = document.createElement("button");
+    refresh.type = "button";
+    refresh.className = "button button--ghost";
+    refresh.textContent = "Refresh device list";
+    refresh.style.marginTop = "10px";
+    refresh.addEventListener("click", () => this.populateSpeakers(select, status, refresh));
+    this.body.append(refresh);
+
+    this.populateSpeakers(select, status, refresh);
+  }
+
+  async populateSpeakers(select, status, refresh) {
+    select.replaceChildren();
+    status.textContent = "Checking available outputs…";
+    if (refresh) refresh.disabled = true;
+
+    const current = this.getSpeakerPreference();
+    const devices = this.playback ? await this.playback.listOutputDevices() : [];
+
+    select.append(new Option("System default", ""));
+
+    for (const device of devices) {
+      const option = new Option(device.label, device.deviceId);
+      option.selected = Boolean(current) && device.deviceId === current;
+      select.append(option);
+    }
+
+    if (current && !devices.some((device) => device.deviceId === current)) {
+      const missing = new Option("Previously chosen output (not connected)", current);
+      missing.selected = true;
+      select.append(missing);
+      status.textContent = "The saved output is not connected; the system default is in use.";
+    } else if (devices.length === 0) {
+      status.textContent =
+        "No outputs are listed yet. Devices are named once audio has played or the " +
+        "microphone has been granted, then refresh.";
+    } else {
+      status.textContent = `${devices.length} output device(s) found.`;
+    }
+
+    if (refresh) refresh.disabled = false;
+
+    select.addEventListener("change", async () => {
+      this.setSpeakerPreference(select.value);
+      // Report what actually happened rather than assuming success: setSinkId can
+      // reject when the page lacks permission.
+      const result = this.onSpeakerChange ? await this.onSpeakerChange(select.value) : { ok: true };
+      if (this.onToast) {
+        if (result && result.ok) {
+          const chosen = devices.find((device) => device.deviceId === select.value);
+          this.onToast(chosen ? `Output set to ${chosen.label}.` : "Using the system default.", "ok");
+        } else if (result && result.reason === "NotAllowedError") {
+          this.onToast("Open the microphone once to allow selecting an output device.", "error");
+        } else {
+          this.onToast("That output device could not be selected.", "error");
+        }
+      }
+    });
+  }
+
+  getSpeakerPreference() {
+    try {
+      return localStorage.getItem("surtitle.speaker") || "";
+    } catch {
+      return "";
+    }
+  }
+
+  setSpeakerPreference(deviceId) {
+    try {
+      if (deviceId) localStorage.setItem("surtitle.speaker", deviceId);
+      else localStorage.removeItem("surtitle.speaker");
+    } catch {
+      /* storage unavailable; the choice simply will not persist */
+    }
+  }
+
+  async populateMicrophones(select, status, refresh) {
+    select.replaceChildren();
+    status.textContent = "Checking available inputs…";
+    if (refresh) refresh.disabled = true;
+
+    const current = this.getMicrophonePreference();
+    const devices = await this.listMicrophones();
+
+    const auto = document.createElement("option");
+    auto.value = "";
+    auto.textContent = "System default";
+    auto.selected = !current;
+    select.append(auto);
+
+    for (const device of devices) {
+      const option = document.createElement("option");
+      option.value = device.deviceId;
+      option.textContent = device.label;
+      option.selected = Boolean(current) && device.deviceId === current;
+      select.append(option);
+    }
+
+    // A saved device may have been unplugged since it was chosen.
+    if (current && !devices.some((device) => device.deviceId === current)) {
+      const missing = document.createElement("option");
+      missing.value = current;
+      missing.textContent = "Previously chosen device (not currently connected)";
+      missing.selected = true;
+      select.append(missing);
+      status.textContent =
+        "The saved device is not connected. The system default will be used until it returns.";
+    } else if (devices.length <= 1) {
+      status.textContent =
+        "Only one input is visible. Open the microphone once to grant permission, then " +
+        "refresh to see every device by name.";
+    } else {
+      status.textContent = `${devices.length} input device(s) found.`;
+    }
+
+    if (refresh) refresh.disabled = false;
+
+    select.addEventListener("change", () => {
+      this.setMicrophonePreference(select.value);
+      const chosen = devices.find((device) => device.deviceId === select.value);
+      if (this.onMicrophoneChange) this.onMicrophoneChange(select.value);
+      if (this.onToast) {
+        this.onToast(chosen ? `Microphone set to ${chosen.label}.` : "Using the system default.", "ok");
+      }
+    });
+  }
+
+  async listMicrophones() {
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      return devices
+        .filter((device) => device.kind === "audioinput")
+        .map((device, index) => ({
+          deviceId: device.deviceId,
+          label: device.label || `Input ${index + 1} (name hidden until permission is granted)`,
+        }));
+    } catch {
+      return [];
+    }
+  }
+
+  getMicrophonePreference() {
+    try {
+      return localStorage.getItem("surtitle.microphone") || "";
+    } catch {
+      return "";
+    }
+  }
+
+  setMicrophonePreference(deviceId) {
+    try {
+      if (deviceId) localStorage.setItem("surtitle.microphone", deviceId);
+      else localStorage.removeItem("surtitle.microphone");
+    } catch {
+      /* storage unavailable; the choice simply will not persist */
     }
   }
 

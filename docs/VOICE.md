@@ -197,6 +197,34 @@ Browsers also differ in whether a capture context starts suspended: Chrome began
 `running`. A suspended context silently produces nothing, so the capture path
 resumes before and after loading the worklet and reports the state.
 
+## Choosing input and output devices
+
+Both are selectable in **Settings → Microphone**, because relying on the browser's
+defaults is wrong on any machine that has virtual audio devices. The development
+machine lists eight inputs — the built-in microphone plus Teams, three RØDE
+Connect devices, VB-Cable, Zoom and iThinking — and the default can be a device
+that never carries the microphone. Right-clicking the mic button jumps straight to
+the picker.
+
+**Input** uses `deviceId` in `getUserMedia`. Device *labels* are only exposed after
+microphone permission has been granted, so the list may be anonymous until the mic
+has been opened once; the picker says so instead of showing an unexplained single
+entry. A saved device that has since been unplugged is reported and the system
+default is used, rather than refusing to start.
+
+**Output** needs a different mechanism, and this is not obvious: **Web Audio cannot
+select an output device.** Only `HTMLMediaElement.setSinkId()` can. Spoken audio is
+therefore routed through a hidden `<audio>` element via a
+`MediaStreamAudioDestinationNode` — the audio graph still does all the scheduling,
+and the element is purely the sink. Exactly one output path is connected; wiring
+both the element and the context destination would play every sentence twice.
+
+Output selection is genuinely partial: Firefox does not implement `setSinkId`, so
+the control is disabled with an explanation rather than silently doing nothing.
+`setSinkId` can also reject with `NotAllowedError` when the page has not been
+granted audio permission, which the UI reports with the fix (open the microphone
+once).
+
 ## Barge-in
 
 Interrupting mid-sentence is the behaviour users judge a voice agent on. When the

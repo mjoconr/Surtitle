@@ -81,7 +81,7 @@
 
         <div class="composer__row">
           <button class="mic" id="micButton" type="button" data-active="false"
-                  aria-pressed="false" title="Toggle microphone (hold Space for push to talk)">
+                  aria-pressed="false" title="Toggle microphone — right-click to choose the input device">
             <span aria-hidden="true">●</span>
             <span id="micLabel">Mic off</span>
             <span class="mic__level" aria-hidden="true"><span class="mic__levelFill" id="micLevel"></span></span>
@@ -167,6 +167,13 @@
 </div>
 
 <div class="toast" id="toast" hidden role="status" aria-live="polite"></div>
+
+<!--
+  Spoken audio is routed through this element because Web Audio alone cannot
+  choose an output device — only HTMLMediaElement.setSinkId() can, so the element
+  is the sink. Never displayed, never focused.
+-->
+<audio id="speaker" autoplay playsinline></audio>
 
 <script type="module" src="/static/js/app.js"></script>
 </body>

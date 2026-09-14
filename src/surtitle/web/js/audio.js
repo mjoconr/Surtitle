@@ -13,34 +13,80 @@
 const WORKLET_URL = "/static/js/capture-worklet.js";
 
 export class Capture {
-  constructor({ onAudio, onLevel, onSpeechStart }) {
+  /**
+   * Microphone capture with two interchangeable backends.
+   *
+   * The AudioWorklet path is preferred, but it has a failure mode that produces
+   * no error at all: `addModule()` resolves on a *suspended* AudioContext, the
+   * node constructs, and `process()` is simply never driven — so nothing is ever
+   * captured. Observed directly: context `suspended`, frames `0`.
+   *
+   * Two defences, because this is load-bearing:
+   *
+   * 1. The context is resumed and then **verified** running before the worklet is
+   *    attached. A resume() promise resolving is not the same as the context
+   *    running.
+   * 2. If no frames arrive shortly after starting, capture automatically falls
+   *    back to a ScriptProcessorNode, which is deprecated but universally
+   *    supported and depends on no module loading at all. Falling back to silence
+   *    is not acceptable, and the fallback is invisible to the caller.
+   */
+  constructor({ onAudio, onLevel, onSpeechStart, onBackendChange, deviceId = "" }) {
     this.onAudio = onAudio;
     this.onLevel = onLevel;
     this.onSpeechStart = onSpeechStart;
+    this.onBackendChange = onBackendChange;
+    // Preferred input device. Empty means "whatever the browser defaults to",
+    // which on a machine with virtual audio devices is a coin toss.
+    this.deviceId = deviceId || "";
     this.context = null;
     this.stream = null;
     this.node = null;
     this.source = null;
     this.active = false;
+    this.backend = "none";
+    this.framesReceived = 0;
+    this.maxLevel = 0;
+    this._upgradeTimer = null;
+    this._speechFrames = 0;
+    this._speaking = false;
+    this._graceUntil = 0;
   }
 
   get supported() {
     return Boolean(
-      navigator.mediaDevices &&
-        navigator.mediaDevices.getUserMedia &&
-        window.AudioContext &&
-      this.contextSupported
+      navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.AudioContext,
     );
   }
 
-  get contextSupported() {
-    return typeof AudioWorkletNode !== "undefined";
+  /**
+   * Resume the context and wait until it is genuinely running.
+   *
+   * Returns true only when the context reports `running`. A resolved resume() is
+   * not sufficient evidence: the context can still be suspended afterwards, which
+   * is exactly how the worklet silently captured nothing.
+   */
+  async _ensureRunning() {
+    if (!this.context) return false;
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+      if (this.context.state === "running") return true;
+      try {
+        await this.context.resume();
+      } catch {
+        /* retry below */
+      }
+      if (this.context.state === "running") return true;
+      await new Promise((resolve) => setTimeout(resolve, 60));
+    }
+    return this.context.state === "running";
   }
 
   async start() {
-    if (this.active) return { running: true };
+    if (this.active) {
+      return { running: this.context ? this.context.state === "running" : false };
+    }
 
-    this.stream = await navigator.mediaDevices.getUserMedia({
+    const constraints = {
       audio: {
         // These three are the difference between a usable voice agent and one
         // that transcribes its own output.
@@ -49,49 +95,202 @@ export class Capture {
         autoGainControl: true,
         channelCount: 1,
       },
-    });
+    };
+    // `exact` would reject outright when a device has been unplugged since it was
+    // chosen, so prefer the requested device and fall back to the default rather
+    // than refusing to start.
+    if (this.deviceId) constraints.audio.deviceId = { ideal: this.deviceId };
 
-    // One context per page, reused across mic toggles. Creating a fresh context
-    // each time eventually hits the browser's per-page AudioContext limit and
-    // then fails outright.
+    try {
+      this.stream = await navigator.mediaDevices.getUserMedia(constraints);
+    } catch (error) {
+      if (this.deviceId && (error.name === "OverconstrainedError" || error.name === "NotFoundError")) {
+        console.warn("[surtitle] chosen input unavailable; using the default", error.name);
+        this.deviceId = "";
+        delete constraints.audio.deviceId;
+        this.stream = await navigator.mediaDevices.getUserMedia(constraints);
+      } else {
+        throw error;
+      }
+    }
+
+    // One context per page, reused across mic toggles: creating a fresh one each
+    // time eventually hits the browser's per-page AudioContext limit.
     if (!this.context) {
       this.context = new AudioContext();
-      this.moduleLoaded = this.context.audioWorklet.addModule(WORKLET_URL);
     }
 
-    // An AudioContext created outside a user gesture starts suspended, and a
-    // suspended context never runs the worklet — so nothing is captured and the
-    // level meter never moves. That looks exactly like a muted microphone.
-    // Resume first, and report the state so the caller can tell the user.
-    if (this.context.state === "suspended") {
-      await this.context.resume().catch(() => {});
-    }
-    // Deepgram expects 16 kHz linear16; the worklet resamples to it.
-    await this.moduleLoaded;
-
-    // The awaited module load can outlive the activation that started it, so
-    // check again once the worklet is ready.
-    if (this.context.state === "suspended") {
-      await this.context.resume().catch(() => {});
-    }
-
+    const running = await this._ensureRunning();
     this.source = this.context.createMediaStreamSource(this.stream);
-    this.node = new AudioWorkletNode(this.context, "capture-processor", {
-      numberOfInputs: 1,
-      numberOfOutputs: 0,
-    });
 
-    this.node.port.onmessage = (event) => this._handle(event.data);
-    this.source.connect(this.node);
-
-    // Count what actually arrives, so "the microphone is open" can be told apart
-    // from "audio is reaching the application".
     this.framesReceived = 0;
     this.maxLevel = 0;
-
     this.active = true;
+
+    // Try the worklet first, but only trust it once it has produced a frame.
+    let workletAttached = false;
+    if (running) {
+      workletAttached = await this._attachWorklet();
+    }
+
+    if (workletAttached) {
+      this.backend = "worklet";
+      // If the worklet never delivers, switch to the fallback rather than staying
+      // silent. This also covers a context that suspends immediately after start.
+      this._upgradeTimer = setTimeout(() => {
+        if (this.active && this.backend === "worklet" && this.framesReceived === 0) {
+          console.warn("[surtitle] worklet produced no frames; using ScriptProcessor");
+          this._attachScriptProcessor();
+        }
+      }, 900);
+    } else {
+      this._attachScriptProcessor();
+    }
+
     this.setMuted(false);
-    return { running: this.context.state === "running" };
+    return { running, backend: this.backend };
+  }
+
+  async _attachWorklet() {
+    try {
+      await this.context.audioWorklet.addModule(WORKLET_URL);
+      // Re-verify: the awaited module load can outlive activation, and this is
+      // the exact point where the worklet previously ended up inert.
+      if (!(await this._ensureRunning())) return false;
+
+      this.node = new AudioWorkletNode(this.context, "capture-processor", {
+        numberOfInputs: 1,
+        numberOfOutputs: 0,
+      });
+      this.node.port.onmessage = (event) => this._handleWorklet(event.data);
+      this.source.connect(this.node);
+      return true;
+    } catch (error) {
+      console.warn("[surtitle] AudioWorklet unavailable:", error && error.message);
+      return false;
+    }
+  }
+
+  /**
+   * Universal fallback. ScriptProcessorNode is deprecated but works everywhere,
+   * and it needs no module loading, so it cannot fail the way the worklet does.
+   */
+  _attachScriptProcessor() {
+    try {
+      if (this.node) {
+        try {
+          this.node.disconnect();
+        } catch {
+          /* already detached */
+        }
+        this.node = null;
+      }
+      const size = 4096;
+      const node = this.context.createScriptProcessor(size, 1, 1);
+      const ratio = this.context.sampleRate / 16000;
+      let acc = 0;
+      let accCount = 0;
+      const frame = new Float32Array(512);
+      let frameIndex = 0;
+
+      node.onaudioprocess = (event) => {
+        if (!this.active || this._muted) return;
+        const input = event.inputBuffer.getChannelData(0);
+        this._measure(input);
+        for (let i = 0; i < input.length; i += 1) {
+          acc += input[i];
+          accCount += 1;
+          if (accCount >= ratio) {
+            frame[frameIndex] = acc / accCount;
+            frameIndex += 1;
+            acc = 0;
+            accCount = 0;
+            if (frameIndex >= frame.length) {
+              this._emitFrame(frame);
+              frameIndex = 0;
+            }
+          }
+        }
+      };
+      // A ScriptProcessor only runs while connected to a destination, so route it
+      // through a muted gain node to avoid feedback.
+      const sink = this.context.createGain();
+      sink.gain.value = 0;
+      this.source.connect(node);
+      node.connect(sink);
+      sink.connect(this.context.destination);
+      this.node = node;
+      this.sink = sink;
+      this.backend = "script-processor";
+      if (this.onBackendChange) this.onBackendChange(this.backend);
+    } catch (error) {
+      console.error("[surtitle] no capture backend available:", error);
+      this.backend = "failed";
+    }
+  }
+
+  _emitFrame(samples) {
+    const pcm = new Int16Array(samples.length);
+    for (let i = 0; i < samples.length; i += 1) {
+      const clamped = Math.max(-1, Math.min(1, samples[i]));
+      pcm[i] = clamped < 0 ? clamped * 0x8000 : clamped * 0x7fff;
+    }
+    this.framesReceived += 1;
+    if (this.onAudio) this.onAudio(new Uint8Array(pcm.buffer));
+  }
+
+  /** Speech detection, shared by both backends. */
+  _measure(channel) {
+    let sum = 0;
+    for (let i = 0; i < channel.length; i += 1) sum += channel[i] * channel[i];
+    const rms = Math.sqrt(sum / channel.length);
+    this.maxLevel = Math.max(this.maxLevel, Math.min(1, rms * 6));
+    if (this.onLevel) this.onLevel(Math.min(1, rms * 6));
+
+    const withinGrace = performance.now() < this._graceUntil;
+    if (rms > 0.02 && !withinGrace) {
+      this._speechFrames += 1;
+      if (this._speechFrames >= 3 && !this._speaking) {
+        this._speaking = true;
+        if (this.onSpeechStart) this.onSpeechStart();
+      }
+    } else {
+      this._speechFrames = 0;
+      if (this._speaking && rms < 0.01) this._speaking = false;
+    }
+  }
+
+  _handleWorklet(message) {
+    if (!message) return;
+    if (message.type === "audio") {
+      this.framesReceived += 1;
+      if (this.onAudio) this.onAudio(new Uint8Array(message.buffer));
+    } else if (message.type === "level") {
+      this.maxLevel = Math.max(this.maxLevel, message.value || 0);
+      if (this.onLevel) this.onLevel(message.value);
+    } else if (message.type === "speech-start" && this.onSpeechStart) {
+      this.onSpeechStart();
+    }
+  }
+
+  /** Change the preferred input device. Takes effect on the next start. */
+  setDevice(deviceId) {
+    this.deviceId = deviceId || "";
+  }
+
+  setMuted(muted) {
+    this._muted = Boolean(muted);
+    if (this.node && this.backend === "worklet" && this.node.port) {
+      this.node.port.postMessage({ type: "mute", value: muted });
+    }
+  }
+
+  /** Tell capture that playback began, so the speaker tail is ignored. */
+  notifyPlayback(playing) {
+    if (playing) this._graceUntil = performance.now() + 250;
+    if (this.node && this.backend === "worklet" && this.node.port) {
+      this.node.port.postMessage({ type: "playback", value: playing });
+    }
   }
 
   /** Diagnostics for the caller after opening the microphone. */
@@ -105,14 +304,10 @@ export class Capture {
     }
     return {
       running: Boolean(this.context && this.context.state === "running"),
+      backend: this.backend,
       framesReceived: this.framesReceived,
       maxLevel: this.maxLevel,
-      // True when the worklet has never produced a buffer, which means capture is
-      // not running at all rather than the room merely being quiet.
       silent: this.framesReceived === 0,
-      // Which device the browser chose. A silent virtual device (BlackHole,
-      // Loopback, a conference tool) is the usual reason a "working" microphone
-      // produces nothing.
       deviceLabel: (track && track.label) || "",
       deviceId: settings.deviceId || "",
       trackMuted: track ? Boolean(track.muted) : null,
@@ -136,45 +331,41 @@ export class Capture {
     }
   }
 
-  _handle(message) {
-    if (!message) return;
-    if (message.type === "audio") {
-      this.framesReceived = (this.framesReceived || 0) + 1;
-      if (this.onAudio) this.onAudio(new Uint8Array(message.buffer));
-    } else if (message.type === "level") {
-      this.maxLevel = Math.max(this.maxLevel || 0, message.value || 0);
-      if (this.onLevel) this.onLevel(message.value);
-    } else if (message.type === "speech-start" && this.onSpeechStart) {
-      this.onSpeechStart();
-    }
-  }
-
-  setMuted(muted) {
-    if (this.node) this.node.port.postMessage({ type: "mute", value: muted });
-  }
-
-  /** Tell the worklet playback began, so it can ignore the speaker tail. */
-  notifyPlayback(playing) {
-    if (this.node) this.node.port.postMessage({ type: "playback", value: playing });
-  }
-
   async stop() {
     this.active = false;
+    clearTimeout(this._upgradeTimer);
+    this._upgradeTimer = null;
     if (this.node) {
-      this.node.port.onmessage = null;
-      this.node.disconnect();
+      if (this.node.port) this.node.port.onmessage = null;
+      if (this.node.onaudioprocess !== undefined) this.node.onaudioprocess = null;
+      try {
+        this.node.disconnect();
+      } catch {
+        /* already detached */
+      }
       this.node = null;
     }
+    if (this.sink) {
+      try {
+        this.sink.disconnect();
+      } catch {
+        /* already detached */
+      }
+      this.sink = null;
+    }
     if (this.source) {
-      this.source.disconnect();
+      try {
+        this.source.disconnect();
+      } catch {
+        /* already detached */
+      }
       this.source = null;
     }
     if (this.stream) {
       for (const track of this.stream.getTracks()) track.stop();
       this.stream = null;
     }
-    // The context is intentionally left open: it is reused on the next start, and
-    // closing it here is what previously forced a new one per toggle.
+    // The context is intentionally left open: it is reused on the next start.
   }
 
   /** Release the capture context entirely. Only for page teardown. */
@@ -183,19 +374,22 @@ export class Capture {
     if (this.context) {
       await this.context.close().catch(() => {});
       this.context = null;
-      this.moduleLoaded = null;
     }
   }
 }
 
 export class Playback {
-  constructor({ onStart, onIdle, onBlocked, sampleRate = 24000 }) {
+  constructor({ onStart, onIdle, onBlocked, sampleRate = 24000, sinkId = "", element = null }) {
     this.onStart = onStart;
     this.onIdle = onIdle;
     // Called when audio arrives but the output context is not running, so the
     // user is told instead of hearing nothing.
     this.onBlocked = onBlocked;
+    // Preferred output device. Only honoured where setSinkId() exists.
+    this.sinkId = sinkId || "";
+    this.element = element;
     this.sampleRate = sampleRate;
+    this.sink = null;
     this.context = null;
     this.gain = null;
     this.sources = new Set();
@@ -251,7 +445,31 @@ export class Playback {
       this.context = new AudioContext({ sampleRate: this.sampleRate });
       this.sampleRate = this.context.sampleRate;
       this.gain = this.context.createGain();
-      this.gain.connect(this.context.destination);
+
+      // Route through an <audio> element when one is available, because that is
+      // the only route that can select an output device. The element plays a live
+      // MediaStream, so the audio graph still performs the scheduling; the
+      // element is purely the sink.
+      //
+      // Exactly one path is connected. Connecting both would play every sentence
+      // twice — once through the element and once through the context.
+      let routed = false;
+      if (this.element && this.context.createMediaStreamDestination) {
+        try {
+          this.sink = this.context.createMediaStreamDestination();
+          this.gain.connect(this.sink);
+          this.element.srcObject = this.sink.stream;
+          this.element.play().catch(() => {});
+          routed = true;
+        } catch {
+          this.sink = null;
+        }
+      }
+      if (!routed) {
+        // No element route: use the context destination, which is always audible
+        // at the cost of not being able to choose the output device.
+        this.gain.connect(this.context.destination);
+      }
     }
     if (this.context.state === "suspended") {
       // Best-effort recovery outside a gesture; `unlock()` is the reliable path.
@@ -330,6 +548,48 @@ export class Playback {
     this.sources.clear();
     this.nextTime = 0;
     this._finish();
+  }
+
+  /** True when this browser can select an output device at all. */
+  get canSelectOutput() {
+    const element = this.element;
+    return Boolean(element && typeof element.setSinkId === "function");
+  }
+
+  /**
+   * Choose the output device.
+   *
+   * Returns a result rather than throwing, because "unsupported" and "refused"
+   * need different messages and neither should interrupt playback.
+   */
+  async setOutputDevice(deviceId) {
+    this.sinkId = deviceId || "";
+    if (!this.canSelectOutput) {
+      return { ok: false, reason: "unsupported" };
+    }
+    try {
+      await this.element.setSinkId(this.sinkId);
+      return { ok: true };
+    } catch (error) {
+      // NotAllowedError means the page lacks permission to enumerate or select
+      // outputs, which usually resolves after the microphone has been granted.
+      return { ok: false, reason: error && error.name ? error.name : "failed" };
+    }
+  }
+
+  /** List output devices. Empty where the browser does not expose them. */
+  async listOutputDevices() {
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      return devices
+        .filter((device) => device.kind === "audiooutput")
+        .map((device, index) => ({
+          deviceId: device.deviceId,
+          label: device.label || `Output ${index + 1} (name hidden until permission is granted)`,
+        }));
+    } catch {
+      return [];
+    }
   }
 
   setVolume(value) {

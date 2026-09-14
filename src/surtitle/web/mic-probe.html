@@ -52,6 +52,47 @@ document.getElementById('go').onclick = async () => {
     await new Promise(r => setTimeout(r, 3000));
     clearInterval(timer);
     log("peak amplitude over 3 s : " + peak.toFixed(5) + (peak < 0.0005 ? "  <-- SILENT (no signal reaching browser)" : "  <-- SIGNAL PRESENT"));
+    // ---- Does an AudioWorklet run at all in this browser? ----------------
+    // The application's capture path uses an AudioWorklet. If the worklet never
+    // executes here, that is the whole bug. An oscillator is used so the test
+    // does not depend on the microphone.
+    log("\n=== AUDIOWORKLET TEST (oscillator, no mic) ===");
+    try {
+      const wctx = new AudioContext();
+      log("worklet ctx state : " + wctx.state);
+      // Resume and then VERIFY: a resolved resume() does not guarantee the
+      // context is running, and addModule() succeeds even while suspended --
+      // which is how a worklet ends up attached but never driven.
+      for (let i = 0; i < 12 && wctx.state !== 'running'; i++) {
+        await wctx.resume().catch(() => {});
+        if (wctx.state !== 'running') await new Promise(r => setTimeout(r, 60));
+      }
+      log("worklet ctx after : " + wctx.state);
+      await wctx.audioWorklet.addModule('/static/js/capture-worklet.js');
+      log("worklet module    : loaded");
+      const osc = wctx.createOscillator();
+      const g = wctx.createGain();
+      g.gain.value = 0.3;
+      const node = new AudioWorkletNode(wctx, 'capture-processor', {
+        numberOfInputs: 1, numberOfOutputs: 0
+      });
+      let frames = 0, lv = 0, peakW = 0;
+      node.port.onmessage = (ev) => {
+        if (ev.data.type === 'audio') frames++;
+        else if (ev.data.type === 'level') { lv++; peakW = Math.max(peakW, ev.data.value); }
+      };
+      osc.connect(g); g.connect(node); osc.start();
+      node.port.postMessage({ type: 'mute', value: false });
+      await new Promise(r => setTimeout(r, 2000));
+      log("worklet frames    : " + frames);
+      log("worklet level msgs: " + lv + " peak=" + peakW.toFixed(3));
+      log(frames > 10
+        ? "WORKLET: PASS (the worklet executes in this browser)"
+        : "WORKLET: FAIL (the worklet never produced a frame -- this is the bug)");
+    } catch (e) {
+      log("WORKLET: ERROR " + e.name + ": " + e.message);
+    }
+
     stream.getTracks().forEach(t => t.stop());
     ctx.close();
   } catch (e) {

@@ -27,9 +27,15 @@ process to supervise, no port pair to keep in sync, and no `multiprocessing` for
 
 Microphone capture and speaker playback both live in the browser:
 
-- **Capture** is an `AudioWorklet` (`web/js/capture-worklet.js`) that downsamples to
-  16 kHz mono PCM16 in the audio thread and posts ~32 ms frames. It also computes a
-  loudness estimate for barge-in.
+- **Capture** prefers an `AudioWorklet` (`web/js/capture-worklet.js`) that
+  downsamples to 16 kHz mono PCM16 in the audio thread and posts ~32 ms frames,
+  computing a loudness estimate for barge-in as it goes. It has a real failure
+  mode: `addModule()` resolves on a **suspended** AudioContext, the node
+  constructs, and `process()` is never driven — no error, no audio. So the context
+  is resumed and then *verified* running before the worklet is attached, and if no
+  frames arrive shortly after starting, capture falls back automatically to a
+  `ScriptProcessorNode`, which needs no module loading and works everywhere.
+  Falling back to silence is not acceptable.
 - **Playback** is Web Audio (`web/js/audio.js`), scheduling `AudioBuffer`s so
   consecutive sentences join without gaps and `stop()` silences everything
   synchronously.

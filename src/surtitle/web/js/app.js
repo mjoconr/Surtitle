@@ -613,8 +613,32 @@ function clearApproval() {
 
 // -------------------------------------------------------------------- voice
 
+function savedMicrophone() {
+  try {
+    return localStorage.getItem("surtitle.microphone") || "";
+  } catch {
+    return "";
+  }
+}
+
 const capture = new Capture({
+  // Honour a previously chosen input, so the browser's default is only used
+  // until the user says otherwise.
+  deviceId: savedMicrophone(),
   onAudio: (frame) => connection.sendAudio(frame),
+  onBackendChange: (backend) => {
+    // A backend switch is a degraded mode, not a normal event: the user should
+    // know their audio is being captured by the fallback path.
+    if (backend === "script-processor") {
+      state.activity.push({
+        label: "Capture fallback in use",
+        detail:
+          "The AudioWorklet produced no audio in this browser, so the universal " +
+          "ScriptProcessor path is handling capture. Audio still works.",
+      });
+      renderRightbar();
+    }
+  },
   onLevel: (value) => {
     el.micLevel.style.width = `${Math.round(value * 100)}%`;
   },
@@ -629,8 +653,18 @@ const capture = new Capture({
   },
 });
 
+function savedSpeaker() {
+  try {
+    return localStorage.getItem("surtitle.speaker") || "";
+  } catch {
+    return "";
+  }
+}
+
 const playback = new Playback({
   sampleRate: 24000,
+  element: document.getElementById("speaker"),
+  sinkId: savedSpeaker(),
   onStart: () => {
     setAgentState("speaking");
     // The grace window stops the speaker tail from triggering barge-in before
@@ -686,6 +720,12 @@ async function toggleMic() {
     // user gesture, so it starts suspended and can then never be resumed. The
     // result is a reply that silently never plays, with no error anywhere.
     const outputReady = await playback.unlock();
+    if (savedSpeaker() && playback.canSelectOutput) {
+      const result = await playback.setOutputDevice(savedSpeaker());
+      if (!result.ok && result.reason !== "unsupported") {
+        console.warn("[surtitle] could not restore the saved output device", result.reason);
+      }
+    }
     if (!outputReady) {
       toast(
         "Your browser blocked audio playback. Click anywhere on the page, then try again.",
@@ -693,7 +733,7 @@ async function toggleMic() {
       );
     }
 
-    const captureState = await capture.start();
+    const captureState = await capture.start();  // { running, backend }
     state.micOpen = true;
     el.micButton.dataset.active = "true";
     el.micButton.setAttribute("aria-pressed", "true");
@@ -712,6 +752,7 @@ async function toggleMic() {
       detail:
         `device="${started.deviceLabel || "unknown"}" ` +
         `context=${started.running ? "running" : "NOT RUNNING"} ` +
+        `backend=${started.backend} ` +
         `track=${started.trackState}${started.trackMuted ? " MUTED" : ""}`,
     });
     renderRightbar();
@@ -751,7 +792,7 @@ async function toggleMic() {
         label: "Capture check (3.5 s)",
         detail:
           `frames=${status.framesReceived} peak=${status.maxLevel.toFixed(4)} ` +
-          `context=${status.running ? "running" : "NOT RUNNING"}`,
+          `backend=${status.backend} context=${status.running ? "running" : "NOT RUNNING"}`,
       });
       renderRightbar();
 
@@ -897,6 +938,15 @@ el.composer.addEventListener("input", () => {
   el.composer.style.height = `${Math.min(160, el.composer.scrollHeight)}px`;
 });
 
+// A right-click on the mic opens the device picker directly: choosing an input is
+// a frequent action when a machine has several, and digging through Settings for
+// it is friction.
+el.micButton.addEventListener("contextmenu", (event) => {
+  event.preventDefault();
+  settings.activeSection = "microphone";
+  settings.open();
+});
+
 document.getElementById("newSession").addEventListener("click", () => createSession());
 
 document.getElementById("tabFiles").addEventListener("click", () => {
@@ -977,7 +1027,28 @@ document.getElementById("projectCreate").addEventListener("click", async () => {
 
 // ---------------------------------------------------------------- settings
 
+/** Apply a microphone change without requiring a page reload. */
+async function applyMicrophoneChange(deviceId) {
+  capture.setDevice(deviceId);
+  if (!state.micOpen) return;
+  // Restart capture so the new device takes effect now rather than on next open.
+  try {
+    await capture.stop();
+    await capture.start();
+    el.captions.replaceChildren(
+      node("span", "captions__hint", "Listening on the new device…"),
+    );
+  } catch (error) {
+    toast(`Could not switch microphone: ${error.message}`, "error");
+  }
+}
+
 const settings = new SettingsPanel({
+  playback,
+  onMicrophoneChange: (deviceId) => {
+    applyMicrophoneChange(deviceId);
+  },
+  onSpeakerChange: (deviceId) => playback.setOutputDevice(deviceId),
   onSaved: (described) => {
     state.settings = described;
     const model = Object.values(described.sections || {})
