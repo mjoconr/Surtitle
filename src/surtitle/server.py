@@ -329,9 +329,15 @@ def build_api(state: AppState) -> APIRouter:
     async def get_project(project_id: str) -> Any:
         project = _project_or_404(state, project_id)
         state.store.touch_project(project_id)
+        every = state.store.list_sessions(project_id, include_archived=True, limit=500)
         return {
             **project.to_dict(),
-            "sessions": [s.to_dict() for s in state.store.list_sessions(project_id)],
+            # Live conversations only; the archive is fetched on demand.
+            "sessions": [s.to_dict() for s in every if not s.archived],
+            "session_counts": {
+                "active": sum(1 for s in every if not s.archived),
+                "archived": sum(1 for s in every if s.archived),
+            },
         }
 
     @api.patch("/projects/{project_id}")
@@ -514,9 +520,24 @@ def build_api(state: AppState) -> APIRouter:
 
     # --- sessions --------------------------------------------------------
     @api.get("/projects/{project_id}/sessions")
-    async def list_sessions(project_id: str) -> dict[str, Any]:
+    async def list_sessions(project_id: str, archived: str = "active") -> dict[str, Any]:
+        """List conversations.
+
+        ``archived`` selects the view: ``active`` (default), ``archived``, or
+        ``all``. The counts are always returned for both sides so the sidebar can
+        label the archive without a second request.
+        """
         _project_or_404(state, project_id)
-        return {"sessions": [s.to_dict() for s in state.store.list_sessions(project_id)]}
+        view = archived if archived in {"active", "archived", "all"} else "active"
+        every = state.store.list_sessions(project_id, include_archived=True, limit=500)
+        sessions = [s for s in every if view == "all" or (view == "archived") == bool(s.archived)]
+        return {
+            "sessions": [s.to_dict() for s in sessions],
+            "counts": {
+                "active": sum(1 for s in every if not s.archived),
+                "archived": sum(1 for s in every if s.archived),
+            },
+        }
 
     @api.post("/projects/{project_id}/sessions")
     async def create_session(project_id: str, body: dict[str, Any] | None = Body(None)) -> Any:
@@ -535,13 +556,55 @@ def build_api(state: AppState) -> APIRouter:
             "tool_calls": [t.to_dict() for t in state.store.list_tool_calls(session_id)],
         }
 
+    @api.post("/sessions/{session_id}/archive")
+    async def archive_session(session_id: str) -> Any:
+        """File a conversation away. Keeps the transcript and every file on disk."""
+        if state.store.get_session(session_id) is None:
+            return _error(404, "Session not found.")
+        session = state.store.set_session_archived(session_id, True)
+        # Drop any live runtime session so an archived conversation stops
+        # listening. Only the in-memory session goes away; the transcript stays.
+        await state.sessions.remove(session_id)
+        return {"archived": session_id, "session": session.to_dict() if session else None}
+
+    @api.post("/sessions/{session_id}/unarchive")
+    async def unarchive_session(session_id: str) -> Any:
+        if state.store.get_session(session_id) is None:
+            return _error(404, "Session not found.")
+        session = state.store.set_session_archived(session_id, False)
+        return {"unarchived": session_id, "session": session.to_dict() if session else None}
+
     @api.delete("/sessions/{session_id}")
     async def delete_session(session_id: str) -> dict[str, Any]:
+        """Delete one conversation for good. Files in the project are untouched."""
         if state.store.get_session(session_id) is None:
             return _error(404, "Session not found.")
         state.store.delete_session(session_id)
         await state.sessions.remove(session_id)
         return {"deleted": session_id}
+
+    @api.delete("/projects/{project_id}/sessions/archived")
+    async def purge_archived(project_id: str, confirm: bool = False) -> Any:
+        """Permanently delete every archived conversation in a project.
+
+        This clears chat history only; the project folder is never touched.
+        ``confirm=true`` is required so a stray request cannot wipe the archive.
+        """
+        project = _project_or_404(state, project_id)
+        if not confirm:
+            return _error(
+                400,
+                "Emptying the archive permanently deletes those conversations."
+                " Repeat with confirm=true.",
+                field="confirm",
+            )
+        archived = state.store.list_sessions(project_id, include_archived=True, limit=500)
+        for session in archived:
+            if session.archived:
+                await state.sessions.remove(session.id)
+        removed = state.store.purge_archived_sessions(project_id)
+        log.info("purged %d archived session(s) from project %s", removed, project.name)
+        return {"purged": removed, "project_id": project_id}
 
     # --- tools -----------------------------------------------------------
     @api.get("/projects/{project_id}/environment")
@@ -651,7 +714,7 @@ def build_ws(state: AppState) -> APIRouter:
                 send=lambda payload: _safe_send(websocket, payload),
                 send_audio=lambda audio: _safe_send_bytes(websocket, bytes([_OP_AUDIO_IN]) + audio),
             )
-            state.sessions.add(session)
+            await state.sessions.add(session)
             await session.start()
 
             if missing:
@@ -675,7 +738,9 @@ def build_ws(state: AppState) -> APIRouter:
             log.exception("websocket handler failed")
         finally:
             if session is not None:
-                await state.sessions.remove(session.session_id)
+                # Pinned to this instance: a reconnecting browser may already have
+                # replaced it, and this handler must not unregister the newer one.
+                await state.sessions.remove(session.session_id, session=session)
             with contextlib.suppress(Exception):
                 await websocket.close()
 

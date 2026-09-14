@@ -23,7 +23,7 @@ __all__ = ["Message", "Project", "Session", "Store", "ToolCallRecord"]
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -48,7 +48,11 @@ CREATE TABLE IF NOT EXISTS sessions (
     project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     title       TEXT NOT NULL DEFAULT 'New conversation',
     created_at  REAL NOT NULL,
-    updated_at  REAL NOT NULL
+    updated_at  REAL NOT NULL,
+    -- NULL while the conversation is live. A timestamp once the user filed it
+    -- away: archived conversations keep their messages and can be restored, but
+    -- drop out of the sidebar and out of the agent's history search.
+    archived_at REAL
 );
 
 CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id, updated_at DESC);
@@ -118,6 +122,11 @@ class Session:
     title: str
     created_at: float
     updated_at: float
+    archived_at: float | None = None
+
+    @property
+    def archived(self) -> bool:
+        return self.archived_at is not None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -126,6 +135,8 @@ class Session:
             "title": self.title,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
+            "archived_at": self.archived_at,
+            "archived": self.archived,
         }
 
 
@@ -212,6 +223,7 @@ class Store:
     def _migrate(self) -> None:
         with self._lock, self._conn:
             self._conn.executescript(_SCHEMA)
+            self._add_missing_columns()
             row = self._conn.execute(
                 "SELECT value FROM meta WHERE key = 'schema_version'"
             ).fetchone()
@@ -220,6 +232,31 @@ class Store:
                     "INSERT INTO meta (key, value) VALUES ('schema_version', ?)",
                     (str(SCHEMA_VERSION),),
                 )
+            else:
+                self._conn.execute(
+                    "UPDATE meta SET value = ? WHERE key = 'schema_version'",
+                    (str(SCHEMA_VERSION),),
+                )
+
+    def _add_missing_columns(self) -> None:
+        """Bring an existing database up to the current schema.
+
+        ``CREATE TABLE IF NOT EXISTS`` silently does nothing to a table that
+        already exists, so a column added to ``_SCHEMA`` would never reach a
+        database created by an older build. Each entry here is additive and
+        idempotent, which keeps upgrades safe to repeat and safe to interrupt.
+        """
+        additions = {"sessions": {"archived_at": "REAL"}}
+        for table, columns in additions.items():
+            existing = {
+                row["name"] for row in self._conn.execute(f"PRAGMA table_info({table})").fetchall()
+            }
+            if not existing:  # table absent entirely; the schema script will make it
+                continue
+            for name, sql_type in columns.items():
+                if name not in existing:
+                    log.info("adding %s.%s", table, name)
+                    self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {sql_type}")
 
     def _enable_search(self) -> bool:
         """Create the conversation search index if FTS5 is available."""
@@ -272,7 +309,8 @@ class Store:
                         " bm25(message_search) AS score"
                         " FROM message_search"
                         " JOIN messages m ON m.id = CAST(message_search.message_id AS INTEGER)"
-                        " WHERE message_search MATCH ?"
+                        " JOIN sessions s ON s.id = m.session_id"
+                        " WHERE message_search MATCH ? AND s.archived_at IS NULL"
                         " ORDER BY score LIMIT ?",
                         (match, limit + 5),
                     ).fetchall()
@@ -280,9 +318,10 @@ class Store:
                 # Fallback, and also the path taken when a quoted phrase finds
                 # nothing: a plain substring scan is slower but never misses.
                 rows = self._conn.execute(
-                    "SELECT session_id, role, content, content AS excerpt, 0 AS score"
-                    " FROM messages WHERE content LIKE ?"
-                    " ORDER BY id DESC LIMIT ?",
+                    "SELECT m.session_id, m.role, m.content, m.content AS excerpt, 0 AS score"
+                    " FROM messages m JOIN sessions s ON s.id = m.session_id"
+                    " WHERE m.content LIKE ? AND s.archived_at IS NULL"
+                    " ORDER BY m.id DESC LIMIT ?",
                     (f"%{needle}%", limit + 5),
                 ).fetchall()
 
@@ -423,13 +462,55 @@ class Store:
             ).fetchone()
         return self._row_to_session(row) if row else None
 
-    def list_sessions(self, project_id: str, *, limit: int = 50) -> list[Session]:
+    def list_sessions(
+        self, project_id: str, *, limit: int = 50, include_archived: bool = False
+    ) -> list[Session]:
+        """Conversations for a project, most recently used first.
+
+        Archived conversations are excluded unless ``include_archived`` is set,
+        which is what makes archiving feel like filing something away rather
+        than deleting it.
+        """
+        sql = "SELECT * FROM sessions WHERE project_id = ?"
+        if not include_archived:
+            sql += " AND archived_at IS NULL"
+        sql += " ORDER BY updated_at DESC LIMIT ?"
         with self._lock:
-            rows = self._conn.execute(
-                "SELECT * FROM sessions WHERE project_id = ? ORDER BY updated_at DESC LIMIT ?",
-                (project_id, limit),
-            ).fetchall()
+            rows = self._conn.execute(sql, (project_id, limit)).fetchall()
         return [self._row_to_session(r) for r in rows]
+
+    def set_session_archived(self, session_id: str, archived: bool = True) -> Session | None:
+        """File a conversation away, or bring it back. Never touches the files.
+
+        Returns the updated session, or ``None`` when the id is unknown.
+        """
+        now = time.time()
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                "UPDATE sessions SET archived_at = ? WHERE id = ?",
+                (now if archived else None, session_id),
+            )
+            if cursor.rowcount == 0:
+                return None
+        return self.get_session(session_id)
+
+    def purge_archived_sessions(self, project_id: str) -> int:
+        """Permanently delete every archived conversation in a project.
+
+        Returns how many were removed. The project directory itself is never
+        touched - this only clears chat history.
+        """
+        with self._lock, self._conn:
+            ids = [
+                row["id"]
+                for row in self._conn.execute(
+                    "SELECT id FROM sessions WHERE project_id = ? AND archived_at IS NOT NULL",
+                    (project_id,),
+                ).fetchall()
+            ]
+            for session_id in ids:
+                self.delete_session(session_id)
+        return len(ids)
 
     def touch_session(self, session_id: str, *, title: str | None = None) -> None:
         with self._lock, self._conn:
@@ -445,18 +526,29 @@ class Store:
                 )
 
     def delete_session(self, session_id: str) -> bool:
+        """Delete one conversation and its transcript. Files are not affected."""
         with self._lock, self._conn:
+            # The search index is a virtual table with no foreign key, so the
+            # cascade below does not reach it. Leave the rows and search would
+            # keep returning excerpts from conversations that no longer exist.
+            if self.fts5:
+                with contextlib.suppress(sqlite3.Error):
+                    self._conn.execute(
+                        "DELETE FROM message_search WHERE session_id = ?", (session_id,)
+                    )
             cursor = self._conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
         return cursor.rowcount > 0
 
     @staticmethod
     def _row_to_session(row: sqlite3.Row) -> Session:
+        keys = row.keys()
         return Session(
             id=row["id"],
             project_id=row["project_id"],
             title=row["title"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
+            archived_at=row["archived_at"] if "archived_at" in keys else None,
         )
 
     # --- messages --------------------------------------------------------

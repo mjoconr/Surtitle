@@ -280,6 +280,69 @@ button, input, textarea, select {
   min-height: 0;
 }
 
+/* Filed-away conversations sit below the live list and stay compact. */
+.sidebar__list--archive {
+  flex: 0 0 auto;
+  max-height: 24vh;
+  opacity: 0.86;
+}
+
+.sidebar__archiveFoot {
+  padding: 0 12px 8px;
+  display: flex;
+}
+
+.row--sub {
+  font-size: 12px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.row--sub .row__icon { font-size: 10px; }
+
+/* A conversation row plus the actions revealed on hover. The row itself is a
+   button, so the actions have to be siblings rather than children. */
+.row-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+  border-radius: 8px;
+}
+
+.row-wrap .row { padding-right: 4px; }
+
+.row__actions {
+  display: none;
+  gap: 2px;
+  padding-right: 6px;
+  position: absolute;
+  right: 0;
+  background: linear-gradient(
+    to right,
+    transparent 0,
+    var(--dsw-alias-interactive-bg-hover) 12px
+  );
+}
+
+.row-wrap:hover .row__actions,
+.row-wrap:focus-within .row__actions { display: flex; }
+
+.row-wrap:hover .row { background: var(--dsw-alias-interactive-bg-hover); }
+
+.row__action {
+  width: 22px;
+  height: 22px;
+  font-size: 12px;
+  border-radius: 6px;
+}
+
+.row__action--danger { color: var(--dsw-alias-state-error-primary); }
+
+.button--tiny {
+  padding: 4px 10px;
+  font-size: 11px;
+  border-radius: 6px;
+}
+
 .sidebar__foot {
   border-top: 0.5px solid var(--dsw-alias-border-l3);
   padding: 8px;
@@ -1015,6 +1078,7 @@ button, input, textarea, select {
 .setting__text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; padding-right: 24px; }
 .setting__title { font-size: 14px; }
 .setting__desc { font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-tertiary); }
+.setting__desc--note { margin-top: 8px; color: var(--dsw-alias-label-caption); }
 .setting__control { flex: none; display: flex; align-items: center; gap: 8px; min-width: 180px; justify-content: flex-end; }
 .setting__control .select, .setting__control .input { width: 180px; }
 

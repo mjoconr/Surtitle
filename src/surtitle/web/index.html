@@ -33,6 +33,19 @@
     </div>
     <div class="sidebar__list" id="sessionList" role="list" style="flex:0 0 auto;max-height:32vh"></div>
 
+    <!-- Filed-away conversations. Hidden entirely until there is something in it. -->
+    <button class="row row--sub" id="archiveToggle" type="button" aria-expanded="false" hidden>
+      <span class="row__icon" aria-hidden="true">▸</span>
+      <span class="row__main row__title">Archived</span>
+      <span class="row__meta" id="archiveCount">0</span>
+    </button>
+    <div class="sidebar__list sidebar__list--archive" id="archiveList" role="list" hidden></div>
+    <div class="sidebar__archiveFoot" id="archiveFoot" hidden>
+      <button class="button button--danger button--tiny" id="archivePurge" type="button">
+        Delete all archived
+      </button>
+    </div>
+
     <div class="sidebar__foot">
       <button class="row" id="settingsOpen" type="button" aria-haspopup="dialog">
         <span class="row__icon" aria-hidden="true">⚙</span>
@@ -173,6 +186,28 @@
       <div class="modal__footer">
         <button class="button button--ghost" id="projectCancel" type="button">Cancel</button>
         <button class="button button--primary" id="projectCreate" type="button">Create</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Confirmation for destructive conversation actions. Always states that files
+     in the project folder are not touched. -->
+<div class="modal" id="confirmModal" hidden>
+  <div class="modal__mask" id="confirmMask"></div>
+  <div class="modal__panel modal__panel--narrow" role="dialog" aria-modal="true"
+       aria-labelledby="confirmTitle">
+    <div class="modal__content">
+      <div class="modal__header">
+        <span class="modal__title" id="confirmTitle">Are you sure?</span>
+      </div>
+      <div class="modal__options">
+        <p class="setting__desc" id="confirmText"></p>
+        <p class="setting__desc setting__desc--note" id="confirmNote" hidden></p>
+      </div>
+      <div class="modal__footer">
+        <button class="button button--ghost" id="confirmCancel" type="button">Cancel</button>
+        <button class="button button--danger" id="confirmOk" type="button">Confirm</button>
       </div>
     </div>
   </div>

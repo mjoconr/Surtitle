@@ -24,6 +24,10 @@ const AGENT_STATE_LABELS = {
 const state = {
   projects: [],
   sessions: [],
+  // Conversations the user filed away: kept, but out of the sidebar and out of
+  // the agent's history search until restored.
+  archive: [],
+  showArchive: false,
   project: null,
   session: null,
   turns: new Map(),
@@ -45,6 +49,16 @@ const el = {
   frame: document.getElementById("frame"),
   projectList: document.getElementById("projectList"),
   sessionList: document.getElementById("sessionList"),
+  archiveToggle: document.getElementById("archiveToggle"),
+  archiveCount: document.getElementById("archiveCount"),
+  archiveList: document.getElementById("archiveList"),
+  archiveFoot: document.getElementById("archiveFoot"),
+  archivePurge: document.getElementById("archivePurge"),
+  confirmModal: document.getElementById("confirmModal"),
+  confirmTitle: document.getElementById("confirmTitle"),
+  confirmText: document.getElementById("confirmText"),
+  confirmNote: document.getElementById("confirmNote"),
+  confirmOk: document.getElementById("confirmOk"),
   turns: document.getElementById("turns"),
   transcript: document.getElementById("transcript"),
   captions: document.getElementById("captions"),
@@ -347,27 +361,86 @@ function renderProjects() {
   }
 }
 
+/** A small icon button for the hover actions on a conversation row. */
+function rowAction(glyph, title, handler, { danger = false } = {}) {
+  const button = node("button", "button button--icon button--ghost row__action", glyph);
+  button.type = "button";
+  button.title = title;
+  button.setAttribute("aria-label", title);
+  if (danger) button.classList.add("row__action--danger");
+  button.addEventListener("click", (event) => {
+    // The row underneath is itself a button; without this the click would also
+    // open the conversation we are about to archive.
+    event.stopPropagation();
+    event.preventDefault();
+    handler();
+  });
+  return button;
+}
+
+function sessionRow(session, { archived }) {
+  const wrap = node("div", "row-wrap");
+  const button = node("button", "row");
+  button.type = "button";
+  button.setAttribute("aria-current", String(state.session?.id === session.id));
+  button.append(node("span", "row__icon", archived ? "▤" : "□"));
+
+  const main = node("div", "row__main");
+  main.append(node("div", "row__title", session.title));
+  const when = new Date(session.updated_at * 1000).toLocaleString();
+  main.append(node("div", "row__meta", archived ? `Archived · ${when}` : when));
+  button.append(main);
+  button.addEventListener("click", () => selectSession(session.id));
+
+  const actions = node("div", "row__actions");
+  if (archived) {
+    actions.append(
+      rowAction("↩", "Restore this conversation", () => restoreSession(session)),
+      rowAction("✕", "Delete this conversation for good", () => deleteSessionForever(session), {
+        danger: true,
+      }),
+    );
+  } else {
+    actions.append(
+      rowAction("▤", "Archive — keeps the chat, hides it from the list", () =>
+        archiveSession(session),
+      ),
+    );
+  }
+
+  wrap.append(button, actions);
+  return wrap;
+}
+
 function renderSessions() {
   el.sessionList.replaceChildren();
+  el.archiveList.replaceChildren();
+
+  const archived = state.archive.length;
+  el.archiveToggle.hidden = !state.project;
+  el.archiveCount.textContent = String(archived);
+  el.archiveToggle.setAttribute("aria-expanded", String(state.showArchive));
+  el.archiveToggle.querySelector(".row__icon").textContent = state.showArchive ? "▾" : "▸";
+  const open = state.showArchive && archived > 0;
+  el.archiveList.hidden = !open;
+  el.archiveFoot.hidden = !open;
+  el.archiveToggle.disabled = archived === 0;
+
   if (!state.project) {
     el.sessionList.append(node("p", "empty", "Open a project first."));
     return;
   }
   if (state.sessions.length === 0) {
     el.sessionList.append(node("p", "empty", "No conversations yet."));
-    return;
+  } else {
+    for (const session of state.sessions) {
+      el.sessionList.append(sessionRow(session, { archived: false }));
+    }
   }
-  for (const session of state.sessions) {
-    const button = node("button", "row");
-    button.type = "button";
-    button.setAttribute("aria-current", String(state.session?.id === session.id));
-    button.append(node("span", "row__icon", "□"));
-    const main = node("div", "row__main");
-    main.append(node("div", "row__title", session.title));
-    main.append(node("div", "row__meta", new Date(session.updated_at * 1000).toLocaleString()));
-    button.append(main);
-    button.addEventListener("click", () => selectSession(session.id));
-    el.sessionList.append(button);
+  if (open) {
+    for (const session of state.archive) {
+      el.archiveList.append(sessionRow(session, { archived: true }));
+    }
   }
 }
 
@@ -537,6 +610,20 @@ function handleEvent(event) {
         }
       }
       if (data.model) el.modelBadge.textContent = data.model;
+      // The server synthesises at this rate. Adopting it is what keeps a
+      // configured rate from being decoded as if it were the default.
+      if (data.sample_rate && !playback.setServerRate(data.sample_rate)) {
+        state.activity.push({
+          label: "Speech rate mismatch",
+          detail:
+            `synthesised at ${data.sample_rate} Hz but the audio output runs at ` +
+            `${playback.status.negotiatedRate} Hz. Speech will sound too fast or too slow; ` +
+            "reload the page to rebuild the audio output.",
+        });
+        renderRightbar();
+      }
+      // Only used when the server could not ask Deepgram for the speed itself.
+      if (data.speech_speed) playback.setPlaybackRate(data.speech_speed);
       if (data.environment) {
         state.environment = data.environment;
       }
@@ -554,6 +641,15 @@ function handleEvent(event) {
         // A cancellation reports `idle` without ever sending `done`, so the
         // release has to happen here too.
         if (data.state !== "awaiting_approval") clearApproval();
+      }
+      // Deepgram refused the speed, so the server asked us to apply it here.
+      if (data.speech_speed && data.kind_detail === "speed_fallback") {
+        playback.setPlaybackRate(data.speech_speed);
+        state.activity.push({
+          label: "Speech speed",
+          detail: `${data.speech_speed}× applied during playback (the voice rejected it)`,
+        });
+        renderRightbar();
       }
       break;
     }
@@ -784,6 +880,20 @@ const playback = new Playback({
     // The grace window stops the speaker tail from triggering barge-in before
     // echo cancellation has converged.
     capture.notifyPlayback(true);
+    // Record what the output path negotiated, once per spoken turn. Every field
+    // here can silence or distort the voice on its own, and all of them can
+    // change when audio devices come and go — so an intermittent fault leaves a
+    // trail instead of a mystery.
+    const status = playback.status;
+    console.info("[surtitle] playback started", status);
+    state.activity.push({ label: "Speaking", detail: playback.statusLine });
+    if (!status.rateMatches) {
+      state.activity.push({
+        label: "Speech rate mismatch",
+        detail: `synthesised at ${status.requestedRate} Hz, output at ${status.negotiatedRate} Hz`,
+      });
+    }
+    renderRightbar();
   },
   onIdle: () => {
     capture.notifyPlayback(false);
@@ -937,16 +1047,17 @@ async function loadProjects() {
 async function selectProject(projectId) {
   const project = await api(`/api/projects/${projectId}`);
   state.project = project;
-  state.sessions = project.sessions || [];
   state.session = null;
+  state.archive = [];
+  state.showArchive = false;
   state.turns.clear();
   state.toolRows.clear();
   state.currentTurn = null;
   state.activity = [];
   el.turns.replaceChildren();
 
+  await refreshSessions();
   renderProjects();
-  renderSessions();
   renderHeader();
   await loadFiles(".");
 
@@ -957,6 +1068,96 @@ async function selectProject(projectId) {
   }
 }
 
+/** Reload both halves of the conversation list from the server. */
+async function refreshSessions() {
+  if (!state.project) return;
+  const data = await api(`/api/projects/${state.project.id}/sessions?archived=all`);
+  const all = data.sessions || [];
+  state.sessions = all.filter((session) => !session.archived);
+  state.archive = all.filter((session) => session.archived);
+  renderSessions();
+}
+
+/**
+ * Reset the open conversation after it was archived or deleted, opening another
+ * one so the user is never left staring at a transcript that no longer exists.
+ */
+async function reopenAfterRemoval() {
+  state.session = null;
+  el.turns.replaceChildren();
+  state.turns.clear();
+  state.toolRows.clear();
+  state.currentTurn = null;
+  state.activity = [];
+  if (state.sessions.length) {
+    await selectSession(state.sessions[0].id);
+  } else {
+    await createSession();
+  }
+}
+
+async function archiveSession(session) {
+  try {
+    await api(`/api/sessions/${session.id}/archive`, { method: "POST" });
+    const wasOpen = state.session?.id === session.id;
+    await refreshSessions();
+    toast("Conversation archived. Your files are untouched.");
+    if (wasOpen) await reopenAfterRemoval();
+  } catch (cause) {
+    toast(cause.message, "error");
+  }
+}
+
+async function restoreSession(session) {
+  try {
+    await api(`/api/sessions/${session.id}/unarchive`, { method: "POST" });
+    await refreshSessions();
+    toast("Conversation restored.");
+  } catch (cause) {
+    toast(cause.message, "error");
+  }
+}
+
+async function deleteSessionForever(session) {
+  const ok = await confirmAction({
+    title: "Delete this conversation?",
+    text: `"${session.title}" and its transcript will be removed permanently.`,
+    note: "Only the chat is deleted. Files the agent created stay in the project folder.",
+    confirmLabel: "Delete",
+  });
+  if (!ok) return;
+  try {
+    const wasOpen = state.session?.id === session.id;
+    await api(`/api/sessions/${session.id}`, { method: "DELETE" });
+    await refreshSessions();
+    toast("Conversation deleted.");
+    if (wasOpen) await reopenAfterRemoval();
+  } catch (cause) {
+    toast(cause.message, "error");
+  }
+}
+
+async function purgeArchive() {
+  const count = state.archive.length;
+  const ok = await confirmAction({
+    title: `Delete all ${count} archived conversation${count === 1 ? "" : "s"}?`,
+    text: "Their transcripts are removed permanently and cannot be recovered.",
+    note: "Only chat history is deleted. Files in the project folder are never touched.",
+    confirmLabel: "Delete all",
+  });
+  if (!ok) return;
+  try {
+    await api(`/api/projects/${state.project.id}/sessions/archived?confirm=true`, {
+      method: "DELETE",
+    });
+    state.showArchive = false;
+    await refreshSessions();
+    toast(`Deleted ${count} archived conversation${count === 1 ? "" : "s"}.`);
+  } catch (cause) {
+    toast(cause.message, "error");
+  }
+}
+
 async function createSession() {
   if (!state.project) return;
   const session = await api(`/api/projects/${state.project.id}/sessions`, {
@@ -964,6 +1165,7 @@ async function createSession() {
     body: JSON.stringify({}),
   });
   state.sessions.unshift(session);
+  renderSessions();
   await selectSession(session.id);
 }
 
@@ -1123,6 +1325,15 @@ document.getElementById("approvalDeny").addEventListener("click", () => answerAp
 // answerApproval, so a follow-up tool prompt can be answered without reaching for
 // the mouse.
 document.addEventListener("keydown", (event) => {
+  // A confirmation is modal: it takes Escape first, and must not fall through to
+  // the approval shortcuts behind it.
+  if (!el.confirmModal.hidden) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeConfirm(false);
+    }
+    return;
+  }
   if (!state.pendingApproval) return;
   if (event.key === "Enter" && !event.shiftKey) {
     event.preventDefault();
@@ -1201,6 +1412,46 @@ function openProjectModal() {
 function closeProjectModal() {
   projectModal.hidden = true;
 }
+
+// ------------------------------------------------------------- confirmation
+
+let confirmResolver = null;
+
+/**
+ * Ask before anything irreversible. Resolves true to go ahead, false to cancel.
+ * The note line always explains what is *not* affected, because "delete the
+ * conversation" should never read as "delete my work".
+ */
+function confirmAction({ title, text, note, confirmLabel = "Confirm" }) {
+  el.confirmTitle.textContent = title;
+  el.confirmText.textContent = text;
+  el.confirmNote.textContent = note || "";
+  el.confirmNote.hidden = !note;
+  el.confirmOk.textContent = confirmLabel;
+  el.confirmModal.hidden = false;
+  el.confirmOk.focus();
+  return new Promise((resolve) => {
+    confirmResolver = resolve;
+  });
+}
+
+function closeConfirm(result) {
+  if (el.confirmModal.hidden && !confirmResolver) return;
+  el.confirmModal.hidden = true;
+  const resolve = confirmResolver;
+  confirmResolver = null;
+  if (resolve) resolve(result);
+}
+
+document.getElementById("confirmOk").addEventListener("click", () => closeConfirm(true));
+document.getElementById("confirmCancel").addEventListener("click", () => closeConfirm(false));
+document.getElementById("confirmMask").addEventListener("click", () => closeConfirm(false));
+
+document.getElementById("archiveToggle").addEventListener("click", () => {
+  state.showArchive = !state.showArchive;
+  renderSessions();
+});
+el.archivePurge.addEventListener("click", purgeArchive);
 document.getElementById("newProject").addEventListener("click", openProjectModal);
 document.getElementById("projectClose").addEventListener("click", closeProjectModal);
 document.getElementById("projectCancel").addEventListener("click", closeProjectModal);
