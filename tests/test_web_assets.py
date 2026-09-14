@@ -259,6 +259,80 @@ class TestSpeechPlaybackRate:
         )
 
 
+class TestCaptureWorkletWiring:
+    """Guards for a silent failure that made the worklet path never work at all.
+
+    Browsers disagree about how an `AudioWorkletProcessor` receives messages: the
+    specification delivers them to `port.onmessage`, Chrome never calls a
+    `handleMessage` method, and Firefox has historically called only that. The
+    processor defined `handleMessage` alone, so the `mute: false` that arms
+    capture never arrived, `_muted` stayed at its constructor default, and it
+    posted zero frames — in every browser. Nothing errored; `process()` ran and the
+    graph was fine. The app's ScriptProcessor watchdog then took over silently, so
+    voice worked while the intended low-latency path never did.
+
+    There is no browser here, so these assert on the shape of the code, as with the
+    `[hidden]` regression above. The behaviour was confirmed in a real browser:
+    the single-entry-point version emits 0 frames, the both-entry-points version
+    emits 62 frames in 2 s.
+    """
+
+    @pytest.fixture(scope="module")
+    def worklet(self) -> str:
+        return (WEB / "js" / "capture-worklet.js").read_text(encoding="utf-8")
+
+    def test_the_modern_entry_point_is_wired(self, worklet):
+        assert "this.port.onmessage = " in worklet, (
+            "Chrome never calls handleMessage, so without port.onmessage the "
+            "processor can never be armed and emits nothing"
+        )
+
+    def test_the_legacy_entry_point_is_kept(self, worklet):
+        assert "handleMessage(event)" in worklet, (
+            "Firefox has historically called only handleMessage"
+        )
+
+    def test_both_entry_points_share_one_handler(self, worklet):
+        """Two copies of the mute logic would drift apart."""
+        assert "this._onMessage(event.data)" in worklet
+        assert worklet.count("this._onMessage(event.data)") == 2
+
+    def test_the_processor_still_arms_on_mute(self, worklet):
+        assert 'if (data.type === "mute")' in worklet
+        assert "this._muted = Boolean(data.value);" in worklet
+
+    def test_the_worklet_url_is_versioned(self, audio):
+        """A cached pre-fix processor would otherwise survive an upgrade."""
+        assert "WORKLET_VERSION" in audio
+        assert "capture-worklet.js?v=" in audio
+
+
+class TestActivityPanelNoise:
+    """Reasoning must not flood the panel.
+
+    Reasoning arrives as token-sized deltas. Pushing one row per delta and
+    re-rendering the whole panel each time turned the activity log into a wall of
+    single words — "Reasoning: .", "Reasoning: briefly" — and rebuilt the DOM
+    dozens of times a second during every thinking turn.
+    """
+
+    def test_reasoning_goes_through_the_coalescing_helper(self, script):
+        assert "pushReasoning(data.text)" in script, (
+            "the thinking case must not push a row per delta"
+        )
+        assert (
+            'state.activity.push({ label: "Reasoning", detail: data.text.slice(0, 240) })'
+            not in script
+        )
+
+    def test_the_helper_reuses_the_last_reasoning_row(self, script):
+        assert 'last.label === "Reasoning"' in script
+
+    def test_the_re_render_is_throttled(self, script):
+        assert "reasoningRenderTimer" in script
+        assert "REASONING_MAX_CHARS" in script
+
+
 class TestReadyEventContract:
     """The fields the browser needs must be present in the ready event."""
 

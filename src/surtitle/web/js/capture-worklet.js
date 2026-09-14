@@ -46,10 +46,31 @@ class CaptureProcessor extends AudioWorkletProcessor {
     this._graceFrames = 0;
     this._speaking = false;
     this._muted = true;
+
+    // Browsers disagree about how a processor receives messages, and getting it
+    // wrong fails completely silently: `process()` keeps running, the graph is
+    // fine, and not one frame is ever posted.
+    //
+    // The specification delivers messages to `port.onmessage`. Chrome does not
+    // call a `handleMessage` method at all, and Firefox has historically called
+    // *only* that. This processor originally defined `handleMessage` alone, so
+    // Chrome never delivered the `mute: false` that arms capture, `_muted` stayed
+    // at its constructor default, and capture produced zero frames in **every**
+    // browser. The ScriptProcessor fallback then quietly took over, which is why
+    // voice appeared to work while this path never did.
+    //
+    // Both entry points are wired, and both are idempotent, so a browser that
+    // calls either (or, harmlessly, both) behaves identically.
+    this.port.onmessage = (event) => this._onMessage(event.data);
   }
 
+  /** Legacy entry point, still used by some engines. */
   handleMessage(event) {
-    const data = event.data || {};
+    this._onMessage(event.data);
+  }
+
+  _onMessage(data) {
+    data = data || {};
     if (data.type === "mute") {
       this._muted = Boolean(data.value);
       this._speechFrames = 0;

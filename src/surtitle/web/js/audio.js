@@ -10,7 +10,12 @@
  * an instant stop() for barge-in, which an element cannot do mid-buffer.
  */
 
-const WORKLET_URL = "/static/js/capture-worklet.js";
+// Bump this whenever capture-worklet.js changes. Worklet modules are cached by
+// the browser independently of the page, so a bare URL would leave an upgraded
+// install running the previous processor — including the version that defined
+// only `handleMessage` and therefore never produced a single frame.
+const WORKLET_VERSION = "2";
+const WORKLET_URL = `/static/js/capture-worklet.js?v=${WORKLET_VERSION}`;
 
 export class Capture {
   /**

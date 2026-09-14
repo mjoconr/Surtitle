@@ -56,6 +56,13 @@ document.getElementById('go').onclick = async () => {
     // The application's capture path uses an AudioWorklet. If the worklet never
     // executes here, that is the whole bug. An oscillator is used so the test
     // does not depend on the microphone.
+    //
+    // This test loads the *shipped* processor and arms it exactly as the app does
+    // (a `mute:false` message). That matters: the processor once defined only the
+    // legacy `handleMessage` entry point, which Chrome never calls, so it was
+    // never armed, posted no frames, and the app silently fell back to the
+    // deprecated ScriptProcessor in every browser. A test that only checked
+    // "does a worklet node construct" would have passed throughout.
     log("\n=== AUDIOWORKLET TEST (oscillator, no mic) ===");
     try {
       const wctx = new AudioContext();
@@ -87,7 +94,7 @@ document.getElementById('go').onclick = async () => {
       log("worklet frames    : " + frames);
       log("worklet level msgs: " + lv + " peak=" + peakW.toFixed(3));
       log(frames > 10
-        ? "WORKLET: PASS (the worklet executes in this browser)"
+        ? "WORKLET: PASS (the worklet executes and produces audio frames)"
         : "WORKLET: FAIL (the worklet never produced a frame -- this is the bug)");
     } catch (e) {
       log("WORKLET: ERROR " + e.name + ": " + e.message);

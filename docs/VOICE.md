@@ -62,6 +62,51 @@ must be that you have finished; higher waits longer) and
 **`v1` — Nova** with `endpointing`. Kept as a fallback for accounts or regions where
 Flux is unavailable, and useful when you want to tune the silence threshold directly.
 
+### Capture: the AudioWorklet message API
+
+Capture prefers an `AudioWorklet` — it runs on the audio thread, so it is never
+blocked by rendering — and falls back to a `ScriptProcessorNode` if the worklet
+produces no frames.
+
+For a long time **the worklet never produced a frame, in any browser**, and the
+fallback silently did all the work. Nothing errored: `addModule()` resolved, the
+context was `running`, `process()` was called with real input, and the graph was
+correct. The processor simply never emitted anything.
+
+The cause is that browsers disagree about how a processor receives messages:
+
+- the specification delivers them to `port.onmessage`;
+- Chrome **never calls** a `handleMessage` method;
+- Firefox has historically called **only** `handleMessage`.
+
+The processor defined `handleMessage` alone. So the `{type: "mute", value: false}`
+that arms capture never arrived, `_muted` stayed at its constructor default of
+`true`, and `process()` took the muted branch on every quantum — no `level`
+messages, no `audio` frames, forever. Both entry points are now wired to one
+handler, and both are idempotent, so it does not matter which the browser calls.
+
+Measured in a real browser, with the shipped processor and an oscillator as input:
+
+| Wiring | Audio frames in 2 s |
+|---|---|
+| `handleMessage` only (the bug) | **0** |
+| `port.onmessage` only | **62** |
+| `port.onmessage` + output to destination | **62** |
+
+Note what the last two rows say: `numberOfOutputs: 0` with no path to the
+destination is fine, so this was never a graph problem. `62` frames is exactly
+2 s ÷ 32 ms.
+
+The lesson for the diagnostic is in `mic-probe.html`: it loads the **shipped**
+processor and arms it with the same message the app sends. A probe that only
+checked "does a worklet node construct, and does `process()` run" passes with the
+bug present, because both are true.
+
+**Bump `WORKLET_VERSION` in `audio.js` whenever `capture-worklet.js` changes.**
+Worklet modules are cached by the browser independently of the page, so an
+upgrade served from a bare URL keeps running the previous processor — including
+this one, which never worked.
+
 ### The Flux response shape
 
 Confirmed by capturing a live socket streaming silence at 16 kHz. There is **no

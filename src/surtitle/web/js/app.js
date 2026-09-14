@@ -456,6 +456,29 @@ function renderHeader() {
 
 // ------------------------------------------------------------- right panel
 
+// Reasoning streams as many small deltas. Keeping one row per delta turned the
+// activity panel into a wall of single words and rebuilt the whole panel dozens
+// of times a second, so deltas are coalesced into one row and the re-render is
+// throttled.
+const REASONING_MAX_CHARS = 2000;
+let reasoningRenderTimer = null;
+
+function pushReasoning(text) {
+  if (!text) return;
+  const last = state.activity[state.activity.length - 1];
+  if (last && last.label === "Reasoning") {
+    // Keep the tail: during a stream the newest reasoning is the useful part.
+    last.detail = (last.detail + text).slice(-REASONING_MAX_CHARS);
+  } else {
+    state.activity.push({ label: "Reasoning", detail: text.slice(-REASONING_MAX_CHARS) });
+  }
+  if (reasoningRenderTimer) return;
+  reasoningRenderTimer = setTimeout(() => {
+    reasoningRenderTimer = null;
+    renderRightbar();
+  }, 120);
+}
+
 function renderRightbar() {
   document.getElementById("tabFiles").setAttribute("aria-selected", String(state.rightTab === "files"));
   document
@@ -752,10 +775,7 @@ function handleEvent(event) {
     case "thinking": {
       // Reasoning is shown in the activity panel only: it is useful, but it is
       // not the answer and must not be confused with it.
-      if (data.text) {
-        state.activity.push({ label: "Reasoning", detail: data.text.slice(0, 240) });
-        renderRightbar();
-      }
+      pushReasoning(data.text);
       break;
     }
     case "error": {
