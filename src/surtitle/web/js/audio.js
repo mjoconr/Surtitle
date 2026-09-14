@@ -96,6 +96,13 @@ export class Capture {
 
   /** Diagnostics for the caller after opening the microphone. */
   get status() {
+    const track = this.stream && this.stream.getAudioTracks()[0];
+    let settings = {};
+    try {
+      settings = (track && track.getSettings && track.getSettings()) || {};
+    } catch {
+      settings = {};
+    }
     return {
       running: Boolean(this.context && this.context.state === "running"),
       framesReceived: this.framesReceived,
@@ -103,7 +110,30 @@ export class Capture {
       // True when the worklet has never produced a buffer, which means capture is
       // not running at all rather than the room merely being quiet.
       silent: this.framesReceived === 0,
+      // Which device the browser chose. A silent virtual device (BlackHole,
+      // Loopback, a conference tool) is the usual reason a "working" microphone
+      // produces nothing.
+      deviceLabel: (track && track.label) || "",
+      deviceId: settings.deviceId || "",
+      trackMuted: track ? Boolean(track.muted) : null,
+      trackState: track ? track.readyState : "",
     };
+  }
+
+  /** List input devices, for diagnosing a silent capture. */
+  async listInputDevices() {
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      return devices
+        .filter((device) => device.kind === "audioinput")
+        .map((device, index) => ({
+          index,
+          label: device.label || `Input ${index + 1} (label hidden until permission is granted)`,
+          deviceId: device.deviceId,
+        }));
+    } catch {
+      return [];
+    }
   }
 
   _handle(message) {

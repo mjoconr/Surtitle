@@ -1,0 +1,61 @@
+<!DOCTYPE html><meta charset=utf-8><title>Audio device probe</title>
+<style>body{font:14px -apple-system,sans-serif;padding:24px;max-width:760px}li{margin:6px 0;font-family:ui-monospace,monospace;font-size:13px}.bad{color:#c00}.good{color:#080}</style>
+<h2>Surtitle microphone probe</h2>
+<p>Click the button and grant the microphone. Then copy everything below.</p>
+<button id=go style="padding:10px 18px;font-size:15px">Probe microphone</button>
+<pre id=out style="background:#f5f5f5;padding:14px;border-radius:8px;white-space:pre-wrap"></pre>
+<script>
+const out = document.getElementById('out');
+const log = (s) => { out.textContent += s + "\n"; };
+
+document.getElementById('go').onclick = async () => {
+  out.textContent = "";
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 }
+    });
+    const track = stream.getAudioTracks()[0];
+    const settings = track.getSettings ? track.getSettings() : {};
+    log("=== GRANTED ===");
+    log("label        : " + (track.label || "(empty - permission not granted)"));
+    log("enabled      : " + track.enabled);
+    log("muted        : " + track.muted);
+    log("readyState   : " + track.readyState);
+    log("settings     : " + JSON.stringify(settings));
+
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    log("\n=== ALL INPUT DEVICES ===");
+    devices.filter(d => d.kind === 'audioinput').forEach((d, i) => {
+      const active = d.deviceId === settings.deviceId ? "  <-- IN USE" : "";
+      log(`[${i}] ${d.label || "(label hidden)"} id=${d.deviceId.slice(0,12)}...${active}`);
+    });
+
+    // Measure actual signal for 3 seconds.
+    const ctx = new AudioContext();
+    log("\n=== CAPTURE CONTEXT ===");
+    log("state before resume : " + ctx.state);
+    if (ctx.state === 'suspended') await ctx.resume();
+    log("state after resume  : " + ctx.state);
+    const src = ctx.createMediaStreamSource(stream);
+    const an = ctx.createAnalyser();
+    an.fftSize = 2048;
+    src.connect(an);
+    const buf = new Float32Array(an.fftSize);
+    let peak = 0;
+    log("\n=== MEASURING 3 s (speak now) ===");
+    const t0 = performance.now();
+    const timer = setInterval(() => {
+      an.getFloatTimeDomainData(buf);
+      let m = 0; for (const v of buf) m = Math.max(m, Math.abs(v));
+      peak = Math.max(peak, m);
+    }, 50);
+    await new Promise(r => setTimeout(r, 3000));
+    clearInterval(timer);
+    log("peak amplitude over 3 s : " + peak.toFixed(5) + (peak < 0.0005 ? "  <-- SILENT (no signal reaching browser)" : "  <-- SIGNAL PRESENT"));
+    stream.getTracks().forEach(t => t.stop());
+    ctx.close();
+  } catch (e) {
+    log("ERROR: " + e.name + ": " + e.message);
+  }
+};
+</script>

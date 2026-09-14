@@ -707,21 +707,31 @@ async function toggleMic() {
     // Without this the two look identical, and a silently suspended audio context
     // is indistinguishable from a mute microphone.
     if (!captureState || captureState.running === false) {
-      toast(
-        "The browser is not running audio capture. Click anywhere on the page, then toggle the mic again.",
-        "error",
-      );
+      const problem =
+        "The browser is not running audio capture. Click anywhere on the page, then toggle the mic again.";
+      el.captions.replaceChildren(node("span", "captions__problem", problem));
+      toast(problem, "error");
     }
-    window.setTimeout(() => {
+    window.setTimeout(async () => {
       if (!state.micOpen) return;
       const status = capture.status;
+      const device = status.deviceLabel ? ` (using "${status.deviceLabel}")` : "";
       let problem = null;
       if (status.silent) {
+        // Name the device: a silent virtual input (BlackHole, Loopback, a
+        // conferencing tool) is the most common cause of a microphone that
+        // reports success and delivers nothing.
         problem =
-          "No audio is reaching the app. Check the browser's microphone permission, " +
-          "then the input device in macOS System Settings → Sound.";
+          `No audio is reaching the app${device}. Check the browser's microphone ` +
+          "permission and that the correct input device is selected.";
+        const inputs = await capture.listInputDevices();
+        if (inputs.length > 1) {
+          const names = inputs.map((d) => d.label).join(" | ");
+          state.activity.push({ label: "Audio inputs available", detail: names });
+          renderRightbar();
+        }
       } else if (status.maxLevel < 0.01) {
-        problem = "Your microphone is connected but the signal is silent. Raise the input level.";
+        problem = `The microphone is open${device} but the signal is silent. Raise the input level.`;
       }
       if (problem) {
         // Shown in the caption band as well as a toast: that is where the user is
