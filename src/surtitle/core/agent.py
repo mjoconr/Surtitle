@@ -100,16 +100,48 @@ use that result. Re-reading the same files and re-running the same commands ever
 turn wastes the user's time and money, and it is the single most common way to be
 useless here.
 
-**Say what you know, and mark what you are assuming.** Before answering, be clear
-with yourself which of these is true:
+### Never state an assumption as fact
 
-- You read it in a file this session, or saw it in a command output.
-- Someone told you, in a file or from the user.
-- You are inferring it.
+This is the standing rule of this project, not a style preference. Stating a guess
+as fact is the most damaging thing you can do here: the user acts on it, and it is
+far more expensive to discover later than a moment of uncertainty would have been.
 
-Only the first is established. When you answer from inference, say so — "I have
-not confirmed this, but ..." — and offer to check. Guessing at the state of a
-machine, then stating it as fact, is worse than saying you do not know yet.
+Before you state anything factual, know which of these it is:
+
+- **Checked** — you read it in a file this session, or saw it in a command output.
+- **Told** — it came from the user, or from a file stating it.
+- **Assumed** — you inferred it, or it is how things usually work.
+
+Only the first two may be stated plainly. Assumptions must be labelled as such and
+offered for checking:
+
+> I have not confirmed this, but the pattern in `plant.hosts` suggests 4C-120 is
+> on the same bus. Shall I check?
+
+Concretely:
+
+- Do not fill a gap in your knowledge with a plausible value. A machine name, a
+  port, a path, a version, a number in a report — if you did not see it, say you
+  did not see it.
+- Do not describe what a file or command contains before you have opened or run it.
+- When a request is ambiguous, ask which one is meant rather than picking the most
+  likely reading. One clarifying question is cheaper than doing the wrong work
+  well, and cheaper than the user discovering later that you were never sure.
+- If you cannot verify something, say what would verify it and offer to do that.
+- "I don't know yet" is a complete and acceptable answer. Volume is not a
+  substitute for knowing.
+
+**The workspace is authoritative; your memory of it is not.** Tool results and
+file contents show the current state. Anything you concluded earlier may since have
+changed, and anything you assumed earlier was never established. When they conflict,
+trust what you observe now.
+
+**Resolve what you can by looking, and only ask about what you cannot.** Do not ask
+the user where something lives or how it currently behaves when you can find out by
+reading, searching or running a command. Asking is for choices that are theirs to
+make, and for genuine ambiguity that inspection cannot settle. One well-aimed
+question is worth more than a confident guess, but a question you could have
+answered yourself wastes their time.
 
 **Work in an order, and say what it is.** For anything beyond a single lookup:
 
@@ -120,6 +152,9 @@ machine, then stating it as fact, is worse than saying you do not know yet.
 
 Do not narrate this as a plan and then skip it. Two or three tool calls that
 establish the facts beat ten that circle around them.
+
+**Read the result of every command, including how it exited.** A command that
+failed and one that printed nothing look alike if you only skim the output.
 
 **Do not re-derive what is already established.** If earlier in this conversation
 you found that a machine is down, or a value, or where a file lives, carry that
@@ -247,6 +282,103 @@ class ApprovalBroker:
         return list(self._pending)
 
 
+# Consecutive identical calls tolerated before the guard steps in, then how often it
+# repeats itself. Mirrors the escalating thresholds DSH uses, because a model that
+# ignores the first nudge often needs a firmer one.
+_REPEAT_THRESHOLDS = (3, 5, 8)
+# Result previews are re-shown instead of the file listing, so the model has the
+# content it is asking for and no reason to ask again.
+_REPEAT_PREVIEW_CHARS = 300
+
+
+@dataclass(slots=True)
+class _CallSignature:
+    """Identity of a tool call: the tool and its arguments, order-independent."""
+
+    name: str
+    arguments: str
+
+    @classmethod
+    def of(cls, name: str, arguments: dict[str, Any]) -> _CallSignature:
+        try:
+            canonical = json.dumps(arguments, sort_keys=True, default=str)
+        except (TypeError, ValueError):
+            canonical = str(arguments)
+        return cls(name=name, arguments=canonical)
+
+
+class RepeatCallGuard:
+    """Refuse consecutive identical tool calls, and remind the model what it has.
+
+    A model that repeats a call is stuck: the result is not going to change, so
+    another call cannot make progress. Observed in practice, the same files were
+    read and the same commands re-run on every turn with nothing stopping it.
+
+    DSH solves this with a counter and an injected reminder rather than with prompt
+    advice, which is the right shape: advice can be ignored, and this cannot be
+    ignored for long because the repeated call returns no new information.
+
+    Thresholds escalate so the first nudge is gentle and a persistent repeat gets a
+    firm instruction to stop.
+    """
+
+    def __init__(self) -> None:
+        self._last: _CallSignature | None = None
+        self._count = 0
+        self._last_preview = ""
+        self.blocked = 0
+
+    def check(self, name: str, arguments: dict[str, Any]) -> str | None:
+        """Return a reminder to show instead of running this call, or ``None``.
+
+        ``None`` means the call is allowed. A returned string means the call is
+        refused and the string is fed back as the tool result.
+        """
+        signature = _CallSignature.of(name, arguments)
+        if signature == self._last:
+            self._count += 1
+        else:
+            self._last = signature
+            self._count = 1
+            self._last_preview = ""
+        return None
+
+    def observe_result(self, preview: str) -> None:
+        """Remember the latest result so a repeat can be answered with it."""
+        self._last_preview = preview
+
+    def reminder(self) -> str | None:
+        """The refusal text once a call has been repeated to the first threshold.
+
+        From that point *every* further identical call is refused, not just the ones
+        landing exactly on a threshold. Allowing the calls in between would let the
+        model slip a few more repeats through and make no more progress than before.
+        """
+        if self._count < _REPEAT_THRESHOLDS[0]:
+            return None
+        self.blocked += 1
+        preview = self._last_preview[: _REPEAT_PREVIEW_CHARS * 4]
+        detail = f"\n\nThe result you already have:\n{preview}" if preview else ""
+        base = (
+            f"Repeated tool call refused: {self._last.name if self._last else 'this tool'} has "
+            f"now been called {self._count} times in a row with identical arguments, and the "
+            "result cannot change."
+        )
+        if self._count >= _REPEAT_THRESHOLDS[-1]:
+            # Repeated well past the point of usefulness: the instruction is blunt.
+
+            instruction = (
+                "Stop repeating this call. Either use the result you already have, take a "
+                "clearly different action, or tell the user what you cannot determine."
+            )
+        else:
+            instruction = (
+                "Inspect the result you already have and either use it, take a different "
+                "action, or finish. Do not call this tool again with these arguments."
+            )
+        return f"{base} {instruction}{detail}"
+
+
 @dataclass(slots=True)
 class _TurnState:
     """Mutable bookkeeping for one user turn."""
@@ -290,6 +422,9 @@ class AgentLoop:
         self.system_prompt = system_prompt or build_system_prompt(root.name)
         self._seq = 0
         self._cancelled = asyncio.Event()
+        # Guards against a model that gets stuck calling the same tool with the
+        # same arguments, which cannot make progress.
+        self._repeat_guard = RepeatCallGuard()
         # What this turn has produced so far. The session records these when a turn
         # is interrupted, so a cancelled exchange is not lost from history.
         self.partial_text: str = ""
@@ -340,6 +475,7 @@ class AgentLoop:
         state = _TurnState(messages=[*history, {"role": "user", "content": user_text}])
         self.partial_text = ""
         self.partial_spoken = ""
+        self._repeat_guard = RepeatCallGuard()
         client = await self._client_or_create()
 
         if self.store and self.session_id:
@@ -554,6 +690,32 @@ class AgentLoop:
 
             assert arguments is not None
 
+            # Refuse a call already made repeatedly with identical arguments: the
+            # result cannot change, so another call cannot make progress. The
+            # reminder carries the result already obtained, so the model has what it
+            # was asking for and a concrete reason to do something different.
+            if self._repeat_guard.check(call.name, arguments) is None:
+                repeated = self._repeat_guard.reminder()
+                if repeated is not None:
+                    state.messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": self._call_id(call),
+                            "name": call.name,
+                            "content": repeated,
+                        }
+                    )
+                    state.actions.append(f"{call.name} - refused as a repeated call")
+                    yield self._event(
+                        EventKind.TOOL_RESULT,
+                        call_id=self._call_id(call),
+                        name=call.name,
+                        ok=False,
+                        display=f"{call.name} refused: repeated identical call",
+                        error=repeated.splitlines()[0],
+                    )
+                    continue
+
             if self._needs_approval(call.name, arguments):
                 call_id = self._call_id(call)
                 # Register the request BEFORE announcing it. The UI can answer as
@@ -638,6 +800,7 @@ class AgentLoop:
 
             state.messages.append(self._tool_message(call, result))
             state.actions.append(_action_line(call.name, arguments, result))
+            self._repeat_guard.observe_result(result.display or result.error or "")
 
             yield self._event(
                 EventKind.TOOL_RESULT,

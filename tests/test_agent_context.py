@@ -100,8 +100,8 @@ class TestProcessPrompting:
 
     def test_it_asks_for_known_versus_assumed(self):
         prompt = build_system_prompt("p")
-        assert "assuming" in prompt
-        assert "inferring" in prompt or "inference" in prompt
+        assert "Assumed" in prompt
+        assert "Checked" in prompt and "Told" in prompt
 
     def test_it_asks_for_an_order_of_work(self):
         prompt = build_system_prompt("p")
@@ -321,3 +321,205 @@ class TestProjectBriefing:
         prompt = session._system_prompt()
         assert "visible.txt" in prompt
         assert ".surtitle" not in prompt.split("## Project briefing")[1][:200]
+
+
+class TestNeverAssume:
+    """The project's standing rule: an assumption is never stated as fact.
+
+    This is a design commitment, not a style preference. A guess presented as fact
+    is the most damaging output this agent can produce, because the user acts on it.
+    These tests keep the commitment from quietly weakening.
+    """
+
+    def test_assumption_is_named_as_the_standing_rule(self):
+        prompt = build_system_prompt("p")
+        assert "Never state an assumption as fact" in prompt
+
+    def test_the_three_epistemic_states_are_defined(self):
+        prompt = build_system_prompt("p")
+        for state in ("Checked", "Told", "Assumed"):
+            assert state in prompt, f"{state!r} must be defined as a category"
+
+    def test_only_checked_and_told_may_be_stated_plainly(self):
+        prompt = build_system_prompt("p")
+        assert "Only the first two may be stated plainly" in prompt
+
+    def test_filling_gaps_with_plausible_values_is_forbidden(self):
+        prompt = build_system_prompt("p")
+        assert "Do not fill a gap" in prompt
+
+    def test_describing_unopened_files_is_forbidden(self):
+        prompt = build_system_prompt("p")
+        assert "before you have opened or run it" in " ".join(prompt.split())
+
+    def test_ambiguity_requires_a_question_not_a_guess(self):
+        prompt = build_system_prompt("p")
+        assert "ask which one is meant" in " ".join(prompt.split())
+
+    def test_not_knowing_is_explicitly_acceptable(self):
+        prompt = build_system_prompt("p")
+        # The phrasing wraps, so match on a stable fragment.
+        assert "acceptable answer" in prompt
+
+    def test_volume_is_not_a_substitute_for_knowing(self):
+        # The prompt is wrapped, so compare on normalised whitespace.
+        assert "not a substitute for knowing" in " ".join(build_system_prompt("p").split())
+
+    def test_it_asks_for_evidence_to_be_named(self):
+        """An answer should say what it is based on, so the user can judge it."""
+        prompt = build_system_prompt("p")
+        assert "what you based it on" in " ".join(prompt.split()) or "name what you based" in prompt
+
+    def test_the_rule_coexists_with_the_voice_contract(self):
+        """Process guidance must not displace the spoken/displayed split."""
+        prompt = build_system_prompt("p")
+        assert "<say>" in prompt
+        assert "<display>" in prompt
+        assert "Never state an assumption as fact" in prompt
+
+
+class TestRepeatCallGuard:
+    """A repeated identical call cannot make progress, so it is refused.
+
+    DSH guards this mechanically with a counter and an injected reminder rather
+    than with prompt advice, which is the right shape: advice can be ignored, and a
+    refusal cannot. Observed here, the same files were read and the same commands
+    re-run on every turn with nothing stopping it.
+    """
+
+    def test_the_first_calls_are_allowed(self):
+        from surtitle.core.agent import RepeatCallGuard
+
+        guard = RepeatCallGuard()
+        for _ in range(2):
+            guard.check("read_file", {"path": "AGENTS.md"})
+            assert guard.reminder() is None
+
+    def test_the_third_identical_call_is_refused(self):
+        from surtitle.core.agent import RepeatCallGuard
+
+        guard = RepeatCallGuard()
+        for _ in range(3):
+            guard.check("read_file", {"path": "AGENTS.md"})
+        assert guard.reminder() is not None
+
+    def test_every_repeat_past_the_threshold_is_refused(self):
+        """Letting the calls in between through would defeat the guard."""
+        from surtitle.core.agent import RepeatCallGuard
+
+        guard = RepeatCallGuard()
+        refusals = 0
+        for _ in range(8):
+            guard.check("read_file", {"path": "AGENTS.md"})
+            if guard.reminder() is not None:
+                refusals += 1
+        assert refusals >= 6, f"only {refusals} of 8 repeats were refused"
+
+    def test_different_arguments_reset_the_count(self):
+        from surtitle.core.agent import RepeatCallGuard
+
+        guard = RepeatCallGuard()
+        guard.check("read_file", {"path": "a.txt"})
+        guard.check("read_file", {"path": "a.txt"})
+        guard.check("read_file", {"path": "b.txt"})
+        guard.check("read_file", {"path": "b.txt"})
+        assert guard.reminder() is None, "reading a different file must be allowed"
+
+    def test_argument_order_does_not_hide_a_repeat(self):
+        from surtitle.core.agent import RepeatCallGuard
+
+        guard = RepeatCallGuard()
+        guard.check("search_files", {"pattern": "x", "glob": "*.md"})
+        guard.check("search_files", {"glob": "*.md", "pattern": "x"})
+        guard.check("search_files", {"pattern": "x", "glob": "*.md"})
+        assert guard.reminder() is not None, "key order must not defeat the guard"
+
+    def test_the_reminder_carries_the_result_already_obtained(self):
+        from surtitle.core.agent import RepeatCallGuard
+
+        guard = RepeatCallGuard()
+        for _ in range(2):
+            guard.check("read_file", {"path": "AGENTS.md"})
+        guard.observe_result("Read 74 line(s) from AGENTS.md: house rules follow")
+        guard.check("read_file", {"path": "AGENTS.md"})
+        reminder = guard.reminder()
+        assert reminder is not None
+        assert "house rules follow" in reminder, "the model must be given what it already has"
+        assert "cannot change" in reminder
+
+    def test_it_tells_the_model_to_do_something_different(self):
+        from surtitle.core.agent import RepeatCallGuard
+
+        guard = RepeatCallGuard()
+        for _ in range(3):
+            guard.check("run_shell", {"command": "./dsh-memory 2G-120"})
+        reminder = guard.reminder() or ""
+        assert "different" in reminder or "Stop repeating" in reminder
+
+
+class TestGuardIsWiredIntoTheLoop:
+    """The guard must actually intervene, not merely exist."""
+
+    async def test_a_repeating_model_is_refused_rather_than_looping(self, tmp_path):
+        import json as jsonlib
+
+        from surtitle.config import Settings
+        from surtitle.core.agent import AgentLoop
+        from surtitle.core.events import EventKind
+        from surtitle.llm.deepseek import StreamEvent, ToolCallDelta
+        from surtitle.tools.registry import Tool, ToolRegistry
+
+        calls: list[str] = []
+
+        def handler(ctx, path="x"):
+            from surtitle.tools.fs_tools import ToolResult
+
+            calls.append(path)
+            return ToolResult(ok=True, display=f"read {path}")
+
+        registry = ToolRegistry(
+            [
+                Tool(
+                    name="read_file",
+                    description="read",
+                    parameters={"type": "object", "properties": {}},
+                    handler=handler,
+                    approval="never",
+                )
+            ]
+        )
+
+        class RepeatingModel:
+            """Always asks for the same call, never concludes."""
+
+            async def stream(self, messages, *, tools=None):
+                for _ in range(2):
+                    call = ToolCallDelta(
+                        index=0,
+                        id="c1",
+                        name="read_file",
+                        arguments=jsonlib.dumps({"path": "AGENTS.md"}),
+                    )
+                    yield StreamEvent(kind="tool_call", tool_call=call)
+                yield StreamEvent(kind="done", finish_reason="tool_calls")
+
+            async def aclose(self):
+                return None
+
+        settings = Settings(
+            DEEPSEEK_API_KEY="sk",
+            SURTITLE_HOME=str(tmp_path),
+            max_steps=8,
+            thinking_enabled=False,
+        )
+        loop = AgentLoop(settings, root=tmp_path, client=RepeatingModel(), registry=registry)
+
+        outcomes = []
+        async for event in loop.run([], "read it"):
+            if event.kind is EventKind.TOOL_RESULT:
+                outcomes.append(event.data)
+
+        refused = [item for item in outcomes if "refused" in (item.get("display") or "")]
+        assert refused, f"a repeating model was never refused: {outcomes}"
+        # The tool must not have been executed on the refused attempts.
+        assert len(calls) < 8, f"the tool ran {len(calls)} times despite the guard"

@@ -127,7 +127,9 @@ Priming is layered, and you can add to it without touching code:
 | Layer | Where it comes from |
 |---|---|
 | Voice contract | The system prompt — what to speak versus show |
-| Process rules | "Check what you already did", "mark what you are assuming", work in an order |
+| Process rules | Workspace is authoritative over memory; resolve by inspection, ask only what you cannot; work in a stated order; read how a command exited |
+| **Anti-assumption rule** | "Never state an assumption as fact" — Checked / Told / Assumed, with assumptions labelled and offered for checking |
+| **Repeat-call guard** | A tool call repeated with identical arguments is refused after the third attempt, and handed the result it already has |
 | **Work memory** | Each turn records `[work this turn]`, so the agent can see what it already read or ran |
 | **Project instructions** | `AGENTS.md`, `CLAUDE.md`, `.cursorrules`, `CONTRIBUTING.md`, and `instructions` in `.surtitle.json` — loaded automatically every turn |
 | **Project notebook** | `.surtitle/notes.md`, written by the agent's own `remember` tool and injected into every future session |

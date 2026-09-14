@@ -81,6 +81,23 @@ export class Capture {
     return this.context.state === "running";
   }
 
+  /** Close the current context so the next start builds a clean one. */
+  async _discardContext() {
+    const context = this.context;
+    this.context = null;
+    if (context) {
+      // Detach before closing: closing a context with live nodes attached can throw.
+      try {
+        if (this.node) this.node.disconnect();
+        if (this.sink) this.sink.disconnect();
+        if (this.source) this.source.disconnect();
+      } catch {
+        /* already detached */
+      }
+      await context.close().catch(() => {});
+    }
+  }
+
   async start() {
     if (this.active) {
       return { running: this.context ? this.context.state === "running" : false };
@@ -114,13 +131,27 @@ export class Capture {
       }
     }
 
-    // One context per page, reused across mic toggles: creating a fresh one each
-    // time eventually hits the browser's per-page AudioContext limit.
+    // Chromium suspends or closes a context once its input ends, and a suspended
+    // context never drives the worklet — so the *second* listening session
+    // captured nothing while the first worked. Firefox does not do this, which is
+    // why identical code behaved differently between browsers.
+    //
+    // Reviving a stale context is unreliable, so one that is not running is
+    // discarded and rebuilt. A running context is reused, which keeps the number
+    // of live contexts well inside the browser's per-page limit during toggling.
+    if (this.context && (this.context.state === "closed" || !(await this._ensureRunning()))) {
+      await this._discardContext();
+    }
     if (!this.context) {
       this.context = new AudioContext();
     }
 
     const running = await this._ensureRunning();
+    this._micOpens = (this._micOpens || 0) + 1;
+    console.info(
+      `[surtitle] capture start #${this._micOpens}: context=${this.context.state} ` +
+        `sampleRate=${this.context.sampleRate} device=${this.deviceId || "default"}`,
+    );
     this.source = this.context.createMediaStreamSource(this.stream);
 
     this.framesReceived = 0;
