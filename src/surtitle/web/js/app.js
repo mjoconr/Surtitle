@@ -703,6 +703,19 @@ async function toggleMic() {
     el.captions.replaceChildren();
     el.captions.append(node("span", "captions__hint", "Listening…"));
 
+    // Record what capture actually negotiated. This is the single most useful
+    // diagnostic for a silent microphone, and it is readable in the UI.
+    const started = capture.status;
+    console.info("[surtitle] microphone opened", started);
+    state.activity.push({
+      label: "Microphone opened",
+      detail:
+        `device="${started.deviceLabel || "unknown"}" ` +
+        `context=${started.running ? "running" : "NOT RUNNING"} ` +
+        `track=${started.trackState}${started.trackMuted ? " MUTED" : ""}`,
+    });
+    renderRightbar();
+
     // Distinguish "the microphone is open" from "audio is reaching the app".
     // Without this the two look identical, and a silently suspended audio context
     // is indistinguishable from a mute microphone.
@@ -733,6 +746,15 @@ async function toggleMic() {
       } else if (status.maxLevel < 0.01) {
         problem = `The microphone is open${device} but the signal is silent. Raise the input level.`;
       }
+      console.info("[surtitle] capture check", status);
+      state.activity.push({
+        label: "Capture check (3.5 s)",
+        detail:
+          `frames=${status.framesReceived} peak=${status.maxLevel.toFixed(4)} ` +
+          `context=${status.running ? "running" : "NOT RUNNING"}`,
+      });
+      renderRightbar();
+
       if (problem) {
         // Shown in the caption band as well as a toast: that is where the user is
         // already looking, and it persists instead of disappearing.
