@@ -1,18 +1,20 @@
 """The live-session registry.
 
-A reconnecting browser opens a second WebSocket for the same conversation before
-the first has finished tearing down. Two things have to hold for that to be safe,
-and neither did:
+A page open in two tabs, or a browser that reconnects, opens a second WebSocket
+for a conversation that is already live. Getting this wrong is expensive, and it
+was wrong twice over:
 
-* registering the new session must retire the old one, or the old session's
-  Deepgram socket and outbox task keep running — two speech pipelines for one
-  conversation, so a reply can be cut off or spoken twice;
-* the superseded connection's cleanup must not unregister the session that
-  replaced it, or the live conversation disappears from the registry and leaks
-  its voice sockets.
+* the first version simply overwrote the registry entry, orphaning the previous
+  session with its Deepgram socket and outbox task still running;
+* the second version retired the previous session, which is worse when a turn is
+  in flight — the turn was cancelled and its answer went to a socket that had
+  just been closed. Two tabs then destroyed each other in a loop, each retirement
+  provoking a reconnect. The user's log showed six connections in six seconds,
+  and the symptom was a spoken question being transcribed, sent, and answered
+  into nothing: "voice is converting but no action".
 
-The user's own log showed six WebSocket connections in six seconds and pairs of
-Deepgram STT connections for a single conversation, which is what this prevents.
+The registry now reuses the live session and rebinds its transport, so a
+reconnect costs nothing and the running turn survives.
 """
 
 from __future__ import annotations
@@ -23,117 +25,150 @@ from surtitle.core.session import Session, SessionManager
 
 
 class FakeSession:
-    """Just enough Session to observe lifecycle calls."""
+    """Just enough Session to observe lifecycle and rebinding."""
 
-    def __init__(self, session_id: str) -> None:
+    def __init__(self, session_id: str, *, label: str = "") -> None:
         self.session_id = session_id
+        self.label = label
         self.closed = 0
+        self.rebound = 0
+        # The transport the registry hands over on rebind.
+        self.send = f"{label or session_id}-transport"
+        self.send_audio = f"{label or session_id}-audio"
+
+    def rebind(self, *, send, send_audio) -> None:
+        self.rebound += 1
+        self.send = send
+        self.send_audio = send_audio
 
     async def close(self) -> None:
         self.closed += 1
 
 
-class TestAdd:
-    async def test_a_single_session_is_registered(self):
+class TestAcquire:
+    async def test_a_new_conversation_starts_its_session(self):
         manager = SessionManager()
         session = FakeSession("s1")
-        await manager.add(session)  # type: ignore[arg-type]
+        chosen, started = await manager.acquire(session, "conn-1")
+        assert chosen is session
+        assert started is True
         assert manager.get("s1") is session
         assert manager.count == 1
 
-    async def test_registering_a_reconnect_retires_the_previous_one(self):
+    async def test_a_reconnect_reuses_the_live_session(self):
         manager = SessionManager()
-        first, second = FakeSession("s1"), FakeSession("s1")
+        live = FakeSession("s1", label="live")
+        await manager.acquire(live, "conn-1")
 
-        await manager.add(first)  # type: ignore[arg-type]
-        await manager.add(second)  # type: ignore[arg-type]
+        reconnecting = FakeSession("s1", label="new-connection")
+        chosen, started = await manager.acquire(reconnecting, "conn-2")
 
-        assert first.closed == 1, "the orphaned session kept its voice sockets open"
-        assert second.closed == 0
-        assert manager.get("s1") is second
-        assert manager.count == 1
+        assert chosen is live, "the in-flight turn's session must be kept"
+        assert started is False, "it must not be started twice"
+        assert live.closed == 0, "closing it here is what destroyed the answer"
+
+    async def test_a_reconnect_moves_the_transport_to_the_new_connection(self):
+        manager = SessionManager()
+        live = FakeSession("s1")
+        await manager.acquire(live, "conn-1")
+
+        reconnecting = FakeSession("s1")
+        await manager.acquire(reconnecting, "conn-2")
+
+        assert live.rebound == 1
+        # The session now speaks to the new connection, not the dead one.
+        assert live.send == reconnecting.send
+        assert live.send_audio == reconnecting.send_audio
 
     async def test_two_conversations_coexist(self):
         manager = SessionManager()
         a, b = FakeSession("s1"), FakeSession("s2")
-        await manager.add(a)  # type: ignore[arg-type]
-        await manager.add(b)  # type: ignore[arg-type]
+        await manager.acquire(a, "c1")
+        await manager.acquire(b, "c2")
         assert manager.count == 2
         assert a.closed == 0 and b.closed == 0
 
-    async def test_re_adding_the_same_instance_is_harmless(self):
+    async def test_two_tabs_do_not_destroy_each_other(self):
+        """The loop that made the same voice appear to stutter and stop."""
         manager = SessionManager()
-        session = FakeSession("s1")
-        await manager.add(session)  # type: ignore[arg-type]
-        await manager.add(session)  # type: ignore[arg-type]
-        assert session.closed == 0, "a session must not retire itself"
-        assert manager.get("s1") is session
+        tab_a = FakeSession("s1")
+        tab_b = FakeSession("s1")
+
+        await manager.acquire(tab_a, "tab-a")
+        _chosen_b, started_b = await manager.acquire(tab_b, "tab-b")
+        # Tab A's old socket closing must not tear the shared session down.
+        await manager.release("s1", "tab-a")
+
+        assert tab_a.closed == 0, "one tab's disconnect must not kill the session"
+        assert started_b is False
+        assert manager.get("s1") is tab_a
+        assert manager.count == 1
 
 
-class TestRemove:
-    async def test_it_closes_and_forgets(self):
+class TestRelease:
+    async def test_the_owner_releases_and_closes(self):
         manager = SessionManager()
         session = FakeSession("s1")
-        await manager.add(session)  # type: ignore[arg-type]
+        await manager.acquire(session, "conn-1")
+
+        await manager.release("s1", "conn-1")
+
+        assert session.closed == 1
+        assert manager.get("s1") is None
+
+    async def test_a_superseded_connection_cannot_close_the_session(self):
+        manager = SessionManager()
+        live = FakeSession("s1")
+        await manager.acquire(live, "conn-1")
+        await manager.acquire(FakeSession("s1"), "conn-2")
+
+        # The stale tab's handler finally runs.
+        await manager.release("s1", "conn-1")
+
+        assert live.closed == 0
+        assert manager.get("s1") is live, "the live conversation was unregistered"
+
+    async def test_releasing_twice_is_harmless(self):
+        manager = SessionManager()
+        session = FakeSession("s1")
+        await manager.acquire(session, "conn-1")
+
+        await manager.release("s1", "conn-1")
+        await manager.release("s1", "conn-1")
+
+        assert session.closed == 1
+
+    async def test_releasing_an_unknown_session_is_harmless(self):
+        manager = SessionManager()
+        await manager.release("nope", "conn-1")
+        assert manager.count == 0
+
+
+class TestForceRemove:
+    """Archiving or deleting a conversation must stop it listening."""
+
+    async def test_remove_closes_whoever_owns_it(self):
+        manager = SessionManager()
+        live = FakeSession("s1")
+        await manager.acquire(live, "conn-1")
+        await manager.acquire(FakeSession("s1"), "conn-2")
 
         await manager.remove("s1")
 
-        assert session.closed == 1
+        assert live.closed == 1
         assert manager.get("s1") is None
-
-    async def test_removing_an_unknown_id_is_harmless(self):
-        manager = SessionManager()
-        await manager.remove("nope")
-        assert manager.count == 0
-
-    async def test_a_superseded_handler_cannot_evict_the_new_session(self):
-        """The old connection's cleanup must leave the new one alone."""
-        manager = SessionManager()
-        old, new = FakeSession("s1"), FakeSession("s1")
-        await manager.add(old)  # type: ignore[arg-type]
-        await manager.add(new)  # type: ignore[arg-type]
-
-        # The old WebSocket handler now finishes and runs its cleanup.
-        await manager.remove("s1", session=old)  # type: ignore[arg-type]
-
-        assert manager.get("s1") is new, "the live conversation was unregistered"
-        assert new.closed == 0
-        assert manager.count == 1
-
-    async def test_the_owning_handler_still_removes_its_session(self):
-        manager = SessionManager()
-        session = FakeSession("s1")
-        await manager.add(session)  # type: ignore[arg-type]
-
-        await manager.remove("s1", session=session)  # type: ignore[arg-type]
-
-        assert manager.get("s1") is None
-        assert session.closed == 1
-
-    async def test_pinned_removal_of_an_already_removed_session_is_harmless(self):
-        manager = SessionManager()
-        session = FakeSession("s1")
-        await manager.add(session)  # type: ignore[arg-type]
-        await manager.remove("s1", session=session)  # type: ignore[arg-type]
-
-        await manager.remove("s1", session=session)  # type: ignore[arg-type]
-
-        assert session.closed == 1, "it must not be closed twice"
-        assert manager.count == 0
 
     async def test_close_all_empties_the_registry(self):
         manager = SessionManager()
         for index in range(3):
-            await manager.add(FakeSession(f"s{index}"))  # type: ignore[arg-type]
+            await manager.acquire(FakeSession(f"s{index}"), f"c{index}")
 
         await manager.close_all()
 
         assert manager.count == 0
 
 
-class TestRealSessionCleanup:
-    """`close()` on a real Session must be safe to call twice."""
-
+class TestRealSession:
     @pytest.fixture
     def session(self, tmp_path):
         from surtitle.config import Settings
@@ -164,12 +199,26 @@ class TestRealSessionCleanup:
             send_audio=send_audio,
         )
 
+    async def test_rebinding_replaces_the_transport(self, session):
+        calls: list[bytes] = []
+
+        async def new_audio(data: bytes) -> None:
+            calls.append(data)
+
+        async def new_send(_payload) -> None:
+            return None
+
+        session.rebind(send=new_send, send_audio=new_audio)
+        await session.send_audio(b"pcm")
+
+        assert calls == [b"pcm"]
+
     async def test_closing_twice_does_not_raise(self, session):
         await session.close()
         await session.close()
 
     async def test_the_registry_closes_a_real_session(self, session):
         manager = SessionManager()
-        await manager.add(session)
+        await manager.acquire(session, "conn-1")
         await manager.remove(session.session_id)
         assert manager.get(session.session_id) is None

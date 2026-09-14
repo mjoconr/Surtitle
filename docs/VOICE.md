@@ -178,10 +178,37 @@ Three things prevent it:
 2. **`onBlocked` reports it.** If audio arrives while the context is not running,
    the UI says the browser blocked playback and tells the user to click. Once per
    turn rather than once per chunk.
-3. **The sample rate is read back.** A browser may ignore the requested 24 kHz, so
-   the context's actual rate is stored and PCM is decoded at that rate. Assuming
-   the requested rate would resample every sample and play the voice at the wrong
-   pitch and speed.
+3. **The buffer is declared at the synthesis rate, never the context's rate.** The
+   context is asked for the rate Deepgram synthesises at, but whatever it ends up
+   running at is irrelevant to the buffer: an `AudioBufferSourceNode` resamples its
+   buffer into the context's rate, so the buffer must say what the PCM really is.
+
+   This was got wrong, and the wrong version was documented here as correct
+   ("read back the context's rate and decode at that rate"). It sounds plausible
+   and is backwards. Overwriting the synthesis rate with the context rate makes
+   every reply play fast and high whenever the two differ:
+
+   | Context ends up at | 1 s of speech plays in | Speed | Pitch |
+   | --- | --- | --- | --- |
+   | 24000 Hz | 1.000 s | 1.00× | correct |
+   | 44100 Hz | 0.544 s | 1.84× | +10.5 semitones |
+   | 48000 Hz | 0.500 s | 2.00× | +12.0 semitones |
+
+   Those figures are measured in a real browser, by declaring 24 000 samples both
+   ways and reading `AudioBuffer.duration`. At +10–12 semitones a voice does not
+   sound "slightly fast", it sounds like **a different person**, and because it
+   depends on which rate the context lands on it appeared intermittently: fine on
+   a machine whose Chrome honoured 24 kHz, wrong on the same page in Firefox,
+   which commonly ignores the request and uses the hardware rate.
+
+   The rate the server reports is now adopted via `setServerRate()`, and a
+   mismatch is reported in the Activity panel rather than left to be heard.
+
+4. **A paused sink element is restarted.** Audio is routed through the `<audio>`
+   element because that is the only way to call `setSinkId`. An audio-route change
+   (headphones, a dock, a sleeping output) can pause that element underneath the
+   page, and a paused element is silence with no error anywhere. Each turn checks
+   `element.paused` and calls `play()` again.
 
 If you hear nothing: click once anywhere on the page (that grants activation) and
 try again. If you see the "audio is blocked" notice, that is this path reporting

@@ -243,6 +243,138 @@ class TestConversation:
         assert any(e["data"].get("pong") for e in events)
 
 
+class SlowClient:
+    """Emits one spoken sentence, then pauses before finishing the turn.
+
+    The pause is what makes the reconnect happen *during* the answer, which is the
+    situation that used to lose it.
+    """
+
+    def __init__(self, *, pause: float = 2.0) -> None:
+        self.pause = pause
+        self.started = False
+
+    async def stream(self, messages, *, tools=None):
+        import asyncio
+
+        self.started = True
+        yield StreamEvent(kind="text", text="<say>The iodine service is up.</say>")
+        await asyncio.sleep(self.pause)
+        yield StreamEvent(kind="text", text="<say> All four machines report it.</say>")
+        yield StreamEvent(kind="usage", usage=Usage())
+        yield StreamEvent(kind="done")
+
+    async def aclose(self) -> None:
+        return None
+
+
+class TestReconnectDuringATurn:
+    """A second connection mid-answer must not cost the user the answer.
+
+    This is the "voice is converting but no action" report. A page open in a
+    second tab (or any reconnect) opened another WebSocket for a conversation
+    that was already live. Registering it replaced — and closed — the session
+    running the turn, so the reply was generated and then delivered to a socket
+    that no longer existed. The browser showed the question with no answer.
+
+    The live session is now reused and its transport rebound to the new socket,
+    so the answer finishes where the user is now looking.
+    """
+
+    def test_the_rest_of_the_answer_arrives_on_the_new_connection(self, setup):
+        client, app, project, session = setup
+        slow = SlowClient(pause=2.0)
+        app.state.app_state.deepseek = slow
+
+        with client.websocket_connect("/ws") as first:
+            first.send_text(hello(project.id, session.id))
+            receive_until(first, {"ready"}, limit=5)
+            first.send_text(json.dumps({"kind": "text", "data": {"text": "uptime of IOD?"}}))
+            # The turn is genuinely in flight once the first sentence appears.
+            opening = receive_until(first, {"say"}, limit=40)
+            assert any(e["kind"] == "say" for e in opening)
+            live = app.state.app_state.sessions.get(session.id)
+            assert live is not None
+
+            with client.websocket_connect("/ws") as second:
+                second.send_text(hello(project.id, session.id))
+                ready = receive_until(second, {"ready"}, limit=10)
+                assert any(e["kind"] == "ready" for e in ready)
+                # Same session, still running the same turn.
+                assert app.state.app_state.sessions.get(session.id) is live
+
+                events = receive_until(second, {"done"}, limit=120)
+
+        said = "".join(e["data"]["text"] for e in events if e["kind"] == "say")
+        assert "All four machines report it." in said, (
+            "the rest of the answer was thrown away with the old connection"
+        )
+        assert any(e["kind"] == "done" for e in events)
+
+    def test_a_reconnect_reuses_the_session_rather_than_starting_another(self, setup):
+        client, app, project, session = setup
+        app.state.app_state.deepseek = SlowClient(pause=1.0)
+
+        with client.websocket_connect("/ws") as first:
+            first.send_text(hello(project.id, session.id))
+            receive_until(first, {"ready"}, limit=5)
+            first.send_text(json.dumps({"kind": "text", "data": {"text": "hi"}}))
+            receive_until(first, {"say"}, limit=40)
+            manager = app.state.app_state.sessions
+            live = manager.get(session.id)
+            assert live is not None
+
+            with client.websocket_connect("/ws") as second:
+                second.send_text(hello(project.id, session.id))
+                receive_until(second, {"ready"}, limit=10)
+                assert manager.get(session.id) is live, "a second session was created"
+                assert manager.count == 1
+
+    def test_the_reused_session_reports_itself_as_resumed(self, setup):
+        client, _app, project, session = setup
+        with client.websocket_connect("/ws") as first:
+            first.send_text(hello(project.id, session.id))
+            receive_until(first, {"ready"}, limit=5)
+
+            with client.websocket_connect("/ws") as second:
+                second.send_text(hello(project.id, session.id))
+                events = receive_until(second, {"ready"}, limit=10)
+
+        ready = next(e for e in events if e["kind"] == "ready")
+        # The browser was away and missed events, so the session restates itself.
+        assert ready["data"]["resumed"] is True
+        assert ready["data"]["state"]
+
+    def test_a_superseded_connection_does_not_close_the_live_session(self, setup):
+        """The stale tab's handler runs last and must leave the session alone."""
+        client, app, project, session = setup
+        app.state.app_state.deepseek = ScriptedClient([text_script("<say>ok</say>")])
+        manager = app.state.app_state.sessions
+
+        # Managed by hand so the *first* connection can be closed while the second
+        # is still open — which is the ordering that used to kill the session.
+        first = client.websocket_connect("/ws")
+        first.__enter__()
+        second = client.websocket_connect("/ws")
+        second.__enter__()
+        try:
+            first.send_text(hello(project.id, session.id))
+            receive_until(first, {"ready"}, limit=5)
+            live = manager.get(session.id)
+            assert live is not None
+
+            second.send_text(hello(project.id, session.id))
+            receive_until(second, {"ready"}, limit=10)
+            assert manager.get(session.id) is live
+
+            # The superseded connection now disconnects and runs its cleanup.
+            first.__exit__(None, None, None)
+
+            assert manager.get(session.id) is live, "the live session was unregistered"
+        finally:
+            second.__exit__(None, None, None)
+
+
 class TestBargeIn:
     def test_barge_in_cancels_an_in_flight_turn(self, setup):
         """A cancelled turn must stop generating, not run to completion."""

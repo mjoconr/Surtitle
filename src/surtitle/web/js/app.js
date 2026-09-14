@@ -632,6 +632,9 @@ function handleEvent(event) {
         // about, but it must not stop the session.
         toast(`MCP: ${data.mcp_failures[0]}`, "error");
       }
+      // A resumed session restates its state, so a reconnect mid-turn does not
+      // leave the status indicator stuck on whatever it showed before.
+      if (data.resumed && data.state) setAgentState(data.state);
       renderRightbar();
       break;
     }

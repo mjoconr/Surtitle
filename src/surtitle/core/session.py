@@ -94,6 +94,22 @@ class Session:
     project_config: Any = None
 
     # --- lifecycle -------------------------------------------------------
+    def rebind(
+        self,
+        *,
+        send: Callable[[dict[str, Any]], Awaitable[None]],
+        send_audio: Callable[[bytes], Awaitable[None]],
+    ) -> None:
+        """Point this session at a replacement connection.
+
+        A browser that reconnects mid-answer must not cost the user that answer.
+        Reusing the live session and moving its transport keeps the running turn
+        alive, delivers the events it already queued to the new socket, and avoids
+        tearing down the Deepgram sockets underneath it.
+        """
+        self.send = send
+        self.send_audio = send_audio
+
     async def start(self) -> None:
         """Wire up the voice pipeline and start the drainer."""
         if self.settings.voice_enabled and self.settings.deepgram_key():
@@ -134,6 +150,15 @@ class Session:
             self.root,
             self.settings.voice_enabled and self.tts is not None,
         )
+        await self.announce()
+
+    async def announce(self) -> None:
+        """Tell the connected browser what this session is and where it stands.
+
+        Emitted on start and again whenever a reconnect rebinds the session, since
+        a browser that was away missed whatever was sent in the meantime and would
+        otherwise sit showing a stale state.
+        """
         await self.emit(
             EventKind.READY,
             session_id=self.session_id,
@@ -148,6 +173,10 @@ class Session:
             mcp_servers=sorted(self.mcp_manager.server_names) if self.mcp_manager else [],
             mcp_failures=self.mcp_manager.failures if self.mcp_manager else [],
             environment=environment_summary(self.root),
+            # The concrete state, so the status indicator is right immediately
+            # rather than only after the next transition.
+            state=self._state.state.value,
+            resumed=True,
         )
 
     async def _build_registry(self) -> Any:
@@ -784,42 +813,62 @@ class SessionManager:
 
     def __init__(self) -> None:
         self._sessions: dict[str, Session] = {}
+        # Which connection currently owns each session. A page open in two tabs,
+        # or a reconnect, produces a second connection for a conversation that is
+        # already live; the newest one owns it.
+        self._owner: dict[str, str] = {}
 
-    async def add(self, session: Session) -> None:
-        """Register a session, retiring any previous one for the same id.
+    async def acquire(self, session: Session, token: str) -> tuple[Session, bool]:
+        """Return the session this connection should use.
 
-        A reconnecting browser opens a second WebSocket for the same conversation
-        before the first has been torn down. Registering the new session used to
-        simply overwrite the old entry, which orphaned it: its Deepgram socket and
-        outbox task kept running, so two speech pipelines were briefly alive for
-        one conversation and a reply could be cut off or spoken twice.
+        Returns ``(session, started_now)``. A reconnect for a conversation that is
+        already live reuses the existing session and simply rebinds its transport,
+        so an in-flight turn survives.
+
+        This used to register the new session and retire the old one. Two tabs on
+        the same conversation then destroyed each other in a loop: the retired
+        tab's socket closed, its client reconnected, which retired the other, and
+        so on. Every retirement cancelled whatever turn was running, so a spoken
+        question was transcribed, sent, and answered into nothing — the reply went
+        to a session that had just been closed. That is what "voice is converting
+        but no action" was.
         """
-        previous = self._sessions.get(session.session_id)
-        self._sessions[session.session_id] = session
-        if previous is not None and previous is not session:
-            log.info(
-                "retiring the previous session for %s (a new connection took over)",
-                session.session_id,
-            )
-            await previous.close()
+        existing = self._sessions.get(session.session_id)
+        if existing is None:
+            self._sessions[session.session_id] = session
+            self._owner[session.session_id] = token
+            return session, True
+
+        existing.rebind(send=session.send, send_audio=session.send_audio)
+        self._owner[session.session_id] = token
+        return existing, False
+
+    async def release(self, session_id: str, token: str) -> None:
+        """Detach a connection, closing the session only if it still owns it.
+
+        A superseded connection finishing its handler must not close the session
+        that took over from it.
+        """
+        if self._owner.get(session_id) != token:
+            return
+        self._owner.pop(session_id, None)
+        session = self._sessions.pop(session_id, None)
+        if session is not None:
+            await session.close()
 
     def get(self, session_id: str) -> Session | None:
         return self._sessions.get(session_id)
 
-    async def remove(self, session_id: str, *, session: Session | None = None) -> None:
-        """Close and forget a session.
+    async def remove(self, session_id: str) -> None:
+        """Close and forget a session outright, whoever owns it.
 
-        ``session`` pins the removal to one instance. The handler for a superseded
-        connection must not unregister the newer session that replaced it, or the
-        live conversation would vanish from the registry and leak its voice
-        sockets.
+        Used when the conversation itself goes away — archived or deleted — where
+        the point is precisely to stop it listening.
         """
-        current = self._sessions.get(session_id)
-        if session is not None and current is not None and current is not session:
-            return
-        target = self._sessions.pop(session_id, None)
-        if target is not None:
-            await target.close()
+        self._owner.pop(session_id, None)
+        session = self._sessions.pop(session_id, None)
+        if session is not None:
+            await session.close()
 
     async def close_all(self) -> None:
         for session_id in list(self._sessions):

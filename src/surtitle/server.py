@@ -23,6 +23,7 @@ import json
 import logging
 import os
 import re
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -704,7 +705,8 @@ def build_ws(state: AppState) -> APIRouter:
 
             missing = state.settings_store.effective().missing_credentials()
 
-            session = Session(
+            connection_token = uuid.uuid4().hex
+            candidate = Session(
                 session_id=session_id,
                 project_id=project_id,
                 root=Path(project.root),
@@ -714,8 +716,17 @@ def build_ws(state: AppState) -> APIRouter:
                 send=lambda payload: _safe_send(websocket, payload),
                 send_audio=lambda audio: _safe_send_bytes(websocket, bytes([_OP_AUDIO_IN]) + audio),
             )
-            await state.sessions.add(session)
-            await session.start()
+            # A reconnect for a conversation that is already live reuses that
+            # session and rebinds it here, so a turn in progress is not thrown away
+            # with its answer.
+            session, started_now = await state.sessions.acquire(candidate, connection_token)
+            if started_now:
+                await session.start()
+            else:
+                log.info("reusing the live session for %s (reconnected)", session_id)
+                # The browser lost any events sent while it was away, so restate
+                # where things stand rather than leaving the UI showing "thinking".
+                await session.announce()
 
             if missing:
                 # Surfaced as a recoverable notice, not a failure: the UI routes
@@ -737,10 +748,10 @@ def build_ws(state: AppState) -> APIRouter:
         except Exception:
             log.exception("websocket handler failed")
         finally:
-            if session is not None:
-                # Pinned to this instance: a reconnecting browser may already have
-                # replaced it, and this handler must not unregister the newer one.
-                await state.sessions.remove(session.session_id, session=session)
+            if session is not None and connection_token is not None:
+                # Only the connection that still owns this session may close it; a
+                # superseded tab finishing its handler must leave it alone.
+                await state.sessions.release(session.session_id, connection_token)
             with contextlib.suppress(Exception):
                 await websocket.close()
 

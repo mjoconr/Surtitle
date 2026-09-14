@@ -117,6 +117,32 @@ losing a full stop changes what the synthesizer does with the sentence.
 State changes use `put_nowait` on the outbox rather than awaiting, so a state update
 can never deadlock a caller that is holding the agent's execution.
 
+### Reconnecting to a live conversation
+
+A conversation can have more than one connection asking for it: a page open in two
+tabs, or any reconnect. `SessionManager` keys sessions by id and stores the
+connection that currently owns each one.
+
+A second connection for a session that is already live **reuses that session and
+rebinds its transport** to the new socket, rather than creating a replacement. The
+turn in progress keeps running and its queued events go to the new socket, so a
+reconnect never costs the user the answer that was being written when it happened.
+The reused session re-sends `ready` (with `resumed: true`) so a browser that was
+away resynchronises.
+
+Both of the obvious alternatives are wrong, and both were tried:
+
+- **Overwriting the registry entry** orphans the previous session — its Deepgram
+  socket and outbox task keep running, so two speech pipelines answer one question.
+- **Closing the previous session** cancels the in-flight turn and delivers its
+  answer to a socket that no longer exists. Two tabs then destroy each other in a
+  loop, each teardown provoking the other's reconnect: six connections in six
+  seconds, and a spoken question that was transcribed, sent, and never answered.
+
+Only the connection that still owns a session may close it (`release` compares a
+per-connection token), so a superseded tab finishing its handler leaves the live
+session alone.
+
 ### Approvals
 
 `ApprovalBroker` separates **registration** from **waiting**:
