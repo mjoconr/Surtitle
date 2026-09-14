@@ -222,11 +222,47 @@ function addToolRow(turn, callId, name) {
   return record;
 }
 
-function scrollToBottom() {
+function scrollToBottom(force = false) {
   const nearBottom =
     el.transcript.scrollHeight - el.transcript.scrollTop - el.transcript.clientHeight < 160;
-  if (nearBottom) {
+  if (force || nearBottom) {
     el.transcript.scrollTop = el.transcript.scrollHeight;
+  }
+}
+
+/**
+ * Land on the newest message, whatever the reader's position was.
+ *
+ * `scrollToBottom` deliberately refuses to move the view once someone has
+ * scrolled up to read, so that streaming text does not yank the page. Replaying a
+ * stored conversation is the opposite situation: the transcript has just been
+ * replaced, so the view starts at the top and a long conversation opened showing
+ * its *oldest* messages.
+ *
+ * Smooth scrolling is suspended for the whole replay, not just the final jump.
+ * The stylesheet sets `scroll-behavior: smooth`, so building sixty turns started
+ * sixty animations; one was still in flight afterwards and fought the jump, and
+ * assigning `scrollTop` to move the view was itself animated rather than instant.
+ * Measured on a 60-message conversation, that left the view ~1,600 px short.
+ */
+async function replayThenJumpToLatest(build) {
+  const transcript = el.transcript;
+  const previous = transcript.style.scrollBehavior;
+  transcript.style.scrollBehavior = "auto";
+  try {
+    build();
+  } finally {
+    const toEnd = () => {
+      transcript.scrollTop = transcript.scrollHeight;
+    };
+    toEnd();
+    // Again after layout: wrapped text and web fonts change heights, and the
+    // scrollbar appearing changes the viewport.
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+    toEnd();
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+    toEnd();
+    transcript.style.scrollBehavior = previous;
   }
 }
 
@@ -1203,8 +1239,10 @@ async function selectSession(sessionId) {
   state.currentTurn = null;
   state.activity = [];
 
-  // Replay the stored transcript so reopening a conversation shows its history.
-  if (session.messages) {
+  // Replay the stored transcript so reopening a conversation shows its history,
+  // then land on the newest message rather than the oldest.
+  await replayThenJumpToLatest(() => {
+    if (!session.messages) return;
     for (const message of session.messages) {
       if (message.role === "user") {
         const turn = beginTurn("user");
@@ -1230,7 +1268,7 @@ async function selectSession(sessionId) {
       }
     }
     state.currentTurn = null;
-  }
+  });
 
   renderSessions();
   openConnection();

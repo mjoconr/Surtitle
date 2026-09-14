@@ -307,6 +307,51 @@ class TestCaptureWorkletWiring:
         assert "capture-worklet.js?v=" in audio
 
 
+class TestTranscriptScroll:
+    """Selecting a conversation must show its newest message.
+
+    `scrollToBottom` only moves the view when the reader is already near the
+    bottom, so streaming text cannot yank the page while someone reads back. That
+    is right during a turn and wrong when replaying: the transcript is replaced,
+    the view starts at the top, and the follow-along check then refuses to move
+    it — so a long conversation opened showing its oldest messages.
+
+    Smooth scrolling has to be off for the whole replay, not just the last jump.
+    Assembling sixty turns started sixty animations, one of which was still in
+    flight afterwards and fought the jump; assigning `scrollTop` to move the view
+    was itself animated. On a 60-message conversation that left the view about
+    1,600 px short of the bottom.
+    """
+
+    def test_replay_lands_at_the_newest_message(self, script):
+        assert "replayThenJumpToLatest(" in script, "replay must land at the newest message"
+
+    def test_the_jump_ignores_the_reader_position(self, script):
+        block = script[script.index("async function replayThenJumpToLatest(") :]
+        block = block[: block.index("\n}\n") + 2]
+        assert "nearBottom" not in block, "the jump must not use the follow-along check"
+
+    def test_smooth_scrolling_is_suspended_for_the_whole_replay(self, script):
+        block = script[script.index("async function replayThenJumpToLatest(") :]
+        block = block[: block.index("\n}\n") + 2]
+        assert 'scrollBehavior = "auto"' in block
+        # Suspended before the transcript is built, and only restored after it.
+        assert block.index('scrollBehavior = "auto"') < block.index("build();")
+        assert block.rindex("scrollBehavior = previous") > block.index("build();")
+
+    def test_live_streaming_still_respects_the_reader(self, script):
+        """The follow-along behaviour during a turn must survive."""
+        assert "function scrollToBottom(force = false)" in script
+        assert "if (force || nearBottom)" in script
+
+    def test_the_jump_waits_for_layout(self, script):
+        block = script[script.index("async function replayThenJumpToLatest(") :]
+        block = block[: block.index("\n}\n") + 2]
+        assert "requestAnimationFrame" in block, (
+            "heights are only final after layout, so a single synchronous scroll can land short"
+        )
+
+
 class TestActivityPanelNoise:
     """Reasoning must not flood the panel.
 
