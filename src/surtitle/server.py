@@ -445,6 +445,8 @@ def build_ws(state: AppState) -> APIRouter:
                 )
                 return
 
+            missing = state.settings_store.effective().missing_credentials()
+
             session = Session(
                 session_id=session_id,
                 project_id=project_id,
@@ -457,6 +459,19 @@ def build_ws(state: AppState) -> APIRouter:
             )
             state.sessions.add(session)
             await session.start()
+
+            if missing:
+                # Surfaced as a recoverable notice, not a failure: the UI routes
+                # the user to Settings and everything else still works.
+                await session.emit(
+                    EventKind.ERROR,
+                    message=(
+                        "No API key configured yet, so the agent cannot answer. "
+                        "Open Settings and add your credentials."
+                    ),
+                    kind_detail="not_configured",
+                    recoverable=True,
+                )
 
             await _pump(websocket, session)
 

@@ -82,31 +82,84 @@ def find_uv() -> str:
 
 
 def standalone_python(uv: str) -> Path:
-    """Download a standalone Python and return the interpreter path.
+    """Install a standalone Python and return its installation root.
 
-    ``uv python install`` places it in uv's own directory; the path is then
-    copied into the archive so the user's machine needs nothing pre-installed.
+    Returns the *root* rather than an interpreter path on purpose.
+    ``uv python find`` resolves through the active project and can hand back the
+    application's own ``.venv`` interpreter, which would make the "bundled"
+    runtime a copy of the very thing we are trying to avoid depending on.
     """
     version = f"{sys.version_info.major}.{sys.version_info.minor}"
     print(f"· installing standalone Python {version}")
     run([uv, "python", "install", version])
 
-    found = run([uv, "python", "find", version], capture=True).strip()
-    if not found:
-        raise SystemExit("could not locate the standalone Python after installing it")
+    install_dir = run([uv, "python", "dir"], capture=True).strip()
+    if not install_dir:
+        raise SystemExit("`uv python dir` returned nothing")
 
-    interpreter = Path(found)
-    if not interpreter.is_file():
-        raise SystemExit(f"standalone Python reported at {interpreter} does not exist")
+    # uv names managed installs cpython-<major>.<minor>-<platform>-<arch>-<flavour>.
+    prefix = f"cpython-{version}"
+    candidates = sorted(
+        path
+        for path in Path(install_dir).iterdir()
+        if path.is_dir() and path.name.startswith(prefix) and _interpreter_in(path) is not None
+    )
+    if not candidates:
+        raise SystemExit(
+            f"no standalone Python matching {prefix}* found in {install_dir}. "
+            "Run `uv python install` yourself to see the failure."
+        )
+
+    root = candidates[-1]
+    print(f"· standalone Python root: {root}")
+    return root
+
+
+def _interpreter_in(root: Path) -> Path | None:
+    """Find the interpreter inside a Python installation root."""
+    major, minor = sys.version_info.major, sys.version_info.minor
+    if os.name == "nt":
+        candidates = (root / "python.exe", root / "bin" / "python.exe")
+    else:
+        candidates = (
+            root / "bin" / f"python{major}.{minor}",
+            root / "bin" / "python3",
+            root / "bin" / "python",
+        )
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def copy_python_runtime(source_root: Path, destination: Path) -> Path:
+    """Copy a standalone Python installation and verify the copy actually runs.
+
+    Verifying matters: a runtime whose shared library did not come along looks
+    perfectly fine on disk and only fails later, when the user starts the app.
+    """
+    print(f"· copying Python runtime from {source_root}")
+    shutil.copytree(source_root, destination, symlinks=False, dirs_exist_ok=True)
+
+    interpreter = _interpreter_in(destination)
+    if interpreter is None:
+        raise SystemExit(f"no interpreter found in the copied runtime at {destination}")
+
+    probe = subprocess.run(
+        [str(interpreter), "-c", "import sys; print(sys.version_info[:2])"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if probe.returncode != 0:
+        detail = (probe.stderr or probe.stdout or "").strip().splitlines()
+        raise SystemExit(
+            "the copied Python runtime does not run, so the archive would be broken.\n"
+            f"  interpreter: {interpreter}\n"
+            f"  output: {detail[-1] if detail else 'no output'}"
+        )
+    print(f"· bundled runtime verified: {interpreter}")
     return interpreter
-
-
-def copy_python_runtime(interpreter: Path, destination: Path) -> None:
-    """Copy a standalone Python installation into the archive tree."""
-    # The interpreter lives in <root>/bin/python, or <root>/python.exe on Windows.
-    root = interpreter.parent if os.name == "nt" else interpreter.parent.parent
-    print(f"· copying Python runtime from {root}")
-    shutil.copytree(root, destination, symlinks=False, dirs_exist_ok=True)
 
 
 def build_venv(uv: str, python: Path, target: Path) -> None:
@@ -266,6 +319,96 @@ def archive(destination: Path, version: str) -> Path:
     return path
 
 
+def verify_archive(archive_path: Path) -> None:
+    """Extract the archive and prove the bundled runtime actually runs.
+
+    A release archive is only useful if it starts on a machine with no Python and
+    no network, so the build checks that here rather than trusting the layout.
+    This has already caught a missing ``__main__`` (broken launchers), a runtime
+    copied from the wrong place (broken shared library), and absent web assets
+    (a UI that would 404).
+    """
+    import tarfile
+    import tempfile
+    import zipfile
+
+    print("· verifying the archive as a user would receive it")
+    with tempfile.TemporaryDirectory(prefix="surtitle-verify-") as temp:
+        target = Path(temp) / "extracted"
+        target.mkdir(parents=True)
+
+        if archive_path.suffix == ".zip":
+            with zipfile.ZipFile(archive_path) as bundle:
+                bundle.extractall(target)
+        else:
+            with tarfile.open(archive_path) as bundle:
+                bundle.extractall(target)
+
+        roots = [entry for entry in target.iterdir() if entry.is_dir()]
+        root = roots[0] if len(roots) == 1 and not (target / "VERSION").exists() else target
+
+        # The venv interpreter must be used: it is the one that can see the
+        # installed application. The raw runtime is only a fallback for the
+        # layout check.
+        interpreter = _interpreter_in(root / "venv") or _interpreter_in(root / "python")
+        if interpreter is None:
+            # Some layouts nest everything under a single top-level directory.
+            interpreter = _interpreter_in(root / "venv") or None
+            for candidate_root in (root, *[p for p in root.iterdir() if p.is_dir()]):
+                interpreter = _interpreter_in(candidate_root / "venv")
+                if interpreter is not None:
+                    break
+        if interpreter is None:
+            raise SystemExit("archive has no usable interpreter (looked for venv/)")
+
+        checks = (
+            (
+                "imports the application",
+                [str(interpreter), "-c", "import surtitle, surtitle.server"],
+            ),
+            (
+                "runs the documented entry point",
+                [str(interpreter), "-m", "surtitle", "--version"],
+            ),
+            (
+                "has the web assets",
+                [
+                    str(interpreter),
+                    "-c",
+                    "import pathlib, surtitle as a;"
+                    " w = pathlib.Path(a.__file__).parent / 'web';"
+                    " assert (w / 'index.html').is_file();"
+                    " assert (w / 'js' / 'app.js').is_file();"
+                    " print('ok')",
+                ],
+            ),
+        )
+
+        # Run in a scratch home with a cleared environment, so nothing resolves
+        # back to this build machine.
+        environment = {
+            key: value
+            for key, value in os.environ.items()
+            if key not in {"VIRTUAL_ENV", "PYTHONPATH", "PYTHONHOME"}
+        }
+        environment["SURTITLE_HOME"] = str(Path(temp) / "home")
+
+        for label, argv in checks:
+            result = subprocess.run(
+                argv, capture_output=True, text=True, env=environment, cwd=str(Path(temp))
+            )
+            if result.returncode != 0:
+                detail = (result.stderr or result.stdout or "").strip().splitlines()
+                raise SystemExit(
+                    f"archive verification failed: it does not {label}\n"
+                    f"  {' '.join(argv)}\n"
+                    f"  {detail[-1] if detail else 'no output'}"
+                )
+            print(f"  ✓ {label}")
+
+    print("· archive verified")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Build a self-contained release archive.")
     parser.add_argument(
@@ -278,6 +421,11 @@ def main() -> int:
         action="store_true",
         help="Skip downloading extra wheels (smaller archive, needs network to repair).",
     )
+    parser.add_argument(
+        "--skip-verify",
+        action="store_true",
+        help="Skip extracting and smoke-testing the finished archive.",
+    )
     args = parser.parse_args()
 
     uv = find_uv()
@@ -288,19 +436,9 @@ def main() -> int:
         shutil.rmtree(BUILD_DIR)
     BUILD_DIR.mkdir(parents=True, exist_ok=True)
 
-    interpreter = standalone_python(uv)
+    runtime_root = standalone_python(uv)
     runtime_dir = BUILD_DIR / "python"
-    copy_python_runtime(interpreter, runtime_dir)
-
-    bundled_python = runtime_dir / (
-        "python.exe" if os.name == "nt" else f"bin/python{sys.version_info.major}"
-    )
-    if not bundled_python.exists():
-        # Fall back to whatever the runtime directory actually contains.
-        candidates = list(runtime_dir.rglob("python.exe" if os.name == "nt" else "python3*"))
-        if not candidates:
-            raise SystemExit(f"no interpreter found inside {runtime_dir}")
-        bundled_python = candidates[0]
+    bundled_python = copy_python_runtime(runtime_root, runtime_dir)
     print(f"· bundled interpreter: {bundled_python.relative_to(BUILD_DIR)}")
 
     venv_dir = BUILD_DIR / "venv"
@@ -315,6 +453,9 @@ def main() -> int:
     manifest = write_manifest(BUILD_DIR, version)
 
     output = archive(BUILD_DIR, version)
+    if not args.skip_verify:
+        verify_archive(output)
+
     size_mb = output.stat().st_size / (1024 * 1024)
     print(f"\nBuilt {output}")
     print(f"  {size_mb:.1f} MB · {manifest['version']} · {manifest['platform']}")

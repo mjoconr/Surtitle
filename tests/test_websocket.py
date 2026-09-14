@@ -337,3 +337,62 @@ class TestAudioFraming:
             socket.send_text(json.dumps({"kind": "ping", "data": {}}))
             events = receive_until(socket, {"ready"}, limit=10)
             assert any(e["data"].get("pong") for e in events)
+
+
+class TestUnconfiguredStartup:
+    """The app must be usable enough to fix its own configuration.
+
+    Credentials are entered in the app's own Settings screen, so refusing to
+    serve when they are missing would be a deadlock.
+    """
+
+    @pytest.fixture
+    def bare(self, tmp_path):
+        settings = Settings(
+            SURTITLE_HOME=str(tmp_path / "home"),
+            voice_enabled=False,
+        )
+        app = create_app_for(settings)
+        with TestClient(app) as client:
+            state = app.state.app_state
+            root = tmp_path / "proj"
+            root.mkdir()
+            project = state.store.create_project("Unconfigured", root)
+            session = state.store.create_session(project.id)
+            yield client, app, project, session
+
+    def test_serves_the_ui_without_any_credentials(self, bare):
+        client, _app, _project, _session = bare
+        assert client.get("/api/health").status_code == 200
+        assert client.get("/api/settings").status_code == 200
+
+    def test_health_reports_both_keys_missing(self, bare):
+        client, _app, _project, _session = bare
+        body = client.get("/api/health").json()
+        assert body["deepseek_configured"] is False
+        assert body["deepgram_configured"] is False
+
+    def test_a_session_can_still_be_opened(self, bare):
+        """The socket must connect, because it is how the user reaches Settings."""
+        client, _app, project, session = bare
+        with client.websocket_connect("/ws") as socket:
+            socket.send_text(hello(project.id, session.id))
+            events = receive_until(socket, {"ready"}, limit=10)
+            assert any(e["kind"] == "ready" for e in events)
+
+    def test_the_missing_key_is_reported_as_recoverable(self, bare):
+        client, _app, project, session = bare
+        with client.websocket_connect("/ws") as socket:
+            socket.send_text(hello(project.id, session.id))
+            events = receive_until(socket, {"error"}, limit=10)
+            error = next((e for e in events if e["kind"] == "error"), None)
+            assert error is not None, f"no notice was sent: {events}"
+            assert error["data"]["kind_detail"] == "not_configured"
+            assert error["data"]["recoverable"] is True
+            assert "Settings" in error["data"]["message"]
+
+    def test_settings_can_be_saved_while_unconfigured(self, bare):
+        client, _app, _project, _session = bare
+        response = client.put("/api/settings", json={"reasoning_effort": "high"})
+        assert response.status_code == 200
+        assert response.json()["sections"]["model"]

@@ -81,15 +81,16 @@ jobs:
           enable-cache: true
       - name: Build the archive
         run: uv run --frozen python scripts/build_release.py
-      - name: Verify the archive contains a runnable runtime
+      - name: Verify the archive is complete
         shell: bash
         run: |
           set -euo pipefail
           ls -la dist/
-          # The whole point of the archive is that it needs no installed Python,
-          # so assert the bundled pieces are actually present.
+          # The build script already extracts and smoke-tests the archive; this
+          # asserts the shipped pieces are present too, so a layout regression is
+          # caught even if the smoke test is skipped.
           python - <<'PY'
-          import pathlib, sys, tarfile, zipfile
+          import pathlib, tarfile, zipfile
 
           dist = pathlib.Path("dist")
           archives = list(dist.glob("*.zip")) + list(dist.glob("*.tar.gz"))

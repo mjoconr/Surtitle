@@ -100,6 +100,30 @@ To cut the size of the archive (roughly 130–180 MB, dominated by matplotlib an
 interpreter), consider a `requirements-release.txt` that omits matplotlib for
 environments that never chart.
 
+## Optional: a native `surtitle.exe` launcher
+
+`run.bat` and `run.ps1` do the job with no build step, and they are what the
+release ships. A native executable is a nicer double-click experience (no console
+flash, no execution policy, less antivirus suspicion), and it can be produced from
+macOS or Linux without a Windows machine — Zig cross-compiles to a Windows PE:
+
+```bash
+zig build-exe launcher.zig -target x86_64-windows -O ReleaseSmall \
+    -femit-bin=build/surtitle.exe
+```
+
+Verified on this project: Zig 0.16 on macOS produces a working `PE32+ x86-64`
+Windows binary with no Windows toolchain involved. A launcher that spawns
+`venv\Scripts\python.exe -m surtitle run` and forwards its arguments is all
+the code that is needed.
+
+Not implemented here, deliberately: Zig 0.16 replaced `std.heap.GeneralPurposeAllocator`
+with `heap.DebugAllocator` and moved process and IO APIs behind a new async-first
+`std.Io` layer, and it removed `std.process.argsWithAllocator` and
+`std.fs.selfExePath`. Porting is straightforward against a stable Zig release, but
+it is not worth maintaining an untestable binary for a convenience wrapper while
+the API is in flux. If you want it, the cross-compile path above is proven to work.
+
 ## Troubleshooting
 
 **"no Python environment was found"**

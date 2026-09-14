@@ -175,8 +175,7 @@ class TestConvertDocument:
         from pypdf import PdfReader
 
         text = "\n".join(
-            page.extract_text() or ""
-            for page in PdfReader(str(ctx.root / "note.pdf")).pages
+            page.extract_text() or "" for page in PdfReader(str(ctx.root / "note.pdf")).pages
         )
         assert "Sampling Line Report" in text
 
@@ -194,9 +193,7 @@ class TestConvertDocument:
     async def test_explicit_output_path(self, ctx):
         from surtitle.tools.documents import convert_document
 
-        result = await convert_document(
-            ctx, "note.txt", target="pdf", output="reports/summary.pdf"
-        )
+        result = await convert_document(ctx, "note.txt", target="pdf", output="reports/summary.pdf")
         assert result.ok, result.error
         assert result.data["path"] == "reports/summary.pdf"
         assert (ctx.root / "reports" / "summary.pdf").is_file()
@@ -224,9 +221,7 @@ class TestConvertDocument:
     async def test_escaping_output_is_blocked(self, ctx):
         from surtitle.tools.documents import convert_document
 
-        result = await convert_document(
-            ctx, "note.txt", target="pdf", output="../../evil.pdf"
-        )
+        result = await convert_document(ctx, "note.txt", target="pdf", output="../../evil.pdf")
         assert not result.ok
         assert not (ctx.root.parent.parent / "evil.pdf").exists()
 

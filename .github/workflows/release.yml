@@ -101,12 +101,37 @@ jobs:
               python = root / "venv" / "bin" / "python"
           assert python.exists(), f"bundled interpreter missing at {python}"
 
+          # 1. The app must import from the bundled runtime alone.
           probe = subprocess.run(
               [str(python), "-c", "import surtitle, surtitle.server; print(surtitle.__version__)"],
               capture_output=True, text=True,
           )
           print(probe.stdout.strip() or probe.stderr.strip())
           assert probe.returncode == 0, "bundled runtime could not import the app"
+
+          # 2. The documented entry point must work. This caught a real bug where
+          #    `python -m surtitle` had no __main__ and the launchers failed.
+          probe = subprocess.run(
+              [str(python), "-m", "surtitle", "--version"],
+              capture_output=True, text=True,
+          )
+          print(probe.stdout.strip() or probe.stderr.strip())
+          assert probe.returncode == 0, "`python -m surtitle` does not run"
+          assert "surtitle" in probe.stdout.lower(), "unexpected --version output"
+
+          # 3. The web assets must be installed, or the UI would 404.
+          probe = subprocess.run(
+              [str(python), "-c",
+               "import pathlib, surtitle as a; "
+               "w = pathlib.Path(a.__file__).parent / 'web'; "
+               "assert (w / 'index.html').is_file(), 'index.html missing'; "
+               "assert (w / 'js' / 'app.js').is_file(), 'app.js missing'; "
+               "print('web assets present')"],
+              capture_output=True, text=True,
+          )
+          print(probe.stdout.strip() or probe.stderr.strip())
+          assert probe.returncode == 0, "web assets were not packaged"
+
           print("bundled runtime is functional")
           PY
       - name: Upload the archive

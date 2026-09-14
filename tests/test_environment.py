@@ -20,7 +20,6 @@ import pytest
 
 from surtitle.tools import environment
 from surtitle.tools.environment import (
-    EnvironmentError_,
     approved_requirements,
     ensure_venv,
     env_dir,
@@ -212,13 +211,15 @@ class TestLiveInstallation:
         if not ok:
             pytest.skip(f"PyPI unavailable: {output}")
 
-        code = "import importlib.util, sys; print(importlib.util.find_spec('six') is not None)"
         process = await asyncio.create_subprocess_exec(
-            sys.executable, "-c", code, stdout=asyncio.subprocess.PIPE
+            sys.executable,
+            "-c",
+            "print('probe')",
+            stdout=asyncio.subprocess.PIPE,
         )
-        stdout, _ = await process.communicate()
-        # The application environment already has six (uv dependency), so assert
-        # the interpreter identity instead, which is the real isolation property.
+        await process.communicate()
+        # The application environment already contains six as a dependency, so
+        # assert interpreter identity instead: that is the real isolation property.
         assert project_env_python(tmp_path) != Path(sys.executable)
 
 
@@ -301,9 +302,7 @@ class TestApprovalGateForInstall:
         try:
             assert registry.requires_approval("install_packages", {"packages": ["pandas"]}) is True
             remember_requirements(tmp_path, ["pandas"])
-            assert (
-                registry.requires_approval("install_packages", {"packages": ["pandas"]}) is False
-            )
+            assert registry.requires_approval("install_packages", {"packages": ["pandas"]}) is False
         finally:
             _APPROVAL_ROOT.reset(token)
 

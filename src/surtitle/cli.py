@@ -13,7 +13,6 @@ from rich.table import Table
 
 from surtitle import __version__
 from surtitle.config import (
-    ConfigError,
     get_settings,
     reset_settings_cache,
     setup_logging,
@@ -107,14 +106,23 @@ def run(
 
     setup_logging(settings)
 
-    try:
-        settings.require_credentials(voice=settings.voice_enabled)
-    except ConfigError as exc:
-        console.print(Panel(str(exc), title="Cannot start", border_style="red"))
+    # A missing DeepSeek key must NOT stop startup. The key is added in the app's
+    # own Settings screen, so refusing to serve would be a deadlock: the only way
+    # to fix the problem would be hidden behind the problem. Start anyway, warn
+    # clearly, and let the agent paths report the missing credential.
+    missing = settings.missing_credentials()
+    if missing:
         console.print(
-            "Open the app to add keys in Settings, or run [bold]surtitle init[/bold]."
+            Panel(
+                "Missing required credential(s): " + ", ".join(missing) + "\n\n"
+                "The app will start so you can add them in Settings, but the agent "
+                "cannot answer until they are set.",
+                title="Not configured yet",
+                border_style="yellow",
+            )
         )
-        raise typer.Exit(code=2) from exc
+    elif not settings.voice_enabled:
+        console.print("[yellow]Voice is disabled; running text-only.[/yellow]")
 
     if strict_port:
         from surtitle.platform_utils import port_is_free

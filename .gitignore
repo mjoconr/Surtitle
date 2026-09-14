@@ -16,6 +16,8 @@ venv/
 
 # uv / build caches kept inside the workspace so restricted environments work
 .uv-cache/
+.uv-python/
+.uv-python-cache/
 .zig-cache/
 .zig-out/
 
