@@ -38,6 +38,7 @@ const state = {
   settings: null,
   rightTab: "files",
   environment: null,
+  attachments: [],
 };
 
 const el = {
@@ -65,6 +66,10 @@ const el = {
   approvalText: document.getElementById("approvalText"),
   approvalActions: document.getElementById("approvalActions"),
   toast: document.getElementById("toast"),
+  attachments: document.getElementById("attachments"),
+  fileInput: document.getElementById("fileInput"),
+  attachButton: document.getElementById("attachButton"),
+  dropzone: document.getElementById("dropzone"),
 };
 
 // --------------------------------------------------------------- utilities
@@ -209,6 +214,115 @@ function scrollToBottom() {
   if (nearBottom) {
     el.transcript.scrollTop = el.transcript.scrollHeight;
   }
+}
+
+// ------------------------------------------------------------- attachments
+
+/**
+ * Files the user attached, held until the message is sent.
+ *
+ * Uploading happens at send time rather than on selection so a message is atomic:
+ * the agent never receives a reference to a file that failed to store, and its
+ * path is in the project before the text that mentions it.
+ */
+function renderAttachments() {
+  el.attachments.replaceChildren();
+  el.attachments.hidden = state.attachments.length === 0;
+
+  for (const [index, file] of state.attachments.entries()) {
+    const chip = document.createElement("span");
+    chip.className = "chip";
+    chip.dataset.state = file.state || "pending";
+
+    if (file.preview) {
+      const thumb = document.createElement("img");
+      thumb.className = "chip__thumb";
+      thumb.src = file.preview;
+      thumb.alt = "";
+      chip.append(thumb);
+    } else {
+      // A glyph rather than nothing, so a non-image file is still visibly a file.
+      chip.append(node("span", "chip__glyph", fileGlyph(file.name)));
+    }
+
+    chip.append(node("span", "chip__name", file.name));
+
+    const remove = node("button", "chip__remove", "✕");
+    remove.type = "button";
+    remove.title = "Remove this attachment";
+    remove.setAttribute("aria-label", `Remove ${file.name}`);
+    remove.addEventListener("click", () => {
+      const [removed] = state.attachments.splice(index, 1);
+      if (removed && removed.preview) URL.revokeObjectURL(removed.preview);
+      renderAttachments();
+    });
+    chip.append(remove);
+    el.attachments.append(chip);
+  }
+}
+
+function fileGlyph(name) {
+  const extension = (name.split(".").pop() || "").toLowerCase();
+  if (["png", "jpg", "jpeg", "gif", "webp", "svg"].includes(extension)) return "IMG";
+  if (["pdf"].includes(extension)) return "PDF";
+  if (["xlsx", "xls", "csv"].includes(extension)) return "XLS";
+  if (["docx", "doc", "odt", "rtf"].includes(extension)) return "DOC";
+  if (["pptx", "ppt", "odp"].includes(extension)) return "PPT";
+  if (["py", "js", "ts", "json", "sh", "ps1", "rs", "go"].includes(extension)) return "<>";
+  if (["zip", "gz", "tar"].includes(extension)) return "ZIP";
+  return "FILE";
+}
+
+function addFiles(fileList) {
+  const incoming = Array.from(fileList || []);
+  if (incoming.length === 0) return;
+  for (const file of incoming) {
+    // Images get a local preview so the user can confirm the right one is attached.
+    const preview = file.type && file.type.startsWith("image/") ? URL.createObjectURL(file) : "";
+    state.attachments.push({ file, name: file.name, preview, state: "pending" });
+  }
+  renderAttachments();
+}
+
+/** Upload everything pending, returning the stored upload records. */
+async function uploadAttachments() {
+  const pending = state.attachments.filter((item) => item.file && item.state !== "stored");
+  if (pending.length === 0) return [];
+
+  const body = new FormData();
+  for (const item of pending) {
+    body.append("files", item.file, item.name);
+    item.state = "uploading";
+  }
+  if (state.session) body.append("session_id", state.session.id);
+  renderAttachments();
+
+  const response = await fetch(`/api/projects/${state.project.id}/uploads`, {
+    method: "POST",
+    body,
+  });
+  const payload = await response.json();
+  if (!response.ok) {
+    for (const item of pending) item.state = "failed";
+    renderAttachments();
+    throw new Error(payload.error || "Upload failed");
+  }
+
+  for (const item of pending) {
+    const stored = payload.files.find((entry) => entry.name === item.name);
+    item.state = "stored";
+    item.storedPath = stored ? stored.path : "";
+  }
+  renderAttachments();
+  return payload.files;
+}
+
+function clearAttachments() {
+  for (const item of state.attachments) {
+    if (item.preview) URL.revokeObjectURL(item.preview);
+  }
+  state.attachments = [];
+  renderAttachments();
 }
 
 // ------------------------------------------------------------------ sidebar
@@ -889,16 +1003,34 @@ function openConnection() {
   connection.connect({ project_id: state.project.id, session_id: state.session.id });
 }
 
-function sendMessage() {
+async function sendMessage() {
   const text = el.composer.value.trim();
-  if (!text) return;
+  const hasAttachments = state.attachments.length > 0;
+  if (!text && !hasAttachments) return;
   if (!state.session) {
     toast("Open a project and conversation first.", "error");
     return;
   }
-  connection.sendCommand("text", { text });
+
+  let message = text;
+  if (hasAttachments) {
+    try {
+      const stored = await uploadAttachments();
+      // Name the paths explicitly. The agent can only read inside the project, so
+      // a stored path is the difference between "here is a file" and "here is a
+      // file I can actually open".
+      const listing = stored.map((entry) => `- ${entry.path}`).join("\n");
+      message = `${text ? `${text}\n\n` : ""}Attached files (read them with read_file):\n${listing}`;
+    } catch (error) {
+      toast(`Could not upload: ${error.message}`, "error");
+      return;
+    }
+  }
+
+  connection.sendCommand("text", { text: message });
   el.composer.value = "";
   el.composer.style.height = "auto";
+  clearAttachments();
   setAgentState("thinking");
 }
 
@@ -911,6 +1043,11 @@ function answerApproval(allowed, remember) {
     allowed,
     remember,
   });
+  if (remember && allowed) {
+    toast(`Allowed. ${pending.name} will not ask again in this project.`, "ok");
+  } else if (!allowed) {
+    toast("Rejected. The agent will be told and can try something else.", "ok");
+  }
   setAgentState("thinking");
 }
 
@@ -920,11 +1057,67 @@ el.sendButton.addEventListener("click", () => sendMessage());
 
 el.micButton.addEventListener("click", toggleMic);
 
-document.getElementById("approvalAllow").addEventListener("click", (event) => {
-  // Shift-click means "and don't ask again for this tool".
-  answerApproval(true, event.shiftKey);
+el.attachButton.addEventListener("click", () => el.fileInput.click());
+el.fileInput.addEventListener("change", () => {
+  addFiles(el.fileInput.files);
+  el.fileInput.value = "";
 });
+
+// Drag and drop over the whole window, with a counter because dragleave fires
+// when moving between child elements and would otherwise flicker the overlay.
+let dragDepth = 0;
+window.addEventListener("dragenter", (event) => {
+  if (!event.dataTransfer || !Array.from(event.dataTransfer.types).includes("Files")) return;
+  event.preventDefault();
+  dragDepth += 1;
+  el.dropzone.hidden = false;
+});
+window.addEventListener("dragover", (event) => {
+  if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+  event.preventDefault();
+});
+window.addEventListener("dragleave", () => {
+  dragDepth = Math.max(0, dragDepth - 1);
+  if (dragDepth === 0) el.dropzone.hidden = true;
+});
+window.addEventListener("drop", (event) => {
+  if (!event.dataTransfer) return;
+  event.preventDefault();
+  dragDepth = 0;
+  el.dropzone.hidden = true;
+  addFiles(event.dataTransfer.files);
+});
+
+// Pasting a screenshot is the fastest way to share one, and a very common
+// expectation for an agent UI.
+el.composer.addEventListener("paste", (event) => {
+  const items = Array.from((event.clipboardData && event.clipboardData.files) || []);
+  if (items.length === 0) return;
+  event.preventDefault();
+  addFiles(items);
+});
+
+// Three explicit actions. Remembering a decision was previously a shift-click,
+// which nothing advertised and no one would discover.
+document.getElementById("approvalAllow").addEventListener("click", () => answerApproval(true, false));
+document
+  .getElementById("approvalAlways")
+  .addEventListener("click", () => answerApproval(true, true));
 document.getElementById("approvalDeny").addEventListener("click", () => answerApproval(false, false));
+
+// Keyboard: Enter allows once, Escape rejects. The buttons hold focus after
+// answerApproval, so a follow-up tool prompt can be answered without reaching for
+// the mouse.
+document.addEventListener("keydown", (event) => {
+  if (!state.pendingApproval) return;
+  if (event.key === "Enter" && !event.shiftKey) {
+    event.preventDefault();
+    answerApproval(true, false);
+  } else if (event.key === "Escape") {
+    event.preventDefault();
+    answerApproval(false, false);
+  }
+});
 
 el.composer.addEventListener("keydown", (event) => {
   if (event.key === "Enter" && !event.shiftKey) {

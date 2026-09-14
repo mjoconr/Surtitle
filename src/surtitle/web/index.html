@@ -76,10 +76,18 @@
           <span id="approvalText">Waiting for your approval</span>
         </div>
 
+        <div class="attachments" id="attachments" hidden></div>
+
         <textarea class="composer__input" id="composer" rows="1"
-                  placeholder="Speak, or type here…"></textarea>
+                  placeholder="Speak, type, or drop a file here…"></textarea>
 
         <div class="composer__row">
+          <button class="button button--icon button--ghost" id="attachButton" type="button"
+                  title="Attach files (images, PDFs, spreadsheets, code)"
+                  aria-label="Attach files">+</button>
+          <input type="file" id="fileInput" multiple hidden
+                 accept="image/*,.pdf,.csv,.txt,.md,.json,.xlsx,.docx,.pptx,.py,.zip" />
+
           <button class="mic" id="micButton" type="button" data-active="false"
                   aria-pressed="false" title="Toggle microphone — right-click to choose the input device">
             <span aria-hidden="true">●</span>
@@ -91,8 +99,12 @@
             <span class="badge" id="modelBadge">—</span>
             <!-- Approval actions replace send while a tool is waiting. -->
             <span id="approvalActions" hidden>
-              <button class="button button--ghost" id="approvalDeny" type="button">Reject</button>
-              <button class="button button--primary" id="approvalAllow" type="button">Allow once</button>
+              <button class="button button--ghost" id="approvalDeny" type="button"
+                      title="Do not run this">Reject</button>
+              <button class="button button--ghost" id="approvalAlways" type="button"
+                      title="Run this and stop asking about this tool in this project">Always allow</button>
+              <button class="button button--primary" id="approvalAllow" type="button"
+                      title="Run this one time only">Allow once</button>
             </span>
             <button class="send" id="sendButton" type="button" title="Send (Enter)" aria-label="Send">➤</button>
           </div>
@@ -163,6 +175,14 @@
         <button class="button button--primary" id="projectCreate" type="button">Create</button>
       </div>
     </div>
+  </div>
+</div>
+
+<!-- Shown while a file is dragged over the window, so the drop target is obvious. -->
+<div class="dropzone" id="dropzone" hidden>
+  <div class="dropzone__inner">
+    <div class="dropzone__title">Drop files to attach them</div>
+    <div class="dropzone__hint">Images, PDFs, spreadsheets and documents are saved into the project.</div>
   </div>
 </div>
 

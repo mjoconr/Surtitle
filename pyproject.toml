@@ -20,6 +20,8 @@ classifiers = [
 dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
+    # Required by FastAPI to parse multipart form/file uploads (attachments).
+    "python-multipart>=0.0.9",
     "httpx>=0.27",
     "websockets>=12.0",
     "pydantic>=2.8",

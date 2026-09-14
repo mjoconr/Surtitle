@@ -21,11 +21,23 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import os
+import re
 from pathlib import Path
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, Body, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import (
+    APIRouter,
+    Body,
+    FastAPI,
+    File,
+    Form,
+    HTTPException,
+    UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
@@ -52,6 +64,60 @@ WEB_DIR = Path(__file__).parent / "web"
 
 _OP_AUDIO_IN = 0x01
 _OP_JSON = 0x02
+
+
+# Upload limits. Generous enough for real documents, bounded so a mis-drag cannot
+# fill the disk or wedge the turn.
+MAX_UPLOAD_BYTES = 32 * 1024 * 1024
+MAX_UPLOADS_PER_REQUEST = 12
+
+
+# Attachments live in a visible folder at the project root, not inside
+# `.surtitle/`. That directory is deliberately excluded from listings and
+# content searches so tooling does not pollute them, which would have made
+# uploaded documents both invisible to the user and undiscoverable by the agent's
+# own `search_files`.
+UPLOADS_DIR_NAME = "uploads"
+
+
+def uploads_dir(root: Path) -> Path:
+    """Where user attachments are stored for a project."""
+    return root / UPLOADS_DIR_NAME
+
+
+def _safe_filename(name: str) -> str:
+    """Reduce an uploaded name to something safe to store inside the project.
+
+    A filename arrives from the client and is written to disk, so it is treated as
+    hostile: directory components are stripped, traversal sequences removed, and
+    only a conservative character set survives. ``resolve_in_root`` would also
+    catch an escape, but a name should never reach that test in the first place.
+    """
+    base = Path(name or "upload").name  # discard any directory part
+    base = base.replace("\\", "/").split("/")[-1]
+    cleaned = re.sub(r"[^A-Za-z0-9._ \[\]-]", "_", base).strip(" .")
+    # Guard against names that are only dots, or reserved on Windows.
+    if not cleaned or set(cleaned) <= {"."}:
+        cleaned = "upload"
+    stem, suffix = os.path.splitext(cleaned)
+    if stem.upper() in {"CON", "PRN", "AUX", "NUL"} or re.fullmatch(
+        r"COM[1-9]|LPT[1-9]", stem.upper()
+    ):
+        stem = f"_{stem}"
+    return f"{stem[:120]}{suffix[:20]}"
+
+
+def _unique_path(directory: Path, filename: str) -> Path:
+    """Avoid overwriting: add a numeric suffix rather than replacing silently."""
+    candidate = directory / filename
+    if not candidate.exists():
+        return candidate
+    stem, suffix = os.path.splitext(filename)
+    for index in range(1, 1000):
+        candidate = directory / f"{stem}-{index}{suffix}"
+        if not candidate.exists():
+            return candidate
+    raise OSError("too many files with that name")
 
 
 class AppState:
@@ -292,6 +358,125 @@ def build_api(state: AppState) -> APIRouter:
             return _error(400, "tools must be a list of tool names.", field="tools")
         state.store.set_auto_approved(project_id, tools)
         return {"tools": sorted(set(tools))}
+
+    # --- uploads ---------------------------------------------------------
+    @api.post("/projects/{project_id}/uploads")
+    async def upload_files(
+        project_id: str,
+        files: list[UploadFile] = File(...),
+        session_id: str | None = Form(None),
+    ) -> Any:
+        """Accept files the user attached, storing them inside the project.
+
+        Stored rather than kept in memory because the agent's tools need a real
+        path: `read_file` takes a project-relative path, so giving the model one
+        means an attached PDF is read with the same code path as any other file.
+
+        They are stored in `uploads/` at the project root so the user can see them
+        in their own file manager, and so `list_dir` and `search_files` find them
+        alongside the rest of the project.
+        """
+        project = _project_or_404(state, project_id)
+        root = Path(project.root)
+        if not root.is_dir():
+            return _error(410, "The project folder no longer exists.", field="root")
+        if not files:
+            return _error(400, "No files were uploaded.")
+        if len(files) > MAX_UPLOADS_PER_REQUEST:
+            return _error(
+                400,
+                f"Too many files at once ({len(files)}); the limit is {MAX_UPLOADS_PER_REQUEST}.",
+                field="files",
+            )
+
+        upload_dir = uploads_dir(root)
+        try:
+            upload_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            return _error(500, f"Could not create the upload directory: {exc}")
+
+        saved: list[dict[str, Any]] = []
+        for upload in files:
+            try:
+                target = _unique_path(upload_dir, _safe_filename(upload.filename or "upload"))
+            except OSError as exc:
+                return _error(409, str(exc), field="files")
+
+            total = 0
+            try:
+                with target.open("wb") as handle:
+                    while chunk := await upload.read(1024 * 1024):
+                        total += len(chunk)
+                        if total > MAX_UPLOAD_BYTES:
+                            handle.close()
+                            target.unlink(missing_ok=True)
+                            return _error(
+                                413,
+                                f"{upload.filename} is larger than "
+                                f"{MAX_UPLOAD_BYTES // (1024 * 1024)} MB.",
+                                field="files",
+                            )
+                        handle.write(chunk)
+            except OSError as exc:
+                return _error(500, f"Could not save {upload.filename}: {exc}")
+            finally:
+                with contextlib.suppress(Exception):
+                    await upload.close()
+
+            saved.append(
+                {
+                    "name": upload.filename or target.name,
+                    "path": target.relative_to(root.resolve()).as_posix(),
+                    "bytes": total,
+                }
+            )
+
+        if session_id:
+            summary = ", ".join(f"{item['path']} ({item['bytes']} bytes)" for item in saved)
+            state.store.add_message(
+                session_id,
+                "system",
+                f"The user attached {len(saved)} file(s): {summary}",
+            )
+        return {"files": saved}
+
+    @api.get("/projects/{project_id}/uploads")
+    async def list_uploads(project_id: str) -> dict[str, Any]:
+        """List previously uploaded files."""
+        project = _project_or_404(state, project_id)
+        root = Path(project.root).resolve()
+        upload_dir = uploads_dir(root)
+        if not upload_dir.is_dir():
+            return {"files": []}
+        entries = []
+        for path in sorted(upload_dir.iterdir()):
+            if not path.is_file():
+                continue
+            entries.append(
+                {
+                    "name": path.name,
+                    "path": path.relative_to(root).as_posix(),
+                    "bytes": path.stat().st_size,
+                }
+            )
+        return {"files": entries}
+
+    @api.delete("/projects/{project_id}/uploads/{name}")
+    async def delete_upload(project_id: str, name: str) -> Any:
+        project = _project_or_404(state, project_id)
+        root = Path(project.root).resolve()
+        # Strip any directory component before joining: `name` arrives from the
+        # URL, so "../.." must not be able to reach outside the uploads folder.
+        safe = Path(name).name
+        try:
+            target = resolve_in_root(root, f"{UPLOADS_DIR_NAME}/{safe}")
+        except PathEscapeError as exc:
+            return _error(403, str(exc))
+        if not target.absolute.is_file():
+            return _error(404, "No such upload.")
+        with contextlib.suppress(OSError):
+            target.absolute.unlink()
+        return {"deleted": target.relative}
 
     # --- project files ---------------------------------------------------
     @api.get("/projects/{project_id}/files")

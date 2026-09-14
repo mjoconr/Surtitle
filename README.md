@@ -90,6 +90,7 @@ configuration.
 | `convert_document` | Convert Word/Excel/PowerPoint/OpenDocument via local LibreOffice. |
 | `environment_info` | Report which Python environment code runs in. |
 | `search_packages`, `install_packages` | **Acquire new capability on demand** (below). |
+| Attachments | Drag, paste or pick files; they are saved into the project and read like any other file. |
 | `<server>__<tool>` | Any tool from a configured **MCP server**. |
 
 Everything that can change something on disk asks first. Read-only tools never
@@ -118,6 +119,23 @@ Agent: <say>I need pandas for this. Installing it now.</say>
 
 Installing a package runs third-party code, which is exactly why it is gated and
 why the environment is isolated.
+
+### Attachments
+
+Drag files onto the window, paste a screenshot, or use the **+** button. Files are
+saved into a visible **`uploads/`** folder inside the project and referenced in the
+message by path, so the agent reads them with the same `read_file` it uses for
+anything else — an attached PDF goes through the same extraction path as one you
+put there yourself.
+
+They go in `uploads/` rather than hidden tooling state deliberately: that keeps
+them visible in your file manager *and* discoverable by the agent's own
+`list_dir` and `search_files`.
+
+Filenames are treated as hostile — directory components stripped, characters
+restricted, Windows-reserved names escaped — so an uploaded name can never become
+a path. Requests are capped at 32 MB per file and 12 files at a time, and a
+rejected upload leaves nothing behind.
 
 ### Documents and CAD
 
@@ -284,7 +302,8 @@ What the design does and does not protect against:
   included in an error message — only `configured: true/false` crosses the wire. The
   credentials file is owner-only and refused if it is world-readable.
 - ✅ **Mutating actions require approval**, and the prompt names the specific action:
-  the actual command, the actual packages.
+  the actual command, the actual packages. *Allow once* and *Always allow* are
+  separate buttons, and remembering a decision is per project.
 - ✅ **Installs are isolated** in a per-project environment and strictly validated.
 - ⚠️ Approved tools run as **your user, with your permissions**. Approving
   `run_shell` means exactly that; review what you approve. The guard confines *this

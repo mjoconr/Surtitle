@@ -161,10 +161,14 @@ class Session:
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await self._drainer
             self._drainer = None
+        # Bounded teardown: a stalled socket must not hold the disconnect path
+        # open, and an un-awaited task is what produces "Task was destroyed but it
+        # is pending" on shutdown.
         for client in (self.stt, self.tts):
-            if client is not None:
-                with contextlib.suppress(Exception):
-                    await client.stop()
+            if client is None:
+                continue
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(client.stop(), timeout=5.0)
         self.stt = None
         self.tts = None
 

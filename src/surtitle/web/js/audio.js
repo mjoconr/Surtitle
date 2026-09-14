@@ -137,11 +137,19 @@ export class Capture {
       this.backend = "worklet";
       // If the worklet never delivers, switch to the fallback rather than staying
       // silent. This also covers a context that suspends immediately after start.
-      this._upgradeTimer = setTimeout(() => {
-        if (this.active && this.backend === "worklet" && this.framesReceived === 0) {
-          console.warn("[surtitle] worklet produced no frames; using ScriptProcessor");
-          this._attachScriptProcessor();
-        }
+      this._upgradeTimer = setTimeout(async () => {
+        if (!this.active || this.backend !== "worklet" || this.framesReceived > 0) return;
+        // Re-check the context first: a suspended context explains zero frames and
+        // is cheap to fix, whereas the fallback cannot run on a suspended context
+        // either.
+        const stillRunning = await this._ensureRunning();
+        if (!this.active) return;
+        if (this.framesReceived > 0) return;
+        console.warn(
+          `[surtitle] worklet produced no frames (context=${this.context.state}, ` +
+            `resumed=${stillRunning}); switching to ScriptProcessor`,
+        );
+        this._attachScriptProcessor();
       }, 900);
     } else {
       this._attachScriptProcessor();
@@ -335,6 +343,16 @@ export class Capture {
     this.active = false;
     clearTimeout(this._upgradeTimer);
     this._upgradeTimer = null;
+    // Reset per-session state. Leaving these set meant a restart inherited the
+    // previous session's backend and frame counts, so the fallback watchdog could
+    // not tell "no frames yet" from "frames from last time" — which breaks the
+    // second attempt after toggling the microphone.
+    this.backend = "none";
+    this.framesReceived = 0;
+    this.maxLevel = 0;
+    this._speechFrames = 0;
+    this._speaking = false;
+    this._graceUntil = 0;
     if (this.node) {
       if (this.node.port) this.node.port.onmessage = null;
       if (this.node.onaudioprocess !== undefined) this.node.onaudioprocess = null;
