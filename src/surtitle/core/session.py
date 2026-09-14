@@ -78,6 +78,10 @@ class Session:
     _closed: bool = False
     _state: _SessionState = field(default_factory=_SessionState)
     _audio_seconds: float = 0.0
+    # Diagnostics: how much audio this listening session actually delivered, and
+    # how many times the microphone has been opened.
+    _frames_in: int = 0
+    _mic_opens: int = 0
     registry: Any = None
     mcp_manager: Any = None
     project_config: Any = None
@@ -115,6 +119,13 @@ class Session:
         if self.project_config.trusted_tools:
             self.approvals.trust(self.project_config.trusted_tools)
 
+        log.info(
+            "session ready: id=%s project=%s root=%s voice=%s",
+            self.session_id,
+            self.project_id,
+            self.root,
+            self.settings.voice_enabled and self.tts is not None,
+        )
         await self.emit(
             EventKind.READY,
             session_id=self.session_id,
@@ -207,15 +218,49 @@ class Session:
     # --- inbound: text and audio ----------------------------------------
     async def handle_audio(self, frame: bytes) -> None:
         """Accept a PCM16 frame from the browser microphone."""
-        if self.stt is None or not frame:
+        if not frame:
             return
-        # The browser signals barge-in by sending a zero-length frame.
+        self._frames_in += 1
         self._audio_seconds += len(frame) / 2 / self.settings.stt_sample_rate
+        if self.stt is None:
+            # Reported once per session: audio arriving with no recogniser means
+            # voice is disabled or the key is missing, not that capture failed.
+            if self._frames_in == 1:
+                log.warning(
+                    "audio arriving but speech recognition is not running "
+                    "(voice_enabled=%s, key=%s)",
+                    self.settings.voice_enabled,
+                    bool(self.settings.deepgram_key()),
+                )
+            return
         self.stt.push_audio(frame)
 
     async def handle_mic(self, open_: bool) -> None:
         """Open or close the microphone stream."""
         self._state.mic_open = open_
+        if open_:
+            # Reset the accounting per listening session, so a report after a
+            # toggle describes that attempt rather than the session total.
+            self._frames_in = 0
+            self._audio_seconds = 0.0
+            self._mic_opens += 1
+            log.info(
+                "microphone opened (#%d); awaiting audio%s",
+                self._mic_opens,
+                "" if self.stt is not None else " -- but speech recognition is not running",
+            )
+        else:
+            log.info(
+                "microphone closed (#%d); received %d frame(s), %.2fs of audio",
+                self._mic_opens,
+                self._frames_in,
+                self._audio_seconds,
+            )
+            if self._frames_in == 0:
+                log.warning(
+                    "no audio arrived for this listening session -- the problem is in "
+                    "the browser's capture, not recognition"
+                )
         if self.stt is None:
             return
         self.stt.set_suppression(open_ and self._is_speaking())
@@ -269,6 +314,12 @@ class Session:
                 self._turn.cancel()
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await self._turn
+            log.info(
+                "utterance from audio (%d frame(s), %.2fs): %r",
+                self._frames_in,
+                self._audio_seconds,
+                utterance[:120],
+            )
             await self.emit(EventKind.USER_TEXT, text=utterance, source="voice")
             self._turn = asyncio.create_task(self._run_turn(utterance), name="agent-turn")
 
@@ -338,7 +389,10 @@ class Session:
             log.exception("turn failed")
             await self.emit(EventKind.ERROR, message=f"{type(exc).__name__}: {exc}")
         finally:
-            self._audio_seconds = 0.0
+            # Counters are intentionally left in place: they describe the listening
+            # session, and clearing them here is what made a failed second attempt
+            # look identical to a failed first one.
+            pass
 
     async def _emit_or_queue(self, event: Event) -> None:
         """Send a control-flow event, mirroring only what the UI needs."""
