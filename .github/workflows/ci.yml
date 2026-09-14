@@ -1,0 +1,118 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Keep uv's cache inside the workspace so the job works in restricted runners.
+  UV_CACHE_DIR: ${{ github.workspace }}/.uv-cache
+  # The test suite is offline by design; nothing here needs a real API key.
+  SURTITLE_HOME: ${{ github.workspace }}/.ci-home
+
+jobs:
+  lint:
+    name: Lint and format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Check formatting
+        run: uv run --frozen ruff format --check src tests scripts
+      - name: Lint
+        run: uv run --frozen ruff check src tests scripts
+
+  test:
+    name: Test (${{ matrix.os }} · Python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Install dependencies
+        run: uv sync --frozen --python ${{ matrix.python }}
+      - name: Run the test suite
+        run: uv run --frozen --python ${{ matrix.python }} pytest -q --durations=10
+      - name: Doctor must run without credentials
+        # Exercises the real command path: it should exit non-zero when keys are
+        # absent, but must not crash or hang.
+        shell: bash
+        run: |
+          set +e
+          uv run --frozen surtitle doctor --offline
+          code=$?
+          set -e
+          if [ "$code" -eq 0 ]; then
+            echo "doctor unexpectedly passed with no credentials configured"
+            exit 1
+          fi
+          echo "doctor exited $code as expected (missing credentials)"
+
+  package:
+    name: Build release archive
+    runs-on: ${{ matrix.os }}
+    needs: [lint]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: windows
+          - os: macos-latest
+            artifact: macos
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Build the archive
+        run: uv run --frozen python scripts/build_release.py
+      - name: Verify the archive contains a runnable runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          ls -la dist/
+          # The whole point of the archive is that it needs no installed Python,
+          # so assert the bundled pieces are actually present.
+          python - <<'PY'
+          import pathlib, sys, tarfile, zipfile
+
+          dist = pathlib.Path("dist")
+          archives = list(dist.glob("*.zip")) + list(dist.glob("*.tar.gz"))
+          assert archives, "no archive was produced"
+          found = []
+          for archive in archives:
+              if archive.suffix == ".zip":
+                  with zipfile.ZipFile(archive) as bundle:
+                      found.extend(bundle.namelist())
+              else:
+                  with tarfile.open(archive) as bundle:
+                      found.extend(bundle.getnames())
+          needed = ["venv", "BUILD-INFO.json", "VERSION", "run.bat", "run.sh", "run.ps1"]
+          missing = [n for n in needed if not any(n in entry for entry in found)]
+          assert not missing, f"archive is missing: {missing}"
+          print(f"archive looks complete: {len(found)} entries")
+          PY
+      - name: Upload the archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: surtitle-${{ matrix.artifact }}
+          path: |
+            dist/*.zip
+            dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 14
