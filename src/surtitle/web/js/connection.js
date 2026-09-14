@@ -48,7 +48,19 @@ export class Connection {
     socket.binaryType = "arraybuffer";
     this.socket = socket;
 
+    // Ignore anything from a socket we have already superseded. `close()` then
+    // `connect()` is the normal path when switching conversation, and the old
+    // socket's `onclose` is delivered asynchronously — after the new socket has
+    // already been installed. Without this guard the stale handler runs against
+    // the *new* connection: it marks it closed and schedules a reconnect, which
+    // opened a second socket, whose own stale handler did the same again. The
+    // result was a connect/disconnect loop roughly every second, a brand-new
+    // server-side session (and a second TTS pipeline) each time, and replies that
+    // started, cut out, or played over each other.
+    const isCurrent = () => this.socket === socket;
+
     socket.onopen = () => {
+      if (!isCurrent()) return;
       this._retries = 0;
       this._setState(ConnectionState.OPEN);
       // The server accepts immediately and expects hello as the first message.
@@ -58,15 +70,18 @@ export class Connection {
       }
     };
 
-    socket.onmessage = (event) => this._onMessage(event);
+    socket.onmessage = (event) => {
+      if (isCurrent()) this._onMessage(event);
+    };
 
     socket.onclose = () => {
+      if (!isCurrent()) return;
       this._setState(ConnectionState.CLOSED);
       if (!this._closedByUs) this._scheduleReconnect();
     };
 
     socket.onerror = () => {
-      if (this.onError) this.onError("Connection error");
+      if (isCurrent() && this.onError) this.onError("Connection error");
     };
   }
 
@@ -151,13 +166,20 @@ export class Connection {
   close() {
     this._closedByUs = true;
     clearTimeout(this._reconnectTimer);
-    if (this.socket) {
+    const socket = this.socket;
+    this.socket = null;
+    if (socket) {
+      // Detach before closing so the close event cannot reach a handler that is
+      // about to be pointed at a different connection.
+      socket.onopen = null;
+      socket.onmessage = null;
+      socket.onclose = null;
+      socket.onerror = null;
       try {
-        this.socket.close();
+        socket.close();
       } catch {
         /* already closed */
       }
-      this.socket = null;
     }
     this._setState(ConnectionState.CLOSED);
   }

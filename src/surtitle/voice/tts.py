@@ -78,12 +78,14 @@ class TextToSpeech:
         on_started: Callable[[], Awaitable[None]] | None = None,
         on_finished: Callable[[], Awaitable[None]] | None = None,
         on_error: Callable[[str], Awaitable[None]] | None = None,
+        on_speed_fallback: Callable[[float], Awaitable[None]] | None = None,
     ) -> None:
         self.settings = settings
         self._on_audio = on_audio
         self._on_started = on_started
         self._on_finished = on_finished
         self._on_error = on_error
+        self._on_speed_fallback = on_speed_fallback
         self._api_key = settings.deepgram_key() or ""
 
         self._queue: asyncio.Queue[Utterance | None] = asyncio.Queue()
@@ -287,9 +289,12 @@ class TextToSpeech:
             except Exception:
                 if self._speed_supported and self.settings.tts_speed != 1.0:
                     # Most likely the chosen voice rejects `speed`. Drop it and
-                    # fall back to browser-side playback rate.
+                    # fall back to playback rate in the browser, so the user still
+                    # hears the pace they asked for.
                     log.warning("TTS rejected request; retrying without the speed parameter")
                     self._speed_supported = False
+                    if self._on_speed_fallback is not None:
+                        await self._on_speed_fallback(self.settings.tts_speed)
                     self._socket = await self._open_socket()
                 else:
                     raise

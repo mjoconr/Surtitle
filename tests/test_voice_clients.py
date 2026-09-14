@@ -35,6 +35,14 @@ def params_for(settings: Settings) -> dict[str, list[str]]:
     return parse_qs(urlparse(service.url).query)
 
 
+def drain_outbox(session) -> list[dict]:
+    """Events queued for delivery, without needing the drainer task to run."""
+    events: list[dict] = []
+    while not session._outbox.empty():
+        events.append(session._outbox.get_nowait().to_dict())
+    return events
+
+
 class TestFluxQueryParameters:
     """These must match ``/v2/listen`` exactly. Extra parameters are fatal."""
 
@@ -244,6 +252,128 @@ class TestSharedUrlBuilders:
             urlparse(speak_url(make_settings(tts_speed=1.25), speed_supported=False)).query
         )
         assert "speed" not in params
+
+
+class TestSpeedFallbackIsAnnounced:
+    """Dropping `speed` must not silently change the pace the user asked for.
+
+    The code always claimed to "fall back to browser-side playback rate", but
+    nothing told the browser, so the chosen speed was simply lost and the voice
+    came out at its natural pace — which reads as the voice changing.
+    """
+
+    async def test_a_rejected_speed_is_reported_to_the_caller(self):
+        from surtitle.voice.tts import TextToSpeech
+
+        announced: list[float] = []
+
+        async def on_fallback(speed: float) -> None:
+            announced.append(speed)
+
+        tts = TextToSpeech(
+            make_settings(tts_speed=1.25),
+            on_audio=lambda a, n: None,
+            on_speed_fallback=on_fallback,
+        )
+
+        attempts: list[str] = []
+
+        async def flaky_open():
+            attempts.append(tts.url)
+            if len(attempts) == 1:
+                raise RuntimeError("rejected")
+            return object()
+
+        tts._open_socket = flaky_open  # type: ignore[method-assign]
+
+        await tts._ensure_socket()
+
+        assert announced == [1.25], "the browser must be told to apply the speed"
+        assert len(attempts) == 2, "it should retry exactly once without speed"
+        assert "speed" in attempts[0]
+        assert "speed" not in attempts[1]
+
+    async def test_no_speed_is_announced_at_natural_pace(self):
+        from surtitle.voice.tts import TextToSpeech
+
+        announced: list[float] = []
+
+        async def on_fallback(speed: float) -> None:
+            announced.append(speed)
+
+        tts = TextToSpeech(
+            make_settings(tts_speed=1.0),
+            on_audio=lambda a, n: None,
+            on_speed_fallback=on_fallback,
+        )
+
+        async def failing_open():
+            raise RuntimeError("unavailable")
+
+        tts._open_socket = failing_open  # type: ignore[method-assign]
+
+        with pytest.raises(RuntimeError):
+            await tts._ensure_socket()
+
+        assert announced == []
+
+    def test_the_url_reflects_whether_speed_is_supported(self):
+        from surtitle.voice.tts import TextToSpeech
+
+        tts = TextToSpeech(make_settings(tts_speed=1.5), on_audio=lambda a, n: None)
+        assert "speed" in tts.url
+        tts._speed_supported = False
+        assert "speed" not in tts.url
+
+
+class TestSpeedFallbackReachesTheClient:
+    """The session turns the TTS fallback into an event the browser understands."""
+
+    @pytest.fixture
+    def live_session(self, tmp_path):
+        from surtitle.core.session import Session
+        from surtitle.store.db import Store
+
+        store = Store(tmp_path / "db.sqlite")
+        project = store.create_project("P", tmp_path)
+        record = store.create_session(project.id)
+
+        async def send(payload):
+            return None
+
+        async def send_audio(_data):
+            return None
+
+        session = Session(
+            session_id=record.id,
+            project_id=project.id,
+            root=tmp_path,
+            settings=make_settings(SURTITLE_HOME=str(tmp_path), voice_enabled=True),
+            store=store,
+            deepseek=None,
+            send=send,
+            send_audio=send_audio,
+        )
+        return session
+
+    async def test_it_emits_the_speed_for_playback(self, live_session):
+        from surtitle.core.events import EventKind
+
+        session = live_session
+        await session._on_speed_fallback(1.25)
+
+        state_events = [e for e in drain_outbox(session) if e.get("kind") == EventKind.STATE.value]
+        assert state_events, "the client needs a state event to act on"
+        data = state_events[-1]["data"]
+        assert data["speech_speed"] == 1.25
+        # Tagged so the UI can tell it apart from an ordinary state change.
+        assert data["kind_detail"] == "speed_fallback"
+
+    async def test_it_logs_the_fallback(self, live_session, caplog):
+        session = live_session
+        with caplog.at_level("INFO"):
+            await session._on_speed_fallback(0.75)
+        assert "0.75" in caplog.text
 
 
 class TestSendLoopControlMessages:

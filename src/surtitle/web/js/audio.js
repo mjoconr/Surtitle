@@ -446,7 +446,10 @@ export class Playback {
     // Preferred output device. Only honoured where setSinkId() exists.
     this.sinkId = sinkId || "";
     this.element = element;
-    this.sampleRate = sampleRate;
+    // The rate the server synthesises at, and therefore the rate the incoming
+    // PCM always is. Buffers are declared at this rate so the AudioContext
+    // resamples them; it is never overwritten by the context's own rate.
+    this.serverRate = sampleRate;
     this.sink = null;
     this.context = null;
     this.gain = null;
@@ -456,8 +459,51 @@ export class Playback {
     // Set by unlock(); false means playback will be silent until a gesture.
     this.unlocked = false;
     this._blockedReported = false;
+    // Applied client-side only when requested; the server normally sends the
+    // speed to Deepgram instead, which preserves pitch.
+    this.playbackRate = 1;
     // Small cushion so consecutive sentences join without a click.
     this.leadTime = 0.06;
+  }
+
+  /**
+   * Adopt the sample rate the server is synthesising at.
+   *
+   * Refused once a context exists: the graph is already decoding at the rate it
+   * negotiated, and rebuilding it mid-conversation would drop audio. Returning
+   * false lets the caller report the mismatch instead of hiding it.
+   */
+  setServerRate(rate) {
+    const next = Number(rate);
+    if (!Number.isFinite(next) || next <= 0) return true;
+    if (this.context) return next === this.serverRate;
+    this.serverRate = next;
+    return true;
+  }
+
+  /** Play faster or slower without re-synthesising. Changes pitch. */
+  setPlaybackRate(rate) {
+    const next = Number(rate);
+    if (!Number.isFinite(next) || next <= 0) return;
+    this.playbackRate = Math.max(0.5, Math.min(2, next));
+  }
+
+  /**
+   * Re-start the sink element if the browser paused it behind our back.
+   *
+   * The element is the only route to a chosen output device, so a paused element
+   * means total silence with no error anywhere. Audio devices changing under the
+   * page (headphones, a docking station, a sleeping output) is enough to do it,
+   * which is why the same speech can play one turn and not the next.
+   */
+  _ensureElementPlaying() {
+    const element = this.element;
+    if (!element || !this.sink) return;
+    if (element.paused) {
+      element.play().catch(() => {
+        /* needs a gesture; unlock() is the recovery path */
+      });
+    }
   }
 
   /**
@@ -477,11 +523,14 @@ export class Playback {
       }
       // A near-silent buffer proves the graph really reaches the output device;
       // some audio stacks need something to have been played before they open.
+      // It goes through `gain`, not straight to the context destination, because
+      // on the element route the context destination is not what the user hears.
       const primer = context.createBuffer(1, 1, context.sampleRate);
       const source = context.createBufferSource();
       source.buffer = primer;
-      source.connect(context.destination);
+      source.connect(this.gain || context.destination);
       source.start();
+      this._ensureElementPlaying();
       this.unlocked = context.state === "running";
       return this.unlocked;
     } catch {
@@ -495,13 +544,57 @@ export class Playback {
     return Boolean(this.context && this.context.state === "running");
   }
 
+  /**
+   * What the output path actually negotiated.
+   *
+   * Everything here can silently break playback on its own: a suspended context,
+   * a paused sink element, a sample rate that does not match the synthesis, or an
+   * output device that is no longer connected. Reported per turn so an
+   * intermittent fault leaves a trail instead of a mystery.
+   */
+  get status() {
+    const element = this.element;
+    return {
+      context: this.context ? this.context.state : "none",
+      route: this.sink ? "element" : this.context ? "destination" : "none",
+      requestedRate: this.serverRate,
+      negotiatedRate: this.context ? this.context.sampleRate : null,
+      rateMatches: !this.context || this.context.sampleRate === this.serverRate,
+      elementPresent: Boolean(element),
+      elementPaused: element ? element.paused : null,
+      elementMuted: element ? element.muted : null,
+      elementReadyState: element ? element.readyState : null,
+      sinkId: element ? element.sinkId || "default" : "",
+      playbackRate: this.playbackRate,
+      scheduled: this.sources.size,
+      unlocked: this.unlocked,
+    };
+  }
+
+  /** One line summary of `status`, for the activity panel. */
+  get statusLine() {
+    const s = this.status;
+    const rate = s.rateMatches
+      ? `${s.negotiatedRate} Hz`
+      : `${s.negotiatedRate} Hz but synthesised at ${s.requestedRate} Hz`;
+    const element = s.elementPresent
+      ? `element=${s.elementPaused ? "PAUSED" : "playing"}${
+          s.elementMuted ? " MUTED" : ""
+        } sink=${s.sinkId}`
+      : "no element";
+    return `context=${s.context} route=${s.route} ${rate} ${element}`;
+  }
+
   _ensureContext() {
     if (!this.context) {
-      // The browser may ignore the requested rate; read back what it gave us and
-      // decode at that rate, or every sample would be resampled and the voice
-      // would play at the wrong pitch and speed.
-      this.context = new AudioContext({ sampleRate: this.sampleRate });
-      this.sampleRate = this.context.sampleRate;
+      // Ask for the synthesis rate, but do NOT adopt whatever the context ends up
+      // running at. An AudioBufferSourceNode resamples its buffer into the
+      // context's rate, so the buffer must keep declaring the rate the PCM really
+      // is (`serverRate`). Overwriting it with the context rate made a 24 kHz
+      // stream play an octave high and twice as fast whenever the browser or the
+      // output device refused 24 kHz — which is why the same voice could sound
+      // normal one turn and wrong the next, depending on the active device.
+      this.context = new AudioContext({ sampleRate: this.serverRate });
       this.gain = this.context.createGain();
 
       // Route through an <audio> element when one is available, because that is
@@ -541,6 +634,9 @@ export class Playback {
     if (!pcmBytes || pcmBytes.length < 2) return;
 
     const context = this._ensureContext();
+    // The sink element can be paused underneath us by an audio-route change.
+    // Nothing errors when that happens; there is just silence.
+    this._ensureElementPlaying();
     if (context.state !== "running") {
       // Surface it once per turn rather than per chunk.
       if (!this._blockedReported && this.onBlocked) {
@@ -552,7 +648,8 @@ export class Playback {
     const sampleCount = Math.floor(pcmBytes.length / 2);
     const view = new DataView(pcmBytes.buffer, pcmBytes.byteOffset, pcmBytes.byteLength);
 
-    const buffer = context.createBuffer(1, sampleCount, this.sampleRate);
+    // Declared at the synthesis rate; the context resamples it on playback.
+    const buffer = context.createBuffer(1, sampleCount, this.serverRate);
     const channel = buffer.getChannelData(0);
     for (let i = 0; i < sampleCount; i += 1) {
       channel[i] = view.getInt16(i * 2, true) / 32768;
@@ -560,13 +657,14 @@ export class Playback {
 
     const source = context.createBufferSource();
     source.buffer = buffer;
+    source.playbackRate.value = this.playbackRate;
     source.connect(this.gain);
 
     const now = context.currentTime;
     // If the queue has drained, start just ahead of now; otherwise append.
     const startAt = Math.max(now + this.leadTime, this.nextTime);
     source.start(startAt);
-    this.nextTime = startAt + buffer.duration;
+    this.nextTime = startAt + buffer.duration / this.playbackRate;
 
     if (!this.playing) {
       this.playing = true;

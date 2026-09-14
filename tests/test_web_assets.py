@@ -18,7 +18,22 @@ from pathlib import Path
 
 import pytest
 
+from surtitle.config import Settings
+from surtitle.server import create_app_for
+
 WEB = Path(__file__).resolve().parent.parent / "src" / "surtitle" / "web"
+
+
+@pytest.fixture
+def settings(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    return Settings(
+        DEEPSEEK_API_KEY="sk-test-deepseek-1234567890",
+        DEEPGRAM_API_KEY="dg-test-deepgram-0987654321",
+        SURTITLE_HOME=str(home),
+        voice_enabled=False,
+    )
 
 
 @pytest.fixture(scope="module")
@@ -29,6 +44,63 @@ def css() -> str:
 @pytest.fixture(scope="module")
 def html() -> str:
     return (WEB / "index.html").read_text(encoding="utf-8")
+
+
+@pytest.fixture(scope="module")
+def script() -> str:
+    return (WEB / "js" / "app.js").read_text(encoding="utf-8")
+
+
+@pytest.fixture(scope="module")
+def audio() -> str:
+    return (WEB / "js" / "audio.js").read_text(encoding="utf-8")
+
+
+@pytest.fixture(scope="module")
+def transport() -> str:
+    return (WEB / "js" / "connection.js").read_text(encoding="utf-8")
+
+
+class TestReconnectRace:
+    """Guards for the connect/disconnect loop.
+
+    `openConnection()` closes the old socket and opens a new one. The old socket's
+    `onclose` arrives later, and because it was an unguarded closure over mutable
+    state it ran against the *new* connection: marking it closed and scheduling a
+    reconnect. That opened a further socket, whose own stale handler repeated it —
+    a new connection roughly every second, a new server-side session (and a second
+    TTS pipeline) each time, and replies that started, cut off, or overlapped.
+    The user's log showed six connections in six seconds.
+    """
+
+    def test_callbacks_are_ignored_for_a_superseded_socket(self, transport):
+        assert "const isCurrent = () => this.socket === socket;" in transport, (
+            "each socket's handlers must check they still own the connection"
+        )
+
+    @pytest.mark.parametrize("handler", ["onopen", "onmessage", "onclose", "onerror"])
+    def test_every_handler_is_guarded(self, transport, handler):
+        """A stale handler reaching the live connection is what caused the loop."""
+        names = ("onopen", "onmessage", "onclose", "onerror")
+        positions = {name: transport.index(f"socket.{name} = ") for name in names}
+        start = positions[handler]
+        later = [position for position in positions.values() if position > start]
+        end = min(later) if later else len(transport)
+        body = transport[start:end]
+        assert "isCurrent()" in body, f"{handler} does not check whether it is stale"
+
+    def test_close_detaches_handlers_before_closing(self, transport):
+        for handler in ("onopen", "onmessage", "onclose", "onerror"):
+            assert f"socket.{handler} = null;" in transport, (
+                f"{handler} must be detached in close(), so it cannot reach a "
+                "handler now pointed at a different connection"
+            )
+
+    def test_the_socket_reference_is_cleared_before_closing(self, transport):
+        assert "this.socket = null;" in transport
+        # Ordering matters: the guard compares against this.socket, so clearing
+        # it first makes every in-flight callback stale.
+        assert transport.index("this.socket = null;") < transport.index("socket.close();")
 
 
 class TestHiddenAttribute:
@@ -79,3 +151,144 @@ class TestRequiredElements:
         # suspended-context fault.
         assert "AUDIOWORKLET TEST" in text
         assert "peak amplitude" in text
+
+    def test_the_archive_controls_exist(self, html):
+        for element_id in ("archiveToggle", "archiveList", "archivePurge", "confirmModal"):
+            assert f'id="{element_id}"' in html
+
+
+class TestScriptReferences:
+    """Catch dangling DOM ids and API paths without needing a browser.
+
+    A typo here is invisible until someone clicks the thing, and the failure mode
+    is a silent no-op rather than an error.
+    """
+
+    @pytest.fixture(scope="class")
+    @classmethod
+    def script(cls) -> str:
+        return (WEB / "js" / "app.js").read_text(encoding="utf-8")
+
+    @pytest.fixture(scope="class")
+    @classmethod
+    def audio(cls) -> str:
+        return (WEB / "js" / "audio.js").read_text(encoding="utf-8")
+
+    def test_every_getElementById_has_a_matching_element(self, script, html):
+        ids = set(re.findall(r'getElementById\("([^"]+)"\)', script))
+        missing = sorted(element_id for element_id in ids if f'id="{element_id}"' not in html)
+        assert not missing, f"app.js looks up elements that are not in index.html: {missing}"
+
+    def test_every_api_path_is_a_real_route(self, script, settings):
+        """Every URL the UI calls must exist on the server.
+
+        Template holes (`${state.project.id}`) are collapsed to `{}` on both
+        sides, so `/api/sessions/${id}/archive` is compared against
+        `/api/sessions/{session_id}/archive`.
+        """
+        app = create_app_for(settings)
+        # The OpenAPI document is the flattened truth; app.routes keeps included
+        # routers nested and would report every path as missing.
+        routes = {re.sub(r"\{[^}]+\}", "{}", path) for path in app.openapi()["paths"]}
+
+        called: set[str] = set()
+        for raw in re.findall(r'api\(\s*[`"]([^`"]+)[`"]', script):
+            cleaned = raw.split("?")[0]
+            if not cleaned.startswith("/api/"):
+                continue
+            called.add(re.sub(r"\$\{[^}]*\}", "{}", cleaned).rstrip("/"))
+
+        missing = sorted(path for path in called if path not in routes)
+        assert not missing, f"the UI calls routes the server does not define: {missing}"
+
+
+class TestSpeechPlaybackRate:
+    """Guards for a bug that made the voice sound wrong intermittently.
+
+    An AudioBufferSourceNode resamples its buffer into the audio context's rate,
+    so an AudioBuffer must be declared at the rate the PCM really is. The player
+    used to overwrite the synthesis rate with whatever rate the context negotiated
+    and then declare its buffers at *that*; on a machine where 24 kHz was refused
+    (which depends on the active output device, hence "sometimes"), every reply
+    played an octave high and twice as fast.
+
+    There is no browser here, so these assert on the shape of the code — the same
+    approach used for the `[hidden]` regression above.
+    """
+
+    def test_buffers_are_declared_at_the_synthesis_rate(self, audio):
+        assert "createBuffer(1, sampleCount, this.serverRate)" in audio, (
+            "the buffer must declare the rate the server synthesised at, or the "
+            "context will resample from the wrong source rate"
+        )
+
+    def test_the_synthesis_rate_is_never_overwritten_by_the_context(self, audio):
+        assert "this.sampleRate = this.context.sampleRate" not in audio, (
+            "adopting the context's rate as the buffer rate is what broke the pitch"
+        )
+
+    def test_the_context_is_asked_for_the_synthesis_rate(self, audio):
+        assert "new AudioContext({ sampleRate: this.serverRate })" in audio
+
+    def test_the_client_adopts_the_rate_the_server_reports(self, script):
+        assert "playback.setServerRate(data.sample_rate)" in script, (
+            "the server sends the rate it synthesises at; ignoring it means a "
+            "configured SURTITLE_TTS_SAMPLE_RATE is decoded wrongly"
+        )
+
+    def test_a_speed_fallback_is_applied_during_playback(self, audio, script):
+        assert "source.playbackRate.value = this.playbackRate" in audio
+        assert 'data.kind_detail === "speed_fallback"' in script
+
+    def test_a_paused_sink_element_is_restarted(self, audio):
+        assert "_ensureElementPlaying" in audio, (
+            "the <audio> element is the only route to a chosen output device; if "
+            "the browser pauses it there is silence and no error"
+        )
+
+
+class TestReadyEventContract:
+    """The fields the browser needs must be present in the ready event."""
+
+    async def test_ready_carries_the_synthesis_rate(self, tmp_path):
+        from surtitle.core.session import Session
+        from surtitle.store.db import Store
+
+        store = Store(tmp_path / "db.sqlite")
+        project = store.create_project("P", tmp_path)
+        record = store.create_session(project.id)
+
+        async def send(_payload):
+            return None
+
+        async def send_audio(_data):
+            return None
+
+        session = Session(
+            session_id=record.id,
+            project_id=project.id,
+            root=tmp_path,
+            settings=Settings(
+                DEEPSEEK_API_KEY="sk-test",
+                SURTITLE_HOME=str(tmp_path),
+                voice_enabled=False,
+            ),
+            store=store,
+            deepseek=None,
+            send=send,
+            send_audio=send_audio,
+        )
+        await session.start()
+
+        ready = [
+            event.to_dict() for event in _drain(session) if event.to_dict().get("kind") == "ready"
+        ]
+        assert ready, "a session must announce itself"
+        assert ready[0]["data"]["sample_rate"] == session.settings.tts_sample_rate
+
+
+def _drain(session) -> list:
+    events = []
+    while not session._outbox.empty():
+        events.append(session._outbox.get_nowait())
+    return events

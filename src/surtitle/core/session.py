@@ -108,6 +108,7 @@ class Session:
                 on_started=self._on_speaking_started,
                 on_finished=self._on_speaking_finished,
                 on_error=self._on_voice_problem,
+                on_speed_fallback=self._on_speed_fallback,
             )
             await self.stt.start()
             await self.tts.start()
@@ -758,6 +759,20 @@ class Session:
         """Surface a voice-layer problem without ending the session."""
         await self.emit(EventKind.ERROR, message=message, kind_detail="voice", recoverable=True)
 
+    async def _on_speed_fallback(self, speed: float) -> None:
+        """Deepgram refused the speed, so ask the browser to play at that pace.
+
+        Without this the chosen speed is silently lost and the voice comes out at
+        its natural pace, which reads as the voice changing between turns.
+        """
+        log.info("speech speed %.2f will be applied during playback instead", speed)
+        await self.emit(
+            EventKind.STATE,
+            state=self._state.state.value,
+            speech_speed=speed,
+            kind_detail="speed_fallback",
+        )
+
     # --- usage -----------------------------------------------------------
     @property
     def state(self) -> SessionState:
@@ -770,16 +785,41 @@ class SessionManager:
     def __init__(self) -> None:
         self._sessions: dict[str, Session] = {}
 
-    def add(self, session: Session) -> None:
+    async def add(self, session: Session) -> None:
+        """Register a session, retiring any previous one for the same id.
+
+        A reconnecting browser opens a second WebSocket for the same conversation
+        before the first has been torn down. Registering the new session used to
+        simply overwrite the old entry, which orphaned it: its Deepgram socket and
+        outbox task kept running, so two speech pipelines were briefly alive for
+        one conversation and a reply could be cut off or spoken twice.
+        """
+        previous = self._sessions.get(session.session_id)
         self._sessions[session.session_id] = session
+        if previous is not None and previous is not session:
+            log.info(
+                "retiring the previous session for %s (a new connection took over)",
+                session.session_id,
+            )
+            await previous.close()
 
     def get(self, session_id: str) -> Session | None:
         return self._sessions.get(session_id)
 
-    async def remove(self, session_id: str) -> None:
-        session = self._sessions.pop(session_id, None)
-        if session is not None:
-            await session.close()
+    async def remove(self, session_id: str, *, session: Session | None = None) -> None:
+        """Close and forget a session.
+
+        ``session`` pins the removal to one instance. The handler for a superseded
+        connection must not unregister the newer session that replaced it, or the
+        live conversation would vanish from the registry and leak its voice
+        sockets.
+        """
+        current = self._sessions.get(session_id)
+        if session is not None and current is not None and current is not session:
+            return
+        target = self._sessions.pop(session_id, None)
+        if target is not None:
+            await target.close()
 
     async def close_all(self) -> None:
         for session_id in list(self._sessions):
