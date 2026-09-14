@@ -657,6 +657,35 @@ async def _install_packages_handler(
     )
 
 
+async def _search_history_handler(ctx: ToolContext, query: str, limit: int = 5) -> ToolResult:
+    """Search earlier conversations in this project.
+
+    The retrieval half of durable memory. The notebook holds what the agent chose
+    to record; this finds what it did not, so knowledge from a previous session is
+    reachable rather than lost.
+    """
+    if ctx.store is None:
+        return ToolResult(ok=False, error="Conversation history is not available here.")
+    needle = (query or "").strip()
+    if not needle:
+        return ToolResult(ok=False, error="Provide something to search for.")
+
+    results = ctx.store.search_conversations(
+        needle, limit=max(1, min(int(limit), 20)), exclude_session=ctx.session_id or None
+    )
+    if not results:
+        return ToolResult(
+            ok=True,
+            data={"query": needle, "results": []},
+            display=f"Nothing in earlier conversations mentions {needle!r}",
+        )
+    return ToolResult(
+        ok=True,
+        data={"query": needle, "results": results},
+        display=f"Found {len(results)} earlier mention(s) of {needle!r}",
+    )
+
+
 async def _remember_handler(ctx: ToolContext, note: str, *, replace: bool = False) -> ToolResult:
     """Append to the project notebook, which is injected into every future turn."""
     cleaned = (note or "").strip()
@@ -882,6 +911,29 @@ _READ_NOTES = Tool(
 )
 
 
+_SEARCH_HISTORY = Tool(
+    name="search_history",
+    description=(
+        "Search this project's earlier conversations. Use it before re-deriving "
+        "something or asking the user to repeat themselves: if a previous session "
+        "already established how to reach a system, why a machine is down, or where "
+        "a file lives, it is probably recorded here. Distinct from the notebook, "
+        "which holds only what was deliberately written down."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "query": _string("Words or an identifier to look for, e.g. '4C-120 iod'."),
+            "limit": _integer("Maximum number of excerpts to return.", default=5),
+        },
+        "required": ["query"],
+    },
+    handler=_search_history_handler,
+    approval="never",
+    summary="Search earlier conversations",
+)
+
+
 def all_tools() -> list[Tool]:
     """Every tool the agent may use, including the ones declared last."""
     return [
@@ -891,4 +943,5 @@ def all_tools() -> list[Tool]:
         _ENVIRONMENT_INFO,
         _REMEMBER,
         _READ_NOTES,
+        _SEARCH_HISTORY,
     ]

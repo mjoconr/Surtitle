@@ -422,36 +422,68 @@ class Session:
             # look identical to a failed first one.
             pass
 
-    # Instructions a project already documents, read once per session.
-    # Conventional locations, in the order a human would consult them.
+    # Instruction files, by conventional location. Root first, then `docs/`,
+    # because a project that keeps its orientation material in `docs/` was
+    # otherwise invisible: the file that documented how to reach the machines sat
+    # in `docs/ACCESS_METHOD.md` and was never read.
     _INSTRUCTION_FILES = (
         "AGENTS.md",
         "CLAUDE.md",
         ".cursorrules",
         "CONTRIBUTING.md",
+        "docs/AGENTS.md",
+        "docs/SAFETY_RULES.md",
+        # The two documents that answer "how do I reach the systems" and "what can
+        # I call". Small enough to be resident, and the reason this list is
+        # consulted at all.
+        "docs/ACCESS_METHOD.md",
+        "docs/AGENT_INTERFACE.md",
+        "docs/CURRENT_STATE.md",
+        "docs/ARCHITECTURE.md",
+        "ACCESS_METHOD.md",
+        "AGENT_INTERFACE.md",
     )
-    _INSTRUCTION_MAX_CHARS = 6000
+    # Sized for the *routing* layer, not for the whole documentation set: the
+    # project's AGENTS.md plus its safety rules, which are the two things always
+    # worth having resident. Everything else is named in the prompt and read on
+    # demand.
+    #
+    # Trying to inject the interface guides as well does not work and is not
+    # desirable: in a real project they totalled over 100 KB, so any budget either
+    # squeezed out the important short file or pushed the conversation out of the
+    # window before the user had said anything. A routing document that points at
+    # its own detail is the better arrangement, and most projects already write
+    # one.
+    _INSTRUCTION_MAX_CHARS = 20000
 
     def _system_prompt(self) -> str:
         """Build the system prompt, including the project's own instructions.
 
-        A project that documents how to work in it — AGENTS.md, a current-state
-        note, a house style — should not have to hope the agent thinks to read it.
-        Loading it up front means the agent starts primed with the project's own
-        conventions instead of discovering them by trial and error, and it makes
-        those files a supported way to steer the agent.
+        A project that documents how to work in it - AGENTS.md, an access guide, a
+        current-state note - should not have to hope the agent thinks to read it.
+        Loading the routing layer up front means the agent starts primed with the
+        project's own conventions, and makes those files a supported way to steer
+        it.
 
-        Deliberately capped: these are instructions, not documents to reason over,
-        and an unbounded file would crowd out the conversation.
+        Two deliberate limits, learned from a project whose documentation ran to
+        over 100 KB:
+
+        * Only the **routing layer** is resident - the project's AGENTS.md and its
+          safety rules. Everything else is named so the agent can read it when the
+          task calls for it. Injecting the full interface guides either squeezed out
+          the short important file or pushed the conversation out of the window
+          before the user had spoken.
+        * A file too large for the remaining budget is **skipped, not truncated**.
+          A document cut to a tenth of itself reads as the whole document, which is
+          worse than not showing it at all.
         """
         from surtitle.core.agent import build_system_prompt
 
         prompt = build_system_prompt(self.root.name)
         sections: list[str] = []
 
-        # The project notebook: durable facts the agent recorded in earlier
-        # sessions. This is what lets knowledge accumulate across conversations
-        # instead of every chat re-deriving the same things.
+        # Durable facts the agent recorded in earlier sessions. This is what lets
+        # knowledge accumulate across conversations.
         from surtitle.tools.environment import project_notes
 
         notes = project_notes(self.root)
@@ -463,8 +495,8 @@ class Session:
                 "wrong, correct it with the remember tool.\n\n" + notes
             )
 
-        # A one-line brief on the project itself, so the agent is not blind for the
-        # first turn. Capped hard: this is orientation, not content.
+        # Orientation, so the first turn is not blind. Capped: this is a signpost,
+        # not content.
         try:
             listing = sorted(
                 entry.name for entry in self.root.iterdir() if not entry.name.startswith(".")
@@ -483,34 +515,87 @@ class Session:
                 "## Project instructions (from .surtitle.json)\n" + config.instructions.strip()
             )
 
-        loaded: list[str] = []
-        budget = self._INSTRUCTION_MAX_CHARS
+        # Candidate documents, most load-bearing first.
+        candidates: list[tuple[str, Path]] = []
         for name in self._INSTRUCTION_FILES:
             candidate = self.root / name
-            if not candidate.is_file():
-                continue
+            if candidate.is_file():
+                candidates.append((name, candidate))
+        # A user-global instruction file, so conventions that are not per-project
+        # still reach the agent. Loaded last: more specific wins.
+        global_file = self.settings.data_dir / "AGENTS.md"
+        if global_file.is_file():
+            candidates.append(("$SURTITLE_HOME/AGENTS.md", global_file))
+
+        loaded: list[str] = []
+        loaded_names: set[str] = set()
+        skipped: list[str] = []
+        budget = self._INSTRUCTION_MAX_CHARS
+
+        for name, path in candidates:
             try:
-                text = candidate.read_text(encoding="utf-8", errors="replace").strip()
+                text = path.read_text(encoding="utf-8", errors="replace").strip()
             except OSError:
                 continue
             if not text:
                 continue
-            # Truncate to what is *left*, not to the original budget: several files
-            # each under the cap can still exceed it together, and a single large
-            # file must not be admitted whole.
             if len(text) > budget:
+                if len(text) > budget * 2:
+                    # Showing half a document invites the agent to treat a fragment
+                    # as the whole thing, which is worse than not showing it. Name
+                    # it instead so it is read deliberately.
+                    skipped.append(name)
+                    continue
                 text = f"{text[:budget]}\n... [truncated; read the file for the rest]"
             budget -= len(text) + len(name)
             loaded.append(f"### {name}\n{text}")
+            loaded_names.add(name)
             if budget <= 0:
                 break
 
         if loaded:
             sections.append(
-                "## Project instructions (from files in the project)\n"
-                "These are the project's own conventions and current state. Follow "
-                "them, and prefer them over your assumptions about how the project "
-                "works.\n\n" + "\n\n".join(loaded)
+                "## Project instructions\n"
+                "This project's own conventions and current state. Follow them, and "
+                "prefer them over your assumptions about how the project works. If "
+                "they describe how to reach a system, use that path rather than "
+                "inventing one. More specific files take precedence over broader "
+                "ones.\n\n" + "\n\n".join(loaded)
+            )
+
+        # Documentation the agent has not been shown, named so it knows it exists.
+        # Built from what was actually injected: a file skipped for size is exactly
+        # the one that must still be mentioned, and filtering by candidate name hid
+        # the document explaining how to reach the machines.
+        unread: list[str] = []
+        for directory in (self.root, self.root / "docs"):
+            if not directory.is_dir():
+                continue
+            try:
+                entries = sorted(directory.glob("*.md"))
+            except OSError:
+                continue
+            for entry in entries:
+                relative = entry.relative_to(self.root).as_posix()
+                if relative in loaded_names:
+                    continue
+                # README files are conventional entry points the agent already knows
+                # to consult, and the list stays shorter without them.
+                if entry.name.lower().startswith("readme"):
+                    continue
+                unread.append(relative)
+
+        # Files dropped for size come first: most likely to matter, least likely to
+        # be stumbled upon.
+        mention = list(dict.fromkeys([*skipped, *unread]))
+        if mention:
+            sections.append(
+                "## Other documentation in this project\n"
+                "Not loaded here. **If the task needs to reach a system, a service or "
+                "an API, read the access or interface document below before acting** - "
+                "it will name the tool, the addressing scheme and any token "
+                "requirement, and guessing at those does not work. Otherwise read "
+                "whichever is relevant:\n" + "\n".join(f"- {name}" for name in mention[:30])
             )
 
         return f"{prompt}\n\n" + "\n\n".join(sections) if sections else prompt

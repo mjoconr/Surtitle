@@ -99,8 +99,14 @@ export class Capture {
   }
 
   async start() {
-    if (this.active) {
-      return { running: this.context ? this.context.state === "running" : false };
+    // Every start is a clean start. Previously a leftover `active` flag made this
+    // a silent no-op, so a second attempt did nothing at all — no stream, no
+    // frames, no error — which is indistinguishable from a muted microphone and
+    // survived toggling the mic (the toggle simply re-entered this early return).
+    // Tearing down first removes that failure mode rather than diagnosing it.
+    if (this.active || this.stream || this.node) {
+      console.info("[surtitle] start requested while already running; restarting cleanly");
+      await this.stop();
     }
 
     const constraints = {

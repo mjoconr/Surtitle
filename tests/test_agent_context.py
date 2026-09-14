@@ -172,10 +172,14 @@ class TestProjectInstructionsAreInjected:
         assert "SECRET NOT AN INSTRUCTION" not in session._system_prompt()
 
     def test_a_large_instruction_file_is_capped(self, project_session):
+        """A file too big to show honestly is skipped and named, not shredded."""
         session, root = project_session
         (root / "AGENTS.md").write_text("x" * 50000)
         prompt = session._system_prompt()
-        assert len(prompt) < 20000, "an unbounded instruction file would crowd the conversation"
+        assert "x" * 5000 not in prompt, "an oversized file was admitted wholesale"
+        assert "AGENTS.md" in prompt, "and it must still be named"
+        # The whole prompt stays bounded well below the file size.
+        assert len(prompt) < 30000, "an unbounded instruction file crowded the conversation"
 
     def test_the_base_prompt_is_always_present(self, project_session):
         session, _root = project_session
@@ -523,3 +527,103 @@ class TestGuardIsWiredIntoTheLoop:
         assert refused, f"a repeating model was never refused: {outcomes}"
         # The tool must not have been executed on the refused attempts.
         assert len(calls) < 8, f"the tool ran {len(calls)} times despite the guard"
+
+
+class TestDocumentationAwareness:
+    """The agent must know what a project documents, including docs/ subdirectories.
+
+    From a real project: the file explaining how to reach the machine fleet lived
+    at `docs/ACCESS_METHOD.md`, and priming that only looked at the project root
+    never read it. The agent was then asked how to connect and did not know —
+    correctly, because it had never been shown.
+    """
+
+    def _prompt(self, session):
+        return session._system_prompt()
+
+    def test_a_docs_subdirectory_instruction_file_is_read(self, project_session):
+        """With budget available, a docs/ instruction file is loaded outright."""
+        session, root = project_session
+        (root / "docs").mkdir()
+        (root / "docs" / "ACCESS_METHOD.md").write_text(
+            "Use ./plant-mcp-cli -m <SITE> call to reach a machine.\\n"
+        )
+        prompt = self._prompt(session)
+        assert "plant-mcp-cli" in prompt
+
+    def test_the_connection_guide_is_at_least_named_when_budget_is_tight(self, project_session):
+        """Naming is sufficient: the agent is told to read what it needs.
+
+        This is the arrangement for a documentation-heavy project - the routing
+        layer stays resident and the detail is one read away, rather than trying to
+        keep 100 KB of guides inside the window.
+        """
+        session, root = project_session
+        (root / "AGENTS.md").write_text("Routing: read docs/ACCESS_METHOD.md.\\n" * 200)
+        (root / "docs").mkdir()
+        (root / "docs" / "ACCESS_METHOD.md").write_text("plant-mcp-cli detail\\n" * 900)
+        prompt = self._prompt(session)
+        # Either loaded or named in the index - never absent.
+        assert "ACCESS_METHOD" in prompt, "the connection guide vanished entirely"
+
+    def test_a_skipped_document_is_still_named(self, project_session):
+        """Skipping for size must not make a document invisible."""
+        session, root = project_session
+        (root / "docs").mkdir()
+        # Too large for the budget, so it will be skipped rather than shredded.
+        (root / "docs" / "AGENT_INTERFACE.md").write_text("x" * 90000)
+        prompt = self._prompt(session)
+        assert "docs/AGENT_INTERFACE.md" in prompt, "a skipped doc must be named"
+
+    def test_injected_documents_are_not_listed_as_unread(self, project_session):
+        session, root = project_session
+        (root / "AGENTS.md").write_text("# Rules\\nDo the thing.\\n")
+        prompt = self._prompt(session)
+        index = prompt[prompt.find("## Other documentation") :]
+        assert "- AGENTS.md" not in index, "an injected file was listed as unread"
+
+    def test_readme_is_not_listed(self, project_session):
+        """Conventional entry points need no advertising."""
+        session, root = project_session
+        (root / "README.md").write_text("# Read me\\n")
+        prompt = self._prompt(session)
+        index = prompt[prompt.find("## Other documentation") :]
+        assert "README.md" not in index
+
+    def test_an_oversized_document_is_not_shredded(self, project_session):
+        """A file cut to a fraction of itself reads as the whole document."""
+        session, root = project_session
+        (root / "AGENTS.md").write_text("x" * 90000)
+        prompt = self._prompt(session)
+        # Skipped entirely, so the body is absent and it is named instead.
+        assert "x" * 2000 not in prompt
+        assert "AGENTS.md" in prompt
+
+    def test_no_duplicate_sections_are_emitted(self, project_session):
+        session, root = project_session
+        (root / "AGENTS.md").write_text("# Rules\\n")
+        prompt = self._prompt(session)
+        assert prompt.count("## Project instructions") == 1
+        assert prompt.count("## Other documentation") <= 1
+
+    def test_a_user_global_instruction_file_is_read(self, project_session):
+        """Conventions that are not per-project still reach the agent."""
+        session, _root = project_session
+        global_file = session.settings.data_dir / "AGENTS.md"
+        global_file.parent.mkdir(parents=True, exist_ok=True)
+        global_file.write_text("House rule: always cite the file you read.\\n")
+        assert "always cite the file you read" in self._prompt(session)
+
+    def test_the_index_lists_nested_docs(self, project_session):
+        session, root = project_session
+        (root / "docs").mkdir()
+        (root / "docs" / "GIT_POLICY.md").write_text("branch naming rules\\n")
+        prompt = self._prompt(session)
+        assert "docs/GIT_POLICY.md" in prompt
+
+    def test_the_budget_is_respected(self, project_session):
+        session, root = project_session
+        for name in ("AGENTS.md", "CLAUDE.md", "CONTRIBUTING.md"):
+            (root / name).write_text("y" * 40000)
+        prompt = self._prompt(session)
+        assert len(prompt) < 60000, "the resident set is unbounded"

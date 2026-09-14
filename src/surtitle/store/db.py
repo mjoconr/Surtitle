@@ -8,6 +8,7 @@ reads from another request thread.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import sqlite3
@@ -201,6 +202,10 @@ class Store:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.execute("PRAGMA synchronous=NORMAL")
+        # Full-text search over past conversations, when the SQLite build has FTS5.
+        # Created here rather than in the schema script because an unsupported
+        # module would make the whole script fail, taking the tables with it.
+        self.fts5 = self._enable_search()
         self._migrate()
 
     # --- lifecycle -------------------------------------------------------
@@ -215,6 +220,88 @@ class Store:
                     "INSERT INTO meta (key, value) VALUES ('schema_version', ?)",
                     (str(SCHEMA_VERSION),),
                 )
+
+    def _enable_search(self) -> bool:
+        """Create the conversation search index if FTS5 is available."""
+        try:
+            self._conn.execute(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS message_search USING fts5("
+                "content, session_id UNINDEXED, message_id UNINDEXED, role UNINDEXED)"
+            )
+            return True
+        except sqlite3.OperationalError as exc:  # pragma: no cover - build dependent
+            log.info("conversation search unavailable (FTS5 missing): %s", exc)
+            return False
+
+    def _index_message(self, message_id: int, session_id: str, role: str, content: str) -> None:
+        """Add a message to the search index. Best-effort by design: failing to
+        index must never fail the conversation."""
+        if not self.fts5 or not content.strip():
+            return
+        with contextlib.suppress(sqlite3.Error):
+            self._conn.execute(
+                "INSERT INTO message_search (content, session_id, message_id, role)"
+                " VALUES (?, ?, ?, ?)",
+                (content, session_id, str(message_id), role),
+            )
+
+    def search_conversations(
+        self, query: str, *, limit: int = 5, exclude_session: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Find past messages matching ``query``.
+
+        This is the retrieval half of durable memory: the notebook holds what the
+        agent chose to record, and this finds what it did not. Results are ranked,
+        short, and meant to be *offered* - the caller decides whether they belong in
+        the model's context.
+        """
+        needle = (query or "").strip()
+        if not needle:
+            return []
+
+        rows: list[sqlite3.Row] = []
+        with self._lock:
+            if self.fts5:
+                # Quote the query so punctuation cannot be read as FTS syntax; a
+                # stray quote in a machine name would otherwise raise.
+                match = '"' + needle.replace('"', '""') + '"'
+                with contextlib.suppress(sqlite3.Error):
+                    rows = self._conn.execute(
+                        "SELECT m.session_id, m.role, m.content,"
+                        " snippet(message_search, 0, '', '', '...', 12) AS excerpt,"
+                        " bm25(message_search) AS score"
+                        " FROM message_search"
+                        " JOIN messages m ON m.id = CAST(message_search.message_id AS INTEGER)"
+                        " WHERE message_search MATCH ?"
+                        " ORDER BY score LIMIT ?",
+                        (match, limit + 5),
+                    ).fetchall()
+            if not rows:
+                # Fallback, and also the path taken when a quoted phrase finds
+                # nothing: a plain substring scan is slower but never misses.
+                rows = self._conn.execute(
+                    "SELECT session_id, role, content, content AS excerpt, 0 AS score"
+                    " FROM messages WHERE content LIKE ?"
+                    " ORDER BY id DESC LIMIT ?",
+                    (f"%{needle}%", limit + 5),
+                ).fetchall()
+
+        results: list[dict[str, Any]] = []
+        for row in rows:
+            if exclude_session and row["session_id"] == exclude_session:
+                continue
+            session = self.get_session(row["session_id"])
+            results.append(
+                {
+                    "session_id": row["session_id"],
+                    "session_title": session.title if session else "(deleted)",
+                    "role": row["role"],
+                    "excerpt": " ".join((row["excerpt"] or "").split())[:300],
+                }
+            )
+            if len(results) >= limit:
+                break
+        return results
 
     def close(self) -> None:
         with self._lock:
@@ -385,6 +472,7 @@ class Store:
             )
             self._conn.execute("UPDATE sessions SET updated_at = ? WHERE id = ?", (now, session_id))
             message_id = int(cursor.lastrowid or 0)
+            self._index_message(message_id, session_id, role, content)
         return Message(
             id=message_id,
             session_id=session_id,

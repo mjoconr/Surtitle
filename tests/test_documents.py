@@ -8,6 +8,7 @@ worthless, so these assert the output is genuinely valid.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -150,6 +151,14 @@ class TestSofficeDiscovery:
 # --------------------------------------------------------------------------- #
 
 SOFFICE = find_soffice()
+
+# Real conversions are marked `live` as well as skipped without LibreOffice.
+#
+# Each conversion starts a whole office suite (~7-9 s, essentially all of it
+# process start), and there are two dozen of them here — so they dominated the
+# default suite's running time while testing something that changes rarely. The
+# conversion *logic* is covered offline in the class below by faking the
+# subprocess; these keep the end-to-end confidence available on demand.
 requires_soffice = pytest.mark.skipif(SOFFICE is None, reason="LibreOffice is not installed")
 
 
@@ -161,6 +170,7 @@ def ctx(tmp_path):
     return ToolContext(root=tmp_path)
 
 
+@pytest.mark.live
 @requires_soffice
 class TestConvertDocument:
     async def test_txt_to_pdf_produces_a_valid_pdf(self, ctx):
@@ -250,3 +260,140 @@ class TestConvertDocument:
         read = read_file(ctx, "note.pdf")
         assert read.ok, read.error
         assert "eight percent" in read.data["content"]
+
+
+class TestConvertDocumentWithoutLibreOffice:
+    """The conversion logic, with the subprocess faked.
+
+    LibreOffice costs ~7-9 s per start, almost all of it process launch, which made
+    the real-conversion tests dominate the suite while testing something that
+    changes rarely. Everything that is actually *our* logic is checked here instead:
+    the staging dance, LibreOffice's habit of ignoring the requested filename, the
+    escape guards, and honest reporting when nothing is produced.
+
+    The end-to-end tests above still run against the real thing under `-m live`.
+    """
+
+    @pytest.fixture
+    def ctx(self, tmp_path):
+        (tmp_path / "note.txt").write_text("Sampling report\n", encoding="utf-8")
+        return ToolContext(root=tmp_path)
+
+    @staticmethod
+    def _fake_libreoffice(output_name="note.pdf", *, content=b"%PDF-1.4 fake"):
+        """Patch the runner to behave like LibreOffice writing into --outdir.
+
+        Returns the recorder of the argv it was handed, so the command line can be
+        asserted: the staging directory and the escape guards are the point.
+        """
+        import surtitle.tools.documents as documents
+
+        seen: list[list[str]] = []
+
+        async def fake_run(argv, *, timeout):
+            seen.append(argv)
+            outdir = Path(argv[argv.index("--outdir") + 1])
+            if output_name:
+                (outdir / output_name).write_bytes(content)
+            return documents._RunResult("convert ok", "", 0, False)
+
+        return fake_run, seen
+
+    async def test_it_converts_into_a_staging_directory_not_the_project(self, ctx, monkeypatch):
+        """Staging is what stops a failed run leaving a half-written file."""
+        import surtitle.tools.documents as documents
+
+        fake, seen = self._fake_libreoffice()
+        monkeypatch.setattr(documents, "_run", fake)
+
+        result = await documents.convert_document(ctx, "note.txt", target="pdf")
+        assert result.ok, result.error
+
+        outdir = Path(seen[0][seen[0].index("--outdir") + 1])
+        assert outdir != ctx.root, "LibreOffice was pointed straight at the project"
+        assert "note" in outdir.name or "surtitle" in outdir.name
+
+    async def test_it_uses_a_private_user_profile(self, ctx, monkeypatch):
+        """A shared profile is the classic cause of a hung conversion."""
+        import surtitle.tools.documents as documents
+
+        fake, seen = self._fake_libreoffice()
+        monkeypatch.setattr(documents, "_run", fake)
+
+        await documents.convert_document(ctx, "note.txt", target="pdf")
+        profile = next(arg for arg in seen[0] if arg.startswith("-env:UserInstallation="))
+        assert "surtitle-lo-profile" in profile
+
+    async def test_output_named_after_the_source_is_still_placed_correctly(self, ctx, monkeypatch):
+        """The bug this guards: LibreOffice ignores the requested output filename.
+
+        Asking for `reports/summary.pdf` from `note.txt` produces `note.pdf`, so a
+        naive implementation looks for the wrong file and reports a failure.
+        """
+        import surtitle.tools.documents as documents
+
+        fake, _seen = self._fake_libreoffice(output_name="note.pdf")
+        monkeypatch.setattr(documents, "_run", fake)
+
+        result = await documents.convert_document(
+            ctx, "note.txt", target="pdf", output="reports/summary.pdf"
+        )
+        assert result.ok, result.error
+        assert result.data["path"] == "reports/summary.pdf"
+        assert (ctx.root / "reports" / "summary.pdf").is_file()
+
+    async def test_a_differently_named_output_is_still_found(self, ctx, monkeypatch):
+        """Some import filters rewrite the name; the fallback must cope."""
+        import surtitle.tools.documents as documents
+
+        fake, _seen = self._fake_libreoffice(output_name="note-converted.pdf")
+        monkeypatch.setattr(documents, "_run", fake)
+
+        result = await documents.convert_document(ctx, "note.txt", target="pdf")
+        assert result.ok, result.error
+        assert (ctx.root / "note.pdf").is_file()
+
+    async def test_no_output_is_reported_as_a_failure(self, ctx, monkeypatch):
+        """LibreOffice can exit cleanly having written nothing; that is a failure."""
+        import surtitle.tools.documents as documents
+
+        fake, _seen = self._fake_libreoffice(output_name=None)
+        monkeypatch.setattr(documents, "_run", fake)
+
+        result = await documents.convert_document(ctx, "note.txt", target="pdf")
+        assert not result.ok
+        assert "did not produce" in result.error
+
+    async def test_a_timeout_is_reported_as_such(self, ctx, monkeypatch):
+        import surtitle.tools.documents as documents
+
+        async def timing_out(argv, *, timeout):
+            return documents._RunResult("", "", None, True)
+
+        monkeypatch.setattr(documents, "_run", timing_out)
+        result = await documents.convert_document(ctx, "note.txt", target="pdf")
+        assert not result.ok
+        assert "did not finish" in result.error
+
+    async def test_the_staging_holder_is_named_in_the_command(self, ctx, monkeypatch):
+        import surtitle.tools.documents as documents
+
+        fake, seen = self._fake_libreoffice()
+        monkeypatch.setattr(documents, "_run", fake)
+        await documents.convert_document(ctx, "note.txt", target="pdf")
+
+        assert "--convert-to" in seen[0]
+        assert "--headless" in seen[0]
+        # The source is passed as an absolute path, so the process cwd is irrelevant.
+        assert str((ctx.root / "note.txt").resolve()) in seen[0]
+
+    async def test_libreoffice_never_sees_a_path_outside_the_project(self, ctx, monkeypatch):
+        """The escape guard must reject before anything is launched."""
+        import surtitle.tools.documents as documents
+
+        fake, seen = self._fake_libreoffice()
+        monkeypatch.setattr(documents, "_run", fake)
+
+        refused = await documents.convert_document(ctx, "../../../etc/hosts", target="pdf")
+        assert not refused.ok
+        assert seen == [], "LibreOffice was launched for a rejected path"

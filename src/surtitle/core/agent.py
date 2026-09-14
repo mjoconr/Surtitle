@@ -782,7 +782,14 @@ class AgentLoop:
 
             started = time.monotonic()
             result = await self.registry.dispatch(
-                call.name, ToolContext(root=self.root, session_id=self.session_id), arguments
+                call.name,
+                ToolContext(
+                    root=self.root,
+                    session_id=self.session_id,
+                    project_id=self.project_id,
+                    store=self.store,
+                ),
+                arguments,
             )
             duration_ms = int((time.monotonic() - started) * 1000)
 

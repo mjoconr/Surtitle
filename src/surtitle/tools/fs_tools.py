@@ -76,6 +76,9 @@ class ToolContext:
     root: Path
     session_id: str = ""
     project_id: str = ""
+    # Provided so tools can consult durable state (past conversations). Optional
+    # because most tools are pure filesystem and need nothing but the root.
+    store: Any = None
 
 
 @dataclass(slots=True)

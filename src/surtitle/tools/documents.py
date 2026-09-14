@@ -54,6 +54,14 @@ SUPPORTED_TARGETS: dict[str, tuple[str, str]] = {
 # A cold start of LibreOffice can take tens of seconds on Windows.
 _DEFAULT_TIMEOUT = 180.0
 
+# One conversion at a time, process-wide.
+#
+# LibreOffice is a large single-instance office suite: it is happy enough on its
+# own, but concurrent starts on a loaded machine occasionally produce no output at
+# all. Serialising costs nothing for a tool that is used a few times per session
+# and removes an intermittent failure that is hard to attribute afterwards.
+_LO_LOCK = asyncio.Lock()
+
 
 def list_supported_targets() -> list[str]:
     """Target format names, for the tool schema and error messages."""
@@ -161,7 +169,8 @@ async def convert_document(
                 str(staging_dir),
                 str(source_path.absolute),
             ]
-            result = await _run(argv, timeout=timeout)
+            async with _LO_LOCK:
+                result = await _run(argv, timeout=timeout)
 
         if result.timed_out:
             return ToolResult(
