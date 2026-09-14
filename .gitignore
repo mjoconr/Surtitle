@@ -21,9 +21,12 @@ venv/
 .zig-cache/
 .zig-out/
 
-# Local configuration and secrets — never commit these
+# Local configuration and secrets — never commit these.
+# `.env*` also covers backup copies, which is the point: a backup of a file
+# holding API keys must not become committable just because its name differs.
 .env
-.env.local
+.env.*
+!.env.example
 .credentials.json
 settings.json
 

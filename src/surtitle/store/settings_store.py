@@ -294,6 +294,22 @@ class SettingsStore:
         self.credentials_path = settings.data_dir / CREDENTIALS_FILENAME
         self._stored: dict[str, Any] = {}
         self._credentials: dict[str, str] = {}
+        # Snapshot which credentials came from the launch configuration (the real
+        # environment, a .env file, or constructor kwargs) *before* effective()
+        # folds stored values into the same object.
+        #
+        # Without this snapshot a stored key becomes indistinguishable from an
+        # environment one after the first effective() call, so the UI reports it
+        # as read-only and the user cannot edit the key they just saved. That was
+        # a real, reported bug: once a key was entered it could never be changed.
+        self._launch_credentials: dict[str, str] = {
+            ref: value
+            for ref, value in (
+                ("DEEPSEEK_API_KEY", settings.deepseek_key()),
+                ("DEEPGRAM_API_KEY", settings.deepgram_key()),
+            )
+            if value and value.strip()
+        }
         self.load()
 
     # --- loading ---------------------------------------------------------
@@ -370,18 +386,18 @@ class SettingsStore:
 
     # --- credentials -----------------------------------------------------
     def _settings_value(self, ref: str) -> str | None:
-        """Return a credential that arrived through Settings (env or ``.env``).
+        """Return a credential supplied by the launch configuration.
 
         ``Settings`` is loaded by pydantic-settings, which reads ``.env`` files as
         well as the real environment. Those values are invisible to
-        ``os.environ``, so without this the UI would report a working key as
-        missing and then silently shadow it with whatever was saved here.
+        ``os.environ``, so without this a working key would be reported as missing
+        and then silently shadowed by anything saved here.
+
+        Only the snapshot taken at construction counts. Reading the live attribute
+        would also pick up values that :meth:`effective` wrote in, making a
+        stored key look like an environment one.
         """
-        if ref == "DEEPSEEK_API_KEY":
-            return self.settings.deepseek_key()
-        if ref == "DEEPGRAM_API_KEY":
-            return self.settings.deepgram_key()
-        return None
+        return self._launch_credentials.get(ref)
 
     def credential_value(self, ref: str) -> str | None:
         """Resolve a credential in the order the running process resolves it.

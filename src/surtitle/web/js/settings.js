@@ -341,10 +341,21 @@ export class SettingsPanel {
     verifyButton.type = "button";
     verifyButton.className = "button button--ghost";
     verifyButton.textContent = "Test";
-    verifyButton.disabled = !credential.configured;
+    verifyButton.disabled = !credential.configured && credential.writable === false;
+    verifyButton.title = credential.configured
+      ? "Check this key against the provider"
+      : "Check the key you typed, without saving it";
     verifyButton.addEventListener("click", () =>
-      this.verifyCredential(provider, verifyButton, error),
+      this.verifyCredential(provider, input, verifyButton, error),
     );
+
+    // Typing a key enables testing it; clearing the field falls back to the
+    // stored key, if there is one.
+    input.addEventListener("input", () => {
+      verifyButton.disabled =
+        !input.value.trim() && !credential.configured && credential.writable === false;
+      if (!error.hidden) error.hidden = true;
+    });
 
     actions.append(saveButton, verifyButton);
 
@@ -364,6 +375,21 @@ export class SettingsPanel {
     meta.textContent = `Get one at ${provider.docs_url}`;
 
     body.append(label, input, error, actions, meta);
+
+    if (credential.configured && credential.writable === false) {
+      // A field you cannot edit, with no explanation, is the worst possible
+      // outcome: it looks like a bug in the app rather than a precedence rule.
+      // Name the cause and the fix.
+      const locked = document.createElement("p");
+      locked.className = "notice";
+      locked.style.marginTop = "8px";
+      locked.textContent =
+        "This key comes from an environment variable or a .env file, which takes " +
+        "precedence over anything saved here — so editing it in the app would appear " +
+        "to do nothing. Unset it (or remove it from .env) and restart to manage it here.";
+      body.append(locked);
+    }
+
     card.append(body);
     return card;
   }
@@ -407,14 +433,18 @@ export class SettingsPanel {
     }
   }
 
-  async verifyCredential(provider, button, error) {
+  async verifyCredential(provider, input, button, error) {
     error.hidden = true;
     const original = button.textContent;
     button.textContent = "Testing…";
     button.disabled = true;
+    const draft = input.value.trim();
     try {
       const response = await fetch(`/api/credentials/${provider.api_key_env}/verify`, {
         method: "POST",
+        headers: { "Content-Type": "application/json" },
+        // The draft, when present, is tested without being saved.
+        body: JSON.stringify(draft ? { draft } : {}),
       });
       const payload = await response.json();
       if (!response.ok) {

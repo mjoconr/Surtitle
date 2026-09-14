@@ -52,6 +52,39 @@ def default_data_dir() -> Path:
     return Path(raw).expanduser()
 
 
+def app_root() -> Path:
+    """Directory configuration is resolved from.
+
+    In a source checkout this is the repository root, where ``.env`` belongs.
+    """
+    return Path(__file__).resolve().parent.parent.parent
+
+
+def candidate_env_files() -> tuple[Path, ...]:
+    """Where configuration is looked for, in loading order.
+
+    These are resolved to *absolute* paths on purpose. pydantic-settings resolves
+    a relative ``env_file`` against the current working directory, which makes the
+    effective configuration depend on where the process happened to start. That is
+    not hypothetical: the launcher runs from ``scripts/``, so a stray
+    ``scripts/.env`` silently set the STT model and overrode every shipped
+    default, producing a voice loop that looked like a code bug.
+
+    Real environment variables still take precedence over all of these.
+    """
+    root = app_root()
+    candidates = [root / ".env.local", root / ".env"]
+    package_env = Path(__file__).resolve().parent / ".env"
+    if package_env not in candidates:
+        candidates.append(package_env)
+    return tuple(candidates)
+
+
+def loaded_env_files() -> tuple[Path, ...]:
+    """Which configuration files exist and were therefore read."""
+    return tuple(path for path in candidate_env_files() if path.is_file())
+
+
 class Settings(BaseSettings):
     """Runtime configuration.
 
@@ -60,7 +93,8 @@ class Settings(BaseSettings):
     """
 
     model_config = SettingsConfigDict(
-        env_file=(".env", ".env.local"),
+        # Absolute paths, so the answer does not depend on the launch directory.
+        env_file=candidate_env_files(),
         env_file_encoding="utf-8",
         extra="ignore",
         case_sensitive=False,

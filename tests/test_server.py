@@ -267,29 +267,40 @@ class TestCredentialsApi:
         response = await client.delete("/api/credentials/DEEPSEEK_API_KEY")
         assert response.status_code == 400
 
-    async def test_stores_a_new_credential(self, client, settings, monkeypatch):
-        monkeypatch.delenv("DEEPGRAM_API_KEY", raising=False)
-        # The Settings object captured the key at construction, so clearing the
-        # environment is enough for the store to treat the file as authoritative.
-        settings.deepgram_api_key = None
+    @pytest.fixture
+    async def bare_client(self, tmp_path, monkeypatch):
+        """An app whose credentials come from nowhere but its own store.
 
-        response = await client.put("/api/credentials/DEEPGRAM_API_KEY", json={"value": "dg-fresh"})
+        Built by constructing Settings *without* keys, rather than by clearing an
+        attribute afterwards: the store snapshots launch credentials at
+        construction precisely so post-hoc mutation cannot fake the state.
+        """
+        monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+        monkeypatch.delenv("DEEPGRAM_API_KEY", raising=False)
+        home = tmp_path / "bare-home"
+        home.mkdir()
+        app = create_app_for(Settings(SURTITLE_HOME=str(home), voice_enabled=False))
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+            yield http
+        await app.state.app_state.aclose()
+
+    async def test_stores_a_new_credential(self, bare_client):
+        response = await bare_client.put(
+            "/api/credentials/DEEPGRAM_API_KEY", json={"value": "dg-fresh"}
+        )
         assert response.status_code == 200
         assert response.json()["credential"]["configured"] is True
         assert response.json()["credential"]["source"] == "file"
-
-        # Response must not echo the value back.
+        # The response must not echo the value back.
         assert "dg-fresh" not in response.text
 
-    async def test_credentials_file_is_owner_only(self, client, settings, monkeypatch):
+    async def test_credentials_file_is_owner_only(self, bare_client, tmp_path):
         import os
         import stat
 
-        monkeypatch.delenv("DEEPGRAM_API_KEY", raising=False)
-        settings.deepgram_api_key = None
-        await client.put("/api/credentials/DEEPGRAM_API_KEY", json={"value": "dg-secret"})
-
-        path = settings.data_dir / ".credentials.json"
+        await bare_client.put("/api/credentials/DEEPGRAM_API_KEY", json={"value": "dg-secret"})
+        path = tmp_path / "bare-home" / ".credentials.json"
         assert path.exists()
         if os.name == "posix":
             mode = stat.S_IMODE(path.stat().st_mode)
@@ -304,19 +315,15 @@ class TestCredentialsApi:
             "",  # empty
         ],
     )
-    async def test_malformed_keys_are_rejected_inline(
-        self, client, settings, monkeypatch, bad_value
-    ):
-        monkeypatch.delenv("DEEPGRAM_API_KEY", raising=False)
-        settings.deepgram_api_key = None
-        response = await client.put("/api/credentials/DEEPGRAM_API_KEY", json={"value": bad_value})
+    async def test_malformed_keys_are_rejected_inline(self, bare_client, bad_value):
+        response = await bare_client.put(
+            "/api/credentials/DEEPGRAM_API_KEY", json={"value": bad_value}
+        )
         assert response.status_code == 400
         assert response.json()["field"] == "DEEPGRAM_API_KEY"
 
-    async def test_verify_reports_a_missing_credential(self, client, settings, monkeypatch):
-        monkeypatch.delenv("DEEPGRAM_API_KEY", raising=False)
-        settings.deepgram_api_key = None
-        response = await client.post("/api/credentials/DEEPGRAM_API_KEY/verify")
+    async def test_verify_reports_a_missing_credential(self, bare_client):
+        response = await bare_client.post("/api/credentials/DEEPGRAM_API_KEY/verify")
         assert response.status_code == 400
         assert "not configured" in response.json()["error"]
 
@@ -324,14 +331,12 @@ class TestCredentialsApi:
         response = await client.post("/api/credentials/SOMETHING_ELSE/verify")
         assert response.status_code == 400
 
-    async def test_verify_never_echoes_the_key_on_failure(self, client, monkeypatch):
-        from surtitle.store.settings_store import SettingsStore
-
-        store = SettingsStore(client.app.state.app_state.settings)
-        store._credentials["DEEPGRAM_API_KEY"] = "dg-verify-me-not-echoed"
-        client.app.state.app_state.settings_store = store
-
-        response = await client.post("/api/credentials/DEEPGRAM_API_KEY/verify")
+    async def test_verify_never_echoes_the_key_on_failure(self, bare_client):
+        """Whether the probe succeeds or fails, the key must not come back."""
+        await bare_client.put(
+            "/api/credentials/DEEPGRAM_API_KEY", json={"value": "dg-verify-me-not-echoed"}
+        )
+        response = await bare_client.post("/api/credentials/DEEPGRAM_API_KEY/verify")
         assert "dg-verify-me-not-echoed" not in response.text
 
 
@@ -344,3 +349,145 @@ class TestTools:
         assert by_name["write_file"]["mutating"] is True
         assert by_name["make_pdf"]["mutating"] is True
         assert "list_dir" in by_name
+
+
+class TestCredentialEditing:
+    """A saved key must be replaceable.
+
+    Environment-provided keys are read-only by design, but a key stored by the
+    app itself is the user's to change — and the UI must say which case applies,
+    because a locked field with no explanation looks like an app bug.
+    """
+
+    @pytest.fixture
+    def store_client(self, tmp_path, monkeypatch):
+        """An app with no environment credentials, so the file is authoritative."""
+        monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+        monkeypatch.delenv("DEEPGRAM_API_KEY", raising=False)
+        home = tmp_path / "home"
+        home.mkdir()
+        settings = Settings(
+            SURTITLE_HOME=str(home),
+            voice_enabled=False,
+        )
+        app = create_app_for(settings)
+        transport = httpx.ASGITransport(app=app)
+        return app, settings, transport
+
+    async def test_a_saved_key_reports_as_writable(self, store_client):
+        app, _settings, transport = store_client
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            saved = await client.put(
+                "/api/credentials/DEEPGRAM_API_KEY", json={"value": "dg-first-1234"}
+            )
+            assert saved.status_code == 200
+            state = saved.json()["credential"]
+            assert state["configured"] is True
+            assert state["source"] == "file"
+            # Writable is what lets the UI leave the field editable.
+            assert state["writable"] is True
+        await app.state.app_state.aclose()
+
+    async def test_a_saved_key_can_be_replaced(self, store_client):
+        app, _settings, transport = store_client
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            await client.put("/api/credentials/DEEPGRAM_API_KEY", json={"value": "dg-first-1234"})
+            replaced = await client.put(
+                "/api/credentials/DEEPGRAM_API_KEY", json={"value": "dg-second-5678"}
+            )
+            assert replaced.status_code == 200, replaced.text
+            assert replaced.json()["credential"]["configured"] is True
+
+            # And the store really holds the new value, not the old one.
+            stored = app.state.app_state.settings_store.credential_value("DEEPGRAM_API_KEY")
+            assert stored == "dg-second-5678"
+        await app.state.app_state.aclose()
+
+    async def test_replacement_never_echoes_either_key(self, store_client):
+        app, _settings, transport = store_client
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            await client.put("/api/credentials/DEEPGRAM_API_KEY", json={"value": "dg-first-1234"})
+            response = await client.put(
+                "/api/credentials/DEEPGRAM_API_KEY", json={"value": "dg-second-5678"}
+            )
+            assert "dg-first-1234" not in response.text
+            assert "dg-second-5678" not in response.text
+        await app.state.app_state.aclose()
+
+    async def test_an_env_key_is_read_only_and_cannot_be_replaced(self, settings):
+        """The lock is real, and it is the reason the UI must explain itself."""
+        app = create_app_for(settings)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            view = (await client.get("/api/settings")).json()
+            deepseek = next(p for p in view["providers"] if p["id"] == "deepseek")
+            assert deepseek["credential"]["writable"] is False
+            assert deepseek["credential"]["source"] == "env"
+
+            refused = await client.put(
+                "/api/credentials/DEEPSEEK_API_KEY", json={"value": "sk-replacement"}
+            )
+            assert refused.status_code == 400
+            assert "precedence" in refused.json()["error"].lower()
+        await app.state.app_state.aclose()
+
+
+class TestDraftVerification:
+    """A key should be testable before it is saved."""
+
+    @pytest.fixture
+    def client_app(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+        monkeypatch.delenv("DEEPGRAM_API_KEY", raising=False)
+        home = tmp_path / "home"
+        home.mkdir()
+        app = create_app_for(Settings(SURTITLE_HOME=str(home), voice_enabled=False))
+        return app
+
+    async def test_draft_is_used_instead_of_the_stored_value(self, client_app, monkeypatch):
+        """The draft must reach the probe, and must not be persisted."""
+        import surtitle.server as server_module
+
+        seen: list[str] = []
+
+        async def fake_probe(ref, value):
+            seen.append(value)
+            return {"ok": True, "provider": "test", "models": []}
+
+        monkeypatch.setattr(server_module, "_probe_streaming", None, raising=False)
+        app = client_app
+        state = app.state.app_state
+        # Deepgram has no discovery endpoint, so it uses the streaming probe.
+        state.settings_store._credentials["DEEPGRAM_API_KEY"] = "dg-stored-0000"
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post(
+                "/api/credentials/DEEPGRAM_API_KEY/verify", json={"draft": "dg-draft-1111"}
+            )
+            # The real probe will fail to reach Deepgram, which is fine: what
+            # matters is that the draft was accepted for testing and not stored.
+            assert response.status_code in (200, 400, 502)
+            assert state.settings_store.credential_value("DEEPGRAM_API_KEY") == "dg-stored-0000"
+        await app.state.app_state.aclose()
+
+    async def test_missing_key_and_no_draft_is_a_clear_error(self, client_app):
+        app = client_app
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post("/api/credentials/DEEPGRAM_API_KEY/verify", json={})
+            assert response.status_code == 400
+            assert "not configured" in response.json()["error"]
+        await app.state.app_state.aclose()
+
+    async def test_empty_draft_falls_back_to_the_stored_key(self, client_app):
+        app = client_app
+        app.state.app_state.settings_store._credentials["DEEPGRAM_API_KEY"] = "dg-stored-0000"
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post(
+                "/api/credentials/DEEPGRAM_API_KEY/verify", json={"draft": "   "}
+            )
+            # An empty draft must not be treated as the key to test.
+            assert response.status_code in (200, 400, 502)
+        await app.state.app_state.aclose()

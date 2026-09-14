@@ -165,4 +165,26 @@ one utterance cannot fire several barge-ins in a row.
 | `SURTITLE_TTS_SAMPLE_RATE` | `24000` | Output sample rate |
 
 To verify the voice path end to end, run `./scripts/run.sh doctor` — it opens brief
-sockets to both the STT and TTS endpoints and reports whether the key is accepted.
+sockets to both the STT and TTS endpoints and reports whether the key is accepted,
+and prints which configuration files were read.
+
+### If voice fails to connect
+
+Read the warning. A rejected WebSocket is reported with the server's own reason,
+which names the problem exactly:
+
+```
+Deepgram STT disconnected (HTTP 400: Failed to deserialize query parameters:
+Model must have exactly 3 parts separated by hyphens, such as "flux-general-en".
+Got: nova-3)
+```
+
+That message means a Nova model reached the Flux endpoint — almost always an
+overriding `DEEPGRAM_STT_MODEL` from the environment or a `.env` file. `doctor`
+lists the files it read, so the source is identifiable rather than guessed at.
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `Model must have exactly 3 parts` | A Nova model on `/v2/listen` | Use `flux-general-en`, or set `SURTITLE_STT_API=v1` with `DEEPGRAM_STT_MODEL=nova-3` |
+| `Unknown query parameters: …` | A parameter this endpoint does not take | Report it; the parameter sets are pinned by `tests/test_voice_clients.py` |
+| `HTTP 401: Invalid credentials` | The key itself | Check the key in Settings or `doctor` |

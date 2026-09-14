@@ -340,3 +340,73 @@ def test_posix_interpreter_is_discovered(tmp_path):
     python = project_env_python(tmp_path)
     assert python is not None
     assert python.name in {"python", "python3"} or python.name.startswith("python3")
+
+
+class TestCredentialEditability:
+    """A key the app stored must stay editable across repeated reads.
+
+    Regression test for a reported bug: once a key was entered it could never be
+    changed. `effective()` writes the stored key into the same Settings object
+    that `credential_state` consults, so after the first call a file-stored key
+    looked like an environment one and the UI locked the field.
+    """
+
+    def test_a_saved_key_is_reported_writable_before_and_after_effective(self, tmp_path):
+        from surtitle.config import Settings
+        from surtitle.store.settings_store import SettingsStore
+
+        store = SettingsStore(Settings(SURTITLE_HOME=str(tmp_path)))
+        store.set_credential("DEEPGRAM_API_KEY", "dg-first-0000")
+
+        before = store.credential_state("DEEPGRAM_API_KEY")
+        assert (before.configured, before.writable, before.source) == (True, True, "file")
+
+        store.effective()
+        after = store.credential_state("DEEPGRAM_API_KEY")
+        assert (after.configured, after.writable, after.source) == (True, True, "file"), (
+            "effective() made a stored key look like an environment key, "
+            "which locks the field in the UI"
+        )
+
+    def test_a_saved_key_can_be_replaced_repeatedly(self, tmp_path):
+        from surtitle.config import Settings
+        from surtitle.store.settings_store import SettingsStore
+
+        store = SettingsStore(Settings(SURTITLE_HOME=str(tmp_path)))
+        for value in ("dg-one", "dg-two", "dg-three"):
+            store.effective()
+            store.set_credential("DEEPGRAM_API_KEY", value)
+            assert store.credential_value("DEEPGRAM_API_KEY") == value
+
+    def test_the_newest_saved_value_wins_over_an_earlier_one(self, tmp_path):
+        """The reported symptom: the first key kept coming back."""
+        from surtitle.config import Settings
+        from surtitle.store.settings_store import SettingsStore
+
+        store = SettingsStore(Settings(SURTITLE_HOME=str(tmp_path)))
+        store.set_credential("DEEPGRAM_API_KEY", "dg-original")
+        store.effective()
+        store.set_credential("DEEPGRAM_API_KEY", "dg-replacement")
+        store.effective()
+        assert store.credential_value("DEEPGRAM_API_KEY") == "dg-replacement"
+
+    def test_a_launch_credential_stays_read_only(self, tmp_path):
+        """Environment precedence must still hold: it is not a bug, it is a rule."""
+        from surtitle.config import Settings
+        from surtitle.store.settings_store import SettingsStore
+
+        store = SettingsStore(
+            Settings(SURTITLE_HOME=str(tmp_path), DEEPGRAM_API_KEY="dg-from-launch")
+        )
+        state = store.credential_state("DEEPGRAM_API_KEY")
+        assert state.configured is True
+        assert state.source == "env"
+        assert state.writable is False
+
+        store.effective()
+        # Still read-only after effective(), and still refused on write.
+        assert store.credential_state("DEEPGRAM_API_KEY").writable is False
+        from surtitle.store.settings_store import SettingsValidationError
+
+        with pytest.raises(SettingsValidationError, match="precedence"):
+            store.set_credential("DEEPGRAM_API_KEY", "dg-replacement")

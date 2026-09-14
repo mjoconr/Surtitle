@@ -179,11 +179,27 @@ Global preferences live in the app data directory and are editable in the app:
 - `.credentials.json` — API keys only. Created `0600` inside a `0700` directory, and
   **refused on load** if it is readable beyond its owner.
 
-Precedence: real environment variables → `.env.local` → `.env` → saved settings.
-A key supplied by the environment is shown as read-only in the UI, because saving
-over it would silently do nothing.
+Configuration is read from exactly one place per setting, in this order:
 
-Copy `.env.example` for a documented template of every setting.
+1. **Real environment variables** (`DEEPSEEK_API_KEY=…` in your shell)
+2. **`.env.local`**, then **`.env`**, in the *repository root*
+3. **Saved settings** in the app data directory
+
+Two consequences worth knowing:
+
+- **A key supplied by steps 1–2 is read-only in the UI**, and the field says why.
+  Environment configuration wins, so editing it in the app would appear to do
+  nothing. Unset it (or remove it from `.env`) and restart to manage it in the
+  app instead.
+- **Environment files are resolved to absolute paths, anchored to the repository
+  root** — never relative to wherever the process started. Relative resolution
+  previously meant a stray `scripts/.env` could silently override every default,
+  which produced an STT model mismatch that looked like a code bug. Run
+  `./scripts/run.sh doctor` to see exactly which config files were read.
+
+Copy `.env.example` to `.env` in the repository root for a documented template of
+every setting. Do not put a `.env` in `scripts/`: it is not read, and it will
+confuse you.
 
 ## Architecture
 

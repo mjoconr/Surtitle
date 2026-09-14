@@ -63,12 +63,28 @@ def doctor(
     ),
 ) -> None:
     """Check that this machine can run Surtitle."""
+    from surtitle.config import loaded_env_files
     from surtitle.doctor import format_report, run_checks
 
     store = _open_store()
     assert store is not None
+    # `effective()` folds stored credentials into the live settings. Without it a
+    # key saved through the app's own Settings screen is invisible here, and a
+    # correctly configured install reports as broken.
     settings = store.effective()
     setup_logging(settings)
+
+    # Say which files were read: a stray .env silently overrides defaults, and
+    # that is otherwise impossible to see.
+    sources = loaded_env_files()
+    if sources:
+        console.print(
+            "[dim]Configuration read from: "
+            + ", ".join(readable_path(path) for path in sources)
+            + "[/dim]"
+        )
+    else:
+        console.print("[dim]No .env file found; using defaults and saved settings.[/dim]")
 
     report = asyncio.run(run_checks(settings, live=not offline))
     sys.stdout.write(format_report(report))

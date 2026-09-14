@@ -147,14 +147,23 @@ def build_api(state: AppState) -> APIRouter:
         return {"credential": state_repr.to_dict()}
 
     @api.post("/credentials/{ref}/verify")
-    async def verify_credential(ref: str) -> dict[str, Any]:
+    async def verify_credential(
+        ref: str, body: dict[str, Any] | None = Body(None)
+    ) -> dict[str, Any]:
         """Probe a credential live.
 
         There is no persisted valid/invalid status: a key can be revoked at any
         time, so a stored "valid" flag would be a lie. The check happens on
         demand, which is also how the model list is refreshed.
+
+        A ``draft`` value may be supplied to test a key *before* saving it, which
+        is the point of a Test button next to an input. The draft is used for this
+        request only and is never stored.
         """
-        value = state.settings_store.credential_value(ref)
+        draft = (body or {}).get("draft")
+        value = str(draft).strip() if isinstance(draft, str) and draft.strip() else None
+        if value is None:
+            value = state.settings_store.credential_value(ref)
         if not value:
             return _error(400, "That credential is not configured.", field=ref)
 
