@@ -253,6 +253,10 @@ class AgentLoop:
         self.system_prompt = system_prompt or build_system_prompt(root.name)
         self._seq = 0
         self._cancelled = asyncio.Event()
+        # What this turn has produced so far. The session records these when a turn
+        # is interrupted, so a cancelled exchange is not lost from history.
+        self.partial_text: str = ""
+        self.partial_spoken: str = ""
         # Side-channel emitter for events that are informative rather than
         # control-flow (thinking, usage). Set by the session.
         self._emitter: Callable[[Event], Awaitable[None]] | None = None
@@ -297,6 +301,8 @@ class AgentLoop:
         because audio must start streaming while the loop is still running.
         """
         state = _TurnState(messages=[*history, {"role": "user", "content": user_text}])
+        self.partial_text = ""
+        self.partial_spoken = ""
         client = await self._client_or_create()
 
         if self.store and self.session_id:
@@ -461,6 +467,7 @@ class AgentLoop:
             if not chunk.text:
                 return
             state.spoken_text.append(chunk.text)
+            self.partial_spoken = " ".join(state.spoken_text)
             # Audio starts here, while the loop is still running: this is what
             # makes the reply feel immediate rather than batched.
             if on_chunk is not None:
@@ -471,6 +478,7 @@ class AgentLoop:
         if not chunk.text:
             return
         state.assistant_text.append(chunk.text)
+        self.partial_text = "".join(state.assistant_text)
         yield self._event(EventKind.AGENT_TEXT, text=chunk.text, final=chunk.final)
 
     # --- tools -----------------------------------------------------------

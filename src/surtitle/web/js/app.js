@@ -984,10 +984,24 @@ async function selectSession(sessionId) {
       if (message.role === "user") {
         const turn = beginTurn("user");
         turn.bubble.textContent = message.content;
+      } else if (message.role === "system") {
+        // Attachment records and similar notices: context, not something to answer.
+        const turn = beginTurn("assistant");
+        appendShown(turn, message.content);
       } else {
         const turn = beginTurn("assistant");
-        if (message.spoken) appendSaid(turn, message.spoken);
-        else appendShown(turn, message.content);
+        // Show the spoken line first when there was one, then the full text.
+        //
+        // This previously rendered `spoken` *instead of* `content`, so reopening a
+        // conversation showed only the short spoken summary and the real answer —
+        // tables, paths, detail — silently vanished. Keeping the two channels
+        // distinct across a reload is the reason they are stored separately.
+        if (message.spoken && message.spoken.trim()) {
+          appendSaid(turn, message.spoken);
+        }
+        if (message.content && message.content.trim() !== (message.spoken || "").trim()) {
+          appendShown(turn, message.content);
+        }
       }
     }
     state.currentTurn = null;

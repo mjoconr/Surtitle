@@ -255,16 +255,18 @@ export class Capture {
     this.maxLevel = Math.max(this.maxLevel, Math.min(1, rms * 6));
     if (this.onLevel) this.onLevel(Math.min(1, rms * 6));
 
+    // Matching the worklet's conservative thresholds: a false interruption is
+    // worse than a slightly late one.
     const withinGrace = performance.now() < this._graceUntil;
-    if (rms > 0.02 && !withinGrace) {
+    if (rms > 0.05 && !withinGrace) {
       this._speechFrames += 1;
-      if (this._speechFrames >= 3 && !this._speaking) {
+      if (this._speechFrames >= 4 && !this._speaking) {
         this._speaking = true;
         if (this.onSpeechStart) this.onSpeechStart();
       }
     } else {
       this._speechFrames = 0;
-      if (this._speaking && rms < 0.01) this._speaking = false;
+      if (this._speaking && rms < 0.03) this._speaking = false;
     }
   }
 
@@ -295,7 +297,8 @@ export class Capture {
 
   /** Tell capture that playback began, so the speaker tail is ignored. */
   notifyPlayback(playing) {
-    if (playing) this._graceUntil = performance.now() + 250;
+    // 400 ms, matching the worklet's grace window.
+    if (playing) this._graceUntil = performance.now() + 400;
     if (this.node && this.backend === "worklet" && this.node.port) {
       this.node.port.postMessage({ type: "playback", value: playing });
     }

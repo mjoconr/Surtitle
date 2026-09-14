@@ -255,8 +255,13 @@ class TestBargeIn:
             receive_until(socket, {"ready"}, limit=5)
             socket.send_text(json.dumps({"kind": "text", "data": {"text": "go"}}))
 
-            # Wait until the model has begun, then interrupt.
+            # Wait until the model has begun, then interrupt. A real interruption
+            # carries transcribed speech; that is what the server now requires.
             receive_until(socket, {"say"}, limit=40)
+            live = app.state.app_state.sessions.get(session.id)
+            assert live is not None
+            live._speaking = True
+            live._speech_since_playback = True
             socket.send_text(json.dumps({"kind": "barge_in", "data": {}}))
 
             # Drain until the turn admits it was stopped. Reading a fixed

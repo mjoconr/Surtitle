@@ -776,7 +776,9 @@ async def _dispatch(session: Session, payload: dict[str, Any]) -> None:
     elif command.kind is CommandKind.TEXT:
         await session.handle_text(str(data.get("text") or ""))
     elif command.kind is CommandKind.BARGE_IN:
-        await session.cancel_turn()
+        # The client detects loudness, which cannot tell the user from the
+        # speakers. It requests; the server decides, using transcribed speech.
+        await session.cancel_turn(require_speech=True)
     elif command.kind is CommandKind.APPROVAL:
         await session.handle_approval(
             str(data.get("call_id") or ""),

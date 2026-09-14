@@ -21,11 +21,18 @@ const FRAME_SAMPLES = 512; // ~32 ms at 16 kHz
 
 // Speech must exceed this RMS and then persist for this many frames before it
 // counts as the user taking the floor.
-const SPEECH_RMS_THRESHOLD = 0.02;
-const CONSECUTIVE_SPEECH_FRAMES = 3;
+//
+// These are deliberately conservative. A false positive truncates the agent
+// mid-sentence, which is far worse than an interruption arriving a fraction of a
+// second late: in a real session the agent's own voice through the speakers
+// tripped a 0.02 threshold and cut replies off. 0.05 sustained for four frames is
+// roughly 130 ms of speech, which a person talking over the agent easily reaches
+// while speaker bleed does not.
+const SPEECH_RMS_THRESHOLD = 0.05;
+const CONSECUTIVE_SPEECH_FRAMES = 4;
 // Ignore input right after playback starts: the speaker tail can trip the
 // threshold before echo cancellation has converged.
-const SPEECH_GRACE_FRAMES = 6;
+const SPEECH_GRACE_FRAMES = 12;
 
 class CaptureProcessor extends AudioWorkletProcessor {
   constructor() {
@@ -100,7 +107,7 @@ class CaptureProcessor extends AudioWorkletProcessor {
       this._speechFrames = 0;
       // Require a real pause before re-arming, so one utterance cannot fire
       // several barge-ins in a row.
-      if (this._speaking && rms < SPEECH_RMS_THRESHOLD * 0.5) {
+      if (this._speaking && rms < SPEECH_RMS_THRESHOLD * 0.6) {
         this._speaking = false;
       }
     }

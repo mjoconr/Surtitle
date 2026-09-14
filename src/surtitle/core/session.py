@@ -82,6 +82,13 @@ class Session:
     # how many times the microphone has been opened.
     _frames_in: int = 0
     _mic_opens: int = 0
+    # True while the agent's own voice is playing, and whether anything has been
+    # transcribed since it began. Loudness cannot tell a person from the speakers;
+    # a transcript can, and only a transcript may interrupt a turn.
+    _speaking: bool = False
+    _speech_since_playback: bool = False
+    # Set when an interrupted turn was already written to the transcript.
+    _rolled_back: bool = False
     registry: Any = None
     mcp_manager: Any = None
     project_config: Any = None
@@ -291,6 +298,10 @@ class Session:
         only the final fragment of a sentence. :meth:`_accumulate` handles
         cumulative and fragment-shaped updates with the same logic.
         """
+        if event.text.strip() and self._speaking:
+            # Someone is talking over the agent. This is the only reliable signal
+            # that distinguishes a person from the speakers.
+            self._speech_since_playback = True
         self._state.interim = self._accumulate(self._state.interim, event.text)
         await self.emit(
             EventKind.INTERIM,
@@ -382,6 +393,22 @@ class Session:
             if self.tts is not None:
                 with contextlib.suppress(Exception):
                     await self.tts.barge_in()
+
+            # Record what the turn produced before it was interrupted. Skipping this
+            # is what made the agent look like it had forgotten the conversation: the
+            # user's message is stored by the loop while the assistant's reply was
+            # not, so every interrupted exchange vanished from the history the model
+            # receives on the next turn, and the user's question appeared unanswered.
+            if self.store and self.session_id:
+                with contextlib.suppress(Exception):
+                    self.store.add_message(
+                        self.session_id,
+                        "assistant",
+                        loop.partial_text,
+                        spoken=loop.partial_spoken or None,
+                    )
+                    self._rolled_back = True
+
             with contextlib.suppress(Exception):
                 await self.emit(EventKind.STATE, state=SessionState.IDLE.value, reason="stopped")
             raise
@@ -409,7 +436,19 @@ class Session:
         await self._outbox.put(event)
 
     def _build_history(self) -> list[ChatMessage]:
-        """Rebuild model context from the stored transcript."""
+        """Rebuild model context from the stored transcript.
+
+        ``_rolled_back`` marks a turn whose exchange was already written during
+        cancellation, so the current user message must not be appended twice.
+        """
+        if self._rolled_back:
+            self._rolled_back = False
+            messages = self.store.list_messages(self.session_id, limit=_HISTORY_LIMIT)
+            return [
+                {"role": message.role, "content": message.content}
+                for message in messages
+                if message.role in {"user", "assistant"} and message.content
+            ]
         messages = self.store.list_messages(self.session_id, limit=_HISTORY_LIMIT)
         history: list[ChatMessage] = []
         for message in messages:
@@ -444,6 +483,8 @@ class Session:
         cannot drift out of sync with what is actually being played.
         """
         self._set_state(SessionState.SPEAKING)
+        self._speaking = True
+        self._speech_since_playback = False
 
         # Anything the user said while the previous turn was finishing must be
         # handed over BEFORE suppression starts. Suppression exists to stop the
@@ -466,13 +507,15 @@ class Session:
 
     async def _on_speaking_finished(self) -> None:
         """Return to idle once the last sentence has been synthesised."""
+        self._speaking = False
         if self.stt is not None:
             self.stt.set_suppression(False)
         if self._state.state is SessionState.SPEAKING:
             self._set_state(SessionState.LISTENING if self._state.mic_open else SessionState.IDLE)
 
     async def barge_in(self) -> None:
-        """Interrupt speech immediately: called when the user starts talking."""
+        """Stop speaking immediately and return to listening."""
+        self._speaking = False
         if self.tts is not None:
             with contextlib.suppress(Exception):
                 await self.tts.barge_in()
@@ -480,8 +523,20 @@ class Session:
             self.stt.set_suppression(False)
         self._set_state(SessionState.LISTENING if self._state.mic_open else SessionState.IDLE)
 
-    async def cancel_turn(self) -> None:
-        """Stop the running turn and any speech."""
+    async def cancel_turn(self, *, require_speech: bool = False) -> None:
+        """Stop the running turn, and any speech.
+
+        ``require_speech`` guards the interruption path against the agent hearing
+        itself. The client detects loudness, which cannot tell a person from the
+        speakers, so only a *transcript* may cancel work in progress. An explicit
+        stop passes ``require_speech=False`` and always wins.
+        """
+        if require_speech and not self._speech_since_playback:
+            log.info(
+                "ignoring an interruption with no transcribed speech behind it "
+                "(the agent's own voice is the likely cause)"
+            )
+            return
         if self._turn is not None and not self._turn.done():
             self._turn.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):

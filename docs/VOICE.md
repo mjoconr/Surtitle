@@ -271,6 +271,31 @@ synthesised audio for text that was sent; leaving the socket open means that bac
 arrives later and sounds like the agent ignoring the interruption. Closing discards it
 by construction, and the next sentence simply opens a fresh socket.
 
+### Interruption requires speech, not loudness
+
+The client detects a *level* for responsiveness, but level cannot tell a person
+from the agent's own speakers. In a real session that distinction was missing and
+the consequence was visible: replies were cut off mid-sentence, and two user
+utterances were stored with no reply after them.
+
+So the client only **requests** an interruption. The server decides, and the
+evidence it requires is a **transcript** — someone actually talking while the agent
+speaks. An explicit stop passes the guard and always wins.
+
+The client's detector is deliberately conservative for the same reason: about
+130 ms of sustained speech above 0.05 RMS, with a 400 ms grace window after
+playback begins so the speaker tail cannot trip it before echo cancellation has
+converged. A false interruption is worse than one arriving a fraction of a second
+late.
+
+### An interrupted turn is still recorded
+
+Cancelling a turn used to skip persisting it: the user's message was stored while
+the assistant's reply was not. Every interrupted exchange therefore vanished from
+the model's history, which reads as the agent forgetting the conversation — and
+left questions looking unanswered. A partial reply is now written on cancellation,
+flagged so the next turn does not append the user message twice.
+
 ### False-positive control
 
 A single loud spike must not truncate a sentence, so detection requires the threshold
