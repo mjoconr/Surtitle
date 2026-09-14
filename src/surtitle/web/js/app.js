@@ -435,22 +435,36 @@ function handleEvent(event) {
       break;
     }
     case "state": {
-      if (data.state) setAgentState(data.state);
+      if (data.state) {
+        setAgentState(data.state);
+        // A cancellation reports `idle` without ever sending `done`, so the
+        // release has to happen here too.
+        if (data.state !== "awaiting_approval") clearApproval();
+      }
       break;
     }
     case "interim": {
-      const text = data.text || "";
+      const text = (data.text || "").trim();
       el.captions.replaceChildren();
       if (text) {
-        const span = node("span", data.final ? null : "captions__pending", text);
-        el.captions.append(span);
+        // Labelled, because unlabelled text floating above the composer reads as
+        // a stray marker rather than something you said.
+        el.captions.append(node("span", "captions__speaker", "You said"));
+        el.captions.append(node("span", data.final ? null : "captions__pending", text));
+      } else if (state.micOpen) {
+        // Capture is running but nothing has been recognised yet.
+        el.captions.append(node("span", "captions__hint", "Listening…"));
       }
       break;
     }
     case "user_text": {
+      // A new turn supersedes anything outstanding: if an approval was waiting,
+      // the turn that asked for it is gone.
+      clearApproval();
       const turn = beginTurn("user");
       turn.bubble.textContent = data.text || "";
       state.currentTurn = null;
+      el.captions.replaceChildren();
       break;
     }
     case "say": {
@@ -532,6 +546,9 @@ function handleEvent(event) {
       break;
     }
     case "error": {
+      // An errored turn cannot still be waiting for approval, and a stuck prompt
+      // is worse than no prompt: it blocks the composer indefinitely.
+      clearApproval();
       const turn = state.currentTurn || beginTurn("assistant");
       appendError(turn, data.message || "Something went wrong.");
       setAgentState("error");
@@ -624,6 +641,14 @@ const playback = new Playback({
     capture.notifyPlayback(false);
     setAgentState(state.micOpen ? "listening" : "idle");
   },
+  onBlocked: () => {
+    // The agent produced speech but the browser will not play it. Say so, with
+    // the fix, rather than leaving the user staring at a silent page.
+    toast(
+      "Audio is blocked by the browser. Click anywhere on the page and try again.",
+      "error",
+    );
+  },
 });
 
 const connection = new Connection({
@@ -652,7 +677,20 @@ async function toggleMic() {
       el.micLabel.textContent = "Mic off";
       connection.sendCommand("mic", { open: false });
       setAgentState("idle");
+      el.captions.replaceChildren();
       return;
+    }
+
+    // Unlock audio output here, inside the click. An AudioContext created later —
+    // when the first audio chunk arrives over the socket — is created outside a
+    // user gesture, so it starts suspended and can then never be resumed. The
+    // result is a reply that silently never plays, with no error anywhere.
+    const outputReady = await playback.unlock();
+    if (!outputReady) {
+      toast(
+        "Your browser blocked audio playback. Click anywhere on the page, then try again.",
+        "error",
+      );
     }
 
     await capture.start();
@@ -662,6 +700,8 @@ async function toggleMic() {
     el.micLabel.textContent = "Listening";
     connection.sendCommand("mic", { open: true });
     setAgentState("listening");
+    el.captions.replaceChildren();
+    el.captions.append(node("span", "captions__hint", "Listening…"));
   } catch (error) {
     // A denied microphone must not block the text-only path.
     toast(

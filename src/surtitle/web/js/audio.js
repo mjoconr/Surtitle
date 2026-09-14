@@ -112,26 +112,72 @@ export class Capture {
 }
 
 export class Playback {
-  constructor({ onStart, onIdle, sampleRate = 24000 }) {
+  constructor({ onStart, onIdle, onBlocked, sampleRate = 24000 }) {
     this.onStart = onStart;
     this.onIdle = onIdle;
+    // Called when audio arrives but the output context is not running, so the
+    // user is told instead of hearing nothing.
+    this.onBlocked = onBlocked;
     this.sampleRate = sampleRate;
     this.context = null;
     this.gain = null;
     this.sources = new Set();
     this.nextTime = 0;
     this.playing = false;
+    // Set by unlock(); false means playback will be silent until a gesture.
+    this.unlocked = false;
+    this._blockedReported = false;
     // Small cushion so consecutive sentences join without a click.
     this.leadTime = 0.06;
   }
 
+  /**
+   * Create and start the audio context *inside a user gesture*.
+   *
+   * This matters more than it looks. An AudioContext created outside a user
+   * gesture starts suspended, and `resume()` then rejects because activation has
+   * been consumed — leaving playback silently doing nothing. Creating the context
+   * on the mic click (a real gesture) means it is already running by the time the
+   * first audio chunk arrives over the socket.
+   */
+  async unlock() {
+    try {
+      const context = this._ensureContext();
+      if (context.state !== "running") {
+        await context.resume();
+      }
+      // A near-silent buffer proves the graph really reaches the output device;
+      // some audio stacks need something to have been played before they open.
+      const primer = context.createBuffer(1, 1, context.sampleRate);
+      const source = context.createBufferSource();
+      source.buffer = primer;
+      source.connect(context.destination);
+      source.start();
+      this.unlocked = context.state === "running";
+      return this.unlocked;
+    } catch {
+      this.unlocked = false;
+      return false;
+    }
+  }
+
+  /** True once the output context is actually running. */
+  get outputReady() {
+    return Boolean(this.context && this.context.state === "running");
+  }
+
   _ensureContext() {
     if (!this.context) {
+      // The browser may ignore the requested rate; read back what it gave us and
+      // decode at that rate, or every sample would be resampled and the voice
+      // would play at the wrong pitch and speed.
       this.context = new AudioContext({ sampleRate: this.sampleRate });
+      this.sampleRate = this.context.sampleRate;
       this.gain = this.context.createGain();
       this.gain.connect(this.context.destination);
     }
     if (this.context.state === "suspended") {
+      // Best-effort recovery outside a gesture; `unlock()` is the reliable path.
       this.context.resume().catch(() => {});
     }
     return this.context;
@@ -142,6 +188,14 @@ export class Playback {
     if (!pcmBytes || pcmBytes.length < 2) return;
 
     const context = this._ensureContext();
+    if (context.state !== "running") {
+      // Surface it once per turn rather than per chunk.
+      if (!this._blockedReported && this.onBlocked) {
+        this._blockedReported = true;
+        this.onBlocked();
+      }
+    }
+
     const sampleCount = Math.floor(pcmBytes.length / 2);
     const view = new DataView(pcmBytes.buffer, pcmBytes.byteOffset, pcmBytes.byteLength);
 
@@ -177,6 +231,7 @@ export class Playback {
     if (!this.playing) return;
     this.playing = false;
     this.nextTime = 0;
+    this._blockedReported = false;
     if (this.onIdle) this.onIdle();
   }
 

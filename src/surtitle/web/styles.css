@@ -574,13 +574,30 @@ button, input, textarea, select {
 .captions {
   max-width: var(--dsh-chat-content-width);
   margin: 0 auto;
-  padding: 0 0 8px;
-  font-size: 13px;
-  color: var(--dsw-alias-label-tertiary);
-  min-height: 18px;
+  padding: 6px 16px 10px;
+  font-size: 14px;
+  line-height: 22px;
+  color: var(--dsw-alias-label-secondary);
+  min-height: 20px;
 }
 
-.captions__pending { font-style: italic; }
+/* Unconfirmed speech: visibly provisional, but clearly the user's own words. */
+.captions__pending {
+  font-style: italic;
+  color: var(--dsw-alias-label-primary);
+}
+
+.captions__speaker {
+  font-style: normal;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--dsw-alias-label-caption);
+  margin-right: 6px;
+}
+
+.captions__hint { color: var(--dsw-alias-label-caption); }
 
 .state {
   display: inline-flex;

@@ -234,16 +234,30 @@ class Session:
         self._turn = asyncio.create_task(self._run_turn(cleaned), name="agent-turn")
 
     async def _on_transcript(self, event: TranscriptEvent) -> None:
-        """Handle a transcription update from Deepgram."""
-        self._state.interim = event.text
+        """Handle a transcription update from Deepgram.
+
+        Updates are accumulated rather than replaced. The two backends report
+        differently — Flux sends the transcript for the turn so far, a word-level
+        stream sends successive fragments — and overwriting would hand the model
+        only the final fragment of a sentence. :meth:`_accumulate` handles
+        cumulative and fragment-shaped updates with the same logic.
+        """
+        self._state.interim = self._accumulate(self._state.interim, event.text)
         await self.emit(
             EventKind.INTERIM,
-            text=event.text,
+            text=self._state.interim,
             final=event.final,
             end_of_turn=event.is_end_of_turn,
         )
 
-        if event.is_end_of_turn and event.text.strip():
+        if event.is_end_of_turn:
+            utterance = self._state.interim.strip()
+            self._state.interim = ""
+            if not utterance:
+                # A turn boundary with nothing transcribable: the user may simply
+                # have paused. Starting a turn on silence would answer nothing.
+                return
+
             # A new spoken turn: barge in on anything still playing first.
             if self._is_speaking():
                 await self.barge_in()
@@ -251,8 +265,38 @@ class Session:
                 self._turn.cancel()
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await self._turn
-            await self.emit(EventKind.USER_TEXT, text=event.text.strip(), source="voice")
-            self._turn = asyncio.create_task(self._run_turn(event.text.strip()), name="agent-turn")
+            await self.emit(EventKind.USER_TEXT, text=utterance, source="voice")
+            self._turn = asyncio.create_task(self._run_turn(utterance), name="agent-turn")
+
+    @staticmethod
+    def _accumulate(existing: str, incoming: str) -> str:
+        """Merge a transcription update into what we already have.
+
+        Covers both shapes without needing to know which backend produced them:
+
+        * **Cumulative** ("what is the" then "what is the throughput"): the
+          incoming text extends what we have, so it replaces it.
+        * **Fragmented** ("what is" then "the throughput"): the incoming text is
+          new, so it appends.
+
+        Replacement is detected by prefix, which also makes a repeated update
+        idempotent.
+        """
+        if not incoming:
+            return existing
+        if not existing:
+            return incoming
+        if incoming.startswith(existing) or existing.startswith(incoming):
+            # Cumulative (or a correction): keep the longer, more complete text.
+            return incoming if len(incoming) >= len(existing) else existing
+        if incoming.strip() in existing:
+            return existing
+        joiner = (
+            ""
+            if existing.endswith((" ", "-")) or incoming.startswith((" ", ".", ",", "!", "?", "-"))
+            else " "
+        )
+        return f"{existing}{joiner}{incoming}"
 
     # --- the turn --------------------------------------------------------
     async def _run_turn(self, user_text: str) -> None:
@@ -273,6 +317,8 @@ class Session:
 
         try:
             async for event in loop.run(history, user_text, on_chunk=self._speak_chunk):
+                if event.kind is EventKind.APPROVAL_REQUEST:
+                    await self._on_approval_requested(event.data)
                 await self._emit_or_queue(event)
         except asyncio.CancelledError:
             if self.tts is not None:
@@ -367,6 +413,21 @@ class Session:
         await self.barge_in()
 
     # --- approvals -------------------------------------------------------
+    async def _on_approval_requested(self, data: dict[str, Any]) -> None:
+        """Log every approval request.
+
+        An approval prompt is a visible interruption; it must be traceable to a
+        decision the agent actually made rather than appearing unexplained.
+        """
+        arguments = data.get("arguments") or {}
+        summary = ", ".join(f"{k}={str(v)[:40]}" for k, v in list(arguments.items())[:3])
+        log.info(
+            "approval requested: tool=%s args=(%s) call_id=%s",
+            data.get("name"),
+            summary,
+            data.get("call_id"),
+        )
+
     async def handle_approval(self, call_id: str, *, allowed: bool, remember: bool) -> None:
         """Record the user's decision so the waiting loop can resume."""
         resolved = self.approvals.resolve(call_id, allowed=allowed, remember=remember)

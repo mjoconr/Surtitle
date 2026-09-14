@@ -469,3 +469,63 @@ class TestFluxResponseHandling:
         from surtitle.voice.stt import _FLUX_TURN_TYPES
 
         assert "TurnInfo" in _FLUX_TURN_TYPES
+
+
+class TestTranscriptAccumulation:
+    """Spoken words must be accumulated, not overwritten.
+
+    Regression test for a correctness bug that also explains "I can't see what I
+    said": the session replaced its interim text on every update, so the model
+    received only the final fragment of a sentence. Both backends are covered,
+    because they report differently and the accumulator must not care which.
+    """
+
+    @staticmethod
+    def _accumulate(existing: str, incoming: str) -> str:
+        from surtitle.core.session import Session
+
+        return Session._accumulate(existing, incoming)
+
+    def test_cumulative_updates_are_not_duplicated(self):
+        """Flux sends the turn so far, growing each time."""
+        text = ""
+        for update in ("what is", "what is the", "what is the throughput"):
+            text = self._accumulate(text, update)
+        assert text == "what is the throughput"
+
+    def test_fragmented_updates_are_joined(self):
+        """A word-level backend sends successive fragments."""
+        text = ""
+        for update in ("what is", "the throughput", "of the line"):
+            text = self._accumulate(text, update)
+        assert text == "what is the throughput of the line"
+
+    def test_a_repeated_update_is_idempotent(self):
+        text = self._accumulate("hello world", "hello world")
+        assert text == "hello world"
+
+    def test_a_prefix_correction_keeps_the_longer_text(self):
+        text = self._accumulate("throughout", "through")
+        assert text == "throughout"
+
+    def test_empty_updates_do_not_clear_accumulated_text(self):
+        text = self._accumulate("keep me", "")
+        assert text == "keep me"
+
+    def test_an_existing_fragment_is_not_appended_twice(self):
+        text = self._accumulate("the throughput of the line", "throughput")
+        assert text == "the throughput of the line"
+
+    def test_no_spurious_space_before_punctuation(self):
+        text = self._accumulate("hello", ", world")
+        assert text == "hello, world"
+
+    def test_first_update_becomes_the_text(self):
+        assert self._accumulate("", "first words") == "first words"
+
+    def test_accumulation_is_independent_of_word_level_updates(self):
+        """The end-to-end shape: fragments then a cumulative final."""
+        text = ""
+        for update in ("what", "what is", "what is the throughput"):
+            text = self._accumulate(text, update)
+        assert text == "what is the throughput"

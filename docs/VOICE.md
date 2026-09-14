@@ -137,6 +137,32 @@ keeps a `nextTime` cursor and schedules each buffer to start where the previous 
 ended, with a small 60 ms lead-in so the first chunk is never clipped by scheduling
 latency.
 
+## Playback and the browser's autoplay policy
+
+A Web Audio `AudioContext` created **outside a user gesture** starts suspended, and
+`resume()` afterwards rejects because the activation has already been consumed. An
+agent reply that arrives over a WebSocket is exactly that case: the context was
+being created when the first audio chunk landed, so it was suspended forever and
+playback silently did nothing. No exception, no console error — just silence,
+which is the hardest kind of bug to report.
+
+Three things prevent it:
+
+1. **`Playback.unlock()` runs inside the mic click**, creating and resuming the
+   context while activation is still valid, and priming the graph with a
+   single-sample buffer so the audio stack is genuinely open.
+2. **`onBlocked` reports it.** If audio arrives while the context is not running,
+   the UI says the browser blocked playback and tells the user to click. Once per
+   turn rather than once per chunk.
+3. **The sample rate is read back.** A browser may ignore the requested 24 kHz, so
+   the context's actual rate is stored and PCM is decoded at that rate. Assuming
+   the requested rate would resample every sample and play the voice at the wrong
+   pitch and speed.
+
+If you hear nothing: click once anywhere on the page (that grants activation) and
+try again. If you see the "audio is blocked" notice, that is this path reporting
+itself rather than failing quietly.
+
 ## Barge-in
 
 Interrupting mid-sentence is the behaviour users judge a voice agent on. When the
