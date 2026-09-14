@@ -187,3 +187,58 @@ class TestResponseShapeHandling:
         from surtitle.voice.stt import _looks_like_nova_results
 
         assert _looks_like_nova_results(payload) is False
+
+
+class TestSharedUrlBuilders:
+    """The doctor must probe the URLs the client actually uses.
+
+    These are exported precisely so a diagnostic cannot drift from the client. A
+    duplicated parameter set in the doctor once reported a healthy configuration
+    as broken, which is worse than having no diagnostic at all.
+    """
+
+    def test_the_client_and_the_helper_agree(self):
+        from surtitle.voice.stt import listen_url
+
+        settings = make_settings(stt_api="v2")
+        client = SpeechToText(settings, on_transcript=lambda e: None)
+        assert client.url == listen_url(settings)
+
+    def test_tts_client_and_helper_agree(self):
+        from surtitle.voice.tts import TextToSpeech, speak_url
+
+        settings = make_settings(tts_speed=1.0)
+        client = TextToSpeech(settings, on_audio=lambda a, n: None)
+        assert client.url == speak_url(settings)
+
+    def test_helper_omits_channels_for_flux(self):
+        from surtitle.voice.stt import listen_url
+
+        assert "channels" not in parse_qs(urlparse(listen_url(make_settings(stt_api="v2"))).query)
+
+    def test_helper_includes_channels_for_nova(self):
+        from surtitle.voice.stt import listen_url
+
+        params = parse_qs(
+            urlparse(listen_url(make_settings(stt_api="v1", stt_model="nova-3"))).query
+        )
+        assert params["channels"] == ["1"]
+
+    def test_tts_speed_is_omitted_at_natural_rate(self):
+        from surtitle.voice.tts import speak_url
+
+        assert "speed" not in parse_qs(urlparse(speak_url(make_settings(tts_speed=1.0))).query)
+
+    def test_tts_speed_is_sent_when_not_natural(self):
+        from surtitle.voice.tts import speak_url
+
+        params = parse_qs(urlparse(speak_url(make_settings(tts_speed=1.25))).query)
+        assert params["speed"] == ["1.25"]
+
+    def test_tts_speed_can_be_suppressed_for_a_voice_that_rejects_it(self):
+        from surtitle.voice.tts import speak_url
+
+        params = parse_qs(
+            urlparse(speak_url(make_settings(tts_speed=1.25), speed_supported=False)).query
+        )
+        assert "speed" not in params

@@ -8,23 +8,21 @@ letting the app fail later inside a WebSocket handler.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import importlib.util
 import io
+import json
 import platform
 import sys
 from dataclasses import dataclass, field
 from enum import StrEnum
-from urllib.parse import urlencode
 
 import httpx
 
-from surtitle.config import (
-    APP_NAME,
-    DEEPGRAM_LISTEN_URL,
-    DEEPGRAM_SPEAK_URL,
-    Settings,
-)
+from surtitle.config import APP_NAME, Settings
 from surtitle.platform_utils import port_is_free
+from surtitle.voice.stt import listen_url
+from surtitle.voice.tts import speak_url
 
 __all__ = ["Check", "CheckStatus", "format_report", "run_checks"]
 
@@ -246,11 +244,12 @@ async def _probe_deepseek(settings: Settings) -> Check:
     )
 
 
-async def _probe_deepgram(settings: Settings, *, modality: str, url: str, params: dict) -> Check:
+async def _probe_deepgram(settings: Settings, *, modality: str, target: str) -> Check:
     """Open a Deepgram streaming socket briefly to prove the key works.
 
     A successful upgrade is the only cheap, side-effect-free way to validate the
-    credential, so we connect and immediately close.
+    credential, so we connect and immediately close. ``target`` is the fully built
+    URL from the client, so the probe cannot disagree with the application.
     """
     import websockets
 
@@ -258,25 +257,45 @@ async def _probe_deepgram(settings: Settings, *, modality: str, url: str, params
     if not key:
         return Check(f"Deepgram {modality}", CheckStatus.SKIP, "no key")
 
-    target = f"{url}?{urlencode(params)}"
     try:
         async with websockets.connect(
             target, additional_headers={"Authorization": f"Token {key}"}, open_timeout=15
         ):
             pass
-    except Exception as exc:  # noqa: BLE001 - any failure here is a credential/network report
-        message = str(exc)
-        if "401" in message or "403" in message:
+    except Exception as exc:  # noqa: BLE001 - any failure here is reported, not raised
+        response = getattr(exc, "response", None)
+        status = getattr(response, "status_code", None)
+
+        if status in (401, 403):
             return Check(
                 f"Deepgram {modality}",
                 CheckStatus.FAIL,
-                f"key rejected ({message.splitlines()[0][:80]})",
+                f"key rejected (HTTP {status})",
                 "Check DEEPGRAM_API_KEY at https://console.deepgram.com/.",
             )
+
+        if status is not None:
+            # A 400 means the request was refused, not the key. Report the
+            # server's own words instead of implying a network problem.
+            detail = ""
+            with contextlib.suppress(Exception):
+                detail = bytes(response.body or b"").decode("utf-8", errors="replace")
+            message = ""
+            with contextlib.suppress(Exception):
+                message = str(json.loads(detail).get("err_msg") or "")
+            return Check(
+                f"Deepgram {modality}",
+                CheckStatus.FAIL,
+                f"request rejected (HTTP {status}: {message or detail[:120]})",
+                "This is a configuration problem, not a network one. Check that "
+                "SURTITLE_STT_API and DEEPGRAM_STT_MODEL agree: Flux models "
+                "(three hyphenated parts) require v2, Nova models require v1.",
+            )
+
         return Check(
             f"Deepgram {modality}",
             CheckStatus.WARN,
-            f"could not connect ({type(exc).__name__}: {message.splitlines()[0][:80]})",
+            f"could not connect ({type(exc).__name__})",
             "This may be a network issue; the key itself was not verified.",
         )
     return Check(f"Deepgram {modality}", CheckStatus.OK, "authenticated")
@@ -298,27 +317,15 @@ async def run_checks(settings: Settings, *, live: bool = True) -> Report:
         logging.getLogger("httpx").setLevel(logging.WARNING)
         checks.append(await _probe_deepseek(settings))
         if settings.deepgram_key() and settings.voice_enabled:
+            # Probe the exact URLs a session will use, built by the same code. A
+            # hand-rolled parameter set here previously drifted from the client
+            # and reported a healthy configuration as broken — a worse outcome
+            # than having no diagnostic at all.
             checks.append(
-                await _probe_deepgram(
-                    settings,
-                    modality="STT",
-                    url=DEEPGRAM_LISTEN_URL,
-                    params={
-                        "model": settings.stt_model,
-                        "language": settings.stt_language,
-                        "encoding": "linear16",
-                        "sample_rate": settings.stt_sample_rate,
-                        "channels": 1,
-                    },
-                )
+                await _probe_deepgram(settings, modality="STT", target=listen_url(settings))
             )
             checks.append(
-                await _probe_deepgram(
-                    settings,
-                    modality="TTS",
-                    url=DEEPGRAM_SPEAK_URL,
-                    params={"model": settings.tts_model, "encoding": "linear16"},
-                )
+                await _probe_deepgram(settings, modality="TTS", target=speak_url(settings))
             )
     else:
         checks.append(Check("Live API probes", CheckStatus.SKIP, "disabled with --offline"))

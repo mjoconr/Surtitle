@@ -26,7 +26,7 @@ from websockets.protocol import State
 
 from surtitle.config import DEEPGRAM_SPEAK_URL, Settings
 
-__all__ = ["TextToSpeech", "Utterance"]
+__all__ = ["TextToSpeech", "Utterance", "speak_url"]
 
 log = logging.getLogger(__name__)
 
@@ -48,6 +48,23 @@ class Utterance:
 
 AudioHandler = Callable[[bytes, int], Awaitable[None]]
 """Receives (audio_bytes, sequence) for each synthesised chunk."""
+
+
+def speak_url(settings: Settings, *, speed_supported: bool = True) -> str:
+    """Build the Deepgram speak socket URL.
+
+    Shared with the doctor so a diagnostic probes exactly what a session uses.
+    ``speed`` is only sent when it differs from natural: not every Aura voice
+    accepts it, so it is dropped and retried without it when refused.
+    """
+    params: dict[str, object] = {
+        "model": settings.tts_model,
+        "encoding": "linear16",
+        "sample_rate": settings.tts_sample_rate,
+    }
+    if speed_supported and settings.tts_speed != 1.0:
+        params["speed"] = settings.tts_speed
+    return f"{DEEPGRAM_SPEAK_URL}?{urlencode(params)}"
 
 
 class TextToSpeech:
@@ -95,16 +112,8 @@ class TextToSpeech:
 
     @property
     def url(self) -> str:
-        params: dict[str, object] = {
-            "model": self.settings.tts_model,
-            "encoding": "linear16",
-            "sample_rate": self.settings.tts_sample_rate,
-        }
-        # Not every Aura model accepts `speed`; it is dropped automatically if
-        # the first connection is refused (see _ensure_socket).
-        if self._speed_supported and self.settings.tts_speed != 1.0:
-            params["speed"] = self.settings.tts_speed
-        return f"{DEEPGRAM_SPEAK_URL}?{urlencode(params)}"
+        """The socket URL, built by the shared helper."""
+        return speak_url(self.settings, speed_supported=self._speed_supported)
 
     # --- public API ------------------------------------------------------
     async def start(self) -> None:

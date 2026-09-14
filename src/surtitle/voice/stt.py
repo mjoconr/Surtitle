@@ -37,7 +37,7 @@ from surtitle.config import (
     Settings,
 )
 
-__all__ = ["SpeechToText", "TranscriptEvent"]
+__all__ = ["SpeechToText", "TranscriptEvent", "listen_url"]
 
 log = logging.getLogger(__name__)
 
@@ -115,6 +115,46 @@ def _explain(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {exc}"
 
 
+def listen_url(settings: Settings) -> str:
+    """Build the Deepgram listen socket URL for the configured backend.
+
+    Exported so diagnostics probe the *exact* URL the session will use. A
+    duplicated parameter set in the doctor drifted from this one and reported a
+    healthy configuration as broken, which is worse than having no diagnostic.
+    """
+    if settings.stt_api == "v2":
+        # Flux accepts a much smaller parameter set than Nova and rejects the
+        # rest with HTTP 400. Verified against the live endpoint: `channels`,
+        # `language`, `interim_results`, `punctuate`, `smart_format`,
+        # `vad_events`, `endpointing`, `utterance_end_ms` and `multichannel` are
+        # all refused. `encoding` and `sample_rate` must be supplied together.
+        flux: dict[str, object] = {
+            "model": settings.stt_model,
+            "encoding": "linear16",
+            "sample_rate": settings.stt_sample_rate,
+        }
+        if settings.eot_threshold is not None:
+            flux["eot_threshold"] = settings.eot_threshold
+        if settings.eot_timeout_ms is not None:
+            flux["eot_timeout_ms"] = settings.eot_timeout_ms
+        return f"{DEEPGRAM_LISTEN_V2_URL}?{urlencode(flux)}"
+
+    nova: dict[str, object] = {
+        "model": settings.stt_model,
+        "language": settings.stt_language,
+        "encoding": "linear16",
+        "sample_rate": settings.stt_sample_rate,
+        "channels": 1,
+        "interim_results": "true",
+        "punctuate": "true",
+        "smart_format": "true",
+        "vad_events": "true",
+        "utterance_end_ms": str(max(1000, settings.endpointing_ms * 3)),
+        "endpointing": str(settings.endpointing_ms),
+    }
+    return f"{DEEPGRAM_LISTEN_URL}?{urlencode(nova)}"
+
+
 class SpeechToText:
     """A single streaming transcription session."""
 
@@ -145,43 +185,8 @@ class SpeechToText:
 
     @property
     def url(self) -> str:
-        """The socket URL, with the parameter set each backend expects.
-
-        The two APIs take **different** parameters, and the difference is not
-        optional — Flux rejects anything it does not recognise with HTTP 400.
-        Verified against the live endpoint: ``channels``, ``language``,
-        ``interim_results``, ``punctuate``, ``smart_format``, ``vad_events``,
-        ``endpointing``, ``utterance_end_ms`` and ``multichannel`` are all
-        refused on ``/v2/listen``. Building one query string for both is what
-        produced a permanent reconnect loop on the first real run.
-        """
-        if self.uses_flux:
-            # `encoding` and `sample_rate` must be supplied together.
-            params: dict[str, object] = {
-                "model": self.settings.stt_model,
-                "encoding": "linear16",
-                "sample_rate": self.settings.stt_sample_rate,
-            }
-            if self.settings.eot_threshold is not None:
-                params["eot_threshold"] = self.settings.eot_threshold
-            if self.settings.eot_timeout_ms is not None:
-                params["eot_timeout_ms"] = self.settings.eot_timeout_ms
-            return f"{DEEPGRAM_LISTEN_V2_URL}?{urlencode(params)}"
-
-        params = {
-            "model": self.settings.stt_model,
-            "language": self.settings.stt_language,
-            "encoding": "linear16",
-            "sample_rate": self.settings.stt_sample_rate,
-            "channels": 1,
-            "interim_results": "true",
-            "punctuate": "true",
-            "smart_format": "true",
-            "vad_events": "true",
-            "utterance_end_ms": str(max(1000, self.settings.endpointing_ms * 3)),
-            "endpointing": str(self.settings.endpointing_ms),
-        }
-        return f"{DEEPGRAM_LISTEN_URL}?{urlencode(params)}"
+        """The socket URL, built by the shared helper."""
+        return listen_url(self.settings)
 
     # --- lifecycle -------------------------------------------------------
     async def start(self) -> None:
