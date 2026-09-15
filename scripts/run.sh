@@ -65,10 +65,13 @@ fi
 # Not a release archive: bootstrap from source.
 if command -v uv >/dev/null 2>&1; then
   info "Syncing dependencies with uv…"
-  if ! uv sync --quiet; then
+  # --inexact matters: a plain `uv sync` prunes anything the lock does not name,
+  # which silently deletes the optional voice-local extra on every run. `uv run`
+  # then syncs again by default, so it has to be told not to as well.
+  if ! uv sync --inexact --quiet; then
     die "uv sync failed. Run 'uv sync' yourself to see the full output."
   fi
-  exec uv run --quiet surtitle "$@"
+  exec uv run --no-sync --quiet surtitle "$@"
 fi
 
 if [ -x "$SCRIPT_DIR/.venv/bin/python" ]; then

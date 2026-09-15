@@ -53,9 +53,12 @@ try {
     $uv = Get-Command uv -ErrorAction SilentlyContinue
     if ($uv) {
         Write-Host 'Syncing dependencies with uv...' -ForegroundColor DarkGray
-        & $uv.Source sync --quiet
+        # --inexact matters: a plain `uv sync` prunes anything the lock does not
+        # name, which silently deletes the optional voice-local extra on every
+        # run. `uv run` then syncs again by default, so it has to be told not to.
+        & $uv.Source sync --inexact --quiet
         if ($LASTEXITCODE -ne 0) { Fail 'uv sync failed. Run "uv sync" to see the full output.' }
-        & $uv.Source run --quiet surtitle @Arguments
+        & $uv.Source run --no-sync --quiet surtitle @Arguments
         exit $LASTEXITCODE
     }
 
