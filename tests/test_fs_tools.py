@@ -156,6 +156,80 @@ class TestReadPdf:
         assert result.error
 
 
+class TestReadOfficeDocuments:
+    """Office files are readable with no converter installed anywhere."""
+
+    def _docx(self, ctx):
+        import zipfile
+
+        document = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+ <w:body>
+  <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr>
+       <w:r><w:t>Quarterly Report</w:t></w:r></w:p>
+  <w:p><w:r><w:t>Revenue rose 12%.</w:t></w:r></w:p>
+  <w:tbl>
+   <w:tr><w:tc><w:p><w:r><w:t>EMEA</w:t></w:r></w:p></w:tc>
+         <w:tc><w:p><w:r><w:t>4.2M</w:t></w:r></w:p></w:tc></w:tr>
+  </w:tbl>
+ </w:body>
+</w:document>
+"""
+        with zipfile.ZipFile(ctx.root / "report.docx", "w") as bundle:
+            bundle.writestr("word/document.xml", document)
+
+    def test_reads_a_docx_as_text(self, ctx):
+        self._docx(ctx)
+        result = read_file(ctx, "report.docx")
+        assert result.ok, result.error
+        assert result.data["kind"] == "office"
+        assert "Quarterly Report" in result.data["content"]
+        assert "Revenue rose 12%." in result.data["content"]
+        # Tables arrive as tab-separated rows rather than being dropped.
+        assert "EMEA" in result.data["content"] and "4.2M" in result.data["content"]
+
+    def test_reads_an_xlsx_as_text(self, ctx):
+        from openpyxl import Workbook
+
+        book = Workbook()
+        sheet = book.active
+        sheet.append(["Region", "Revenue"])
+        sheet.append(["EMEA", 4200])
+        book.save(ctx.root / "book.xlsx")
+
+        result = read_file(ctx, "book.xlsx")
+        assert result.ok, result.error
+        assert result.data["kind"] == "office"
+        assert "EMEA" in result.data["content"]
+
+    def test_an_office_read_is_windowed_like_text(self, ctx):
+        self._docx(ctx)
+        whole = read_file(ctx, "report.docx")
+        first = read_file(ctx, "report.docx", max_lines=1)
+        assert first.ok, first.error
+        assert first.data["lines_returned"] == 1
+        assert first.data["has_more"] is True
+        assert first.data["total_lines"] == whole.data["total_lines"]
+
+    def test_a_corrupt_office_file_reports_an_error(self, ctx):
+        (ctx.root / "broken.docx").write_bytes(b"not a zip at all")
+        result = read_file(ctx, "broken.docx")
+        assert not result.ok
+        assert "broken.docx" in result.error
+
+    def test_an_office_file_with_no_text_says_so(self, ctx):
+        import zipfile
+
+        with zipfile.ZipFile(ctx.root / "empty.docx", "w") as bundle:
+            bundle.writestr(
+                "word/document.xml",
+                "<w:document xmlns:w='http://schemas.openxmlformats.org/wordprocessingml/2006/main'/>",
+            )
+        result = read_file(ctx, "empty.docx")
+        assert not result.ok
+        assert "no readable text" in result.error
+
+
 class TestSearchFiles:
     def test_finds_a_match(self, ctx):
         result = search_files(ctx, "Revenue")

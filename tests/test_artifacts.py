@@ -247,10 +247,12 @@ class TestMakeSpreadsheet:
         assert not make_spreadsheet(ctx, "../evil.xlsx", sheets=[{"name": "S", "rows": [[1]]}]).ok
 
     def test_round_trips_through_read_file(self, ctx):
+        """A spreadsheet this tool wrote can be read straight back."""
         make_spreadsheet(ctx, "rt.xlsx", sheets=[{"name": "S", "headers": ["a"], "rows": [[1]]}])
-        # read_file refuses xlsx as binary, which is the intended behaviour.
         result = read_file(ctx, "rt.xlsx")
-        assert not result.ok
+        assert result.ok, result.error
+        assert result.data["kind"] == "office"
+        assert "a" in result.data["content"]
 
 
 class TestMakeChart:

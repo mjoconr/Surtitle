@@ -111,9 +111,10 @@ _READ_FILE = Tool(
     name="read_file",
     description=(
         "Read the contents of a file in the project. Supports plain text files, "
-        "CSV/JSON/Markdown, and PDFs (text is extracted automatically). Large files "
-        "are returned in windows: check 'has_more' and 'next_start_line' and call "
-        "again to continue reading."
+        "CSV/JSON/Markdown, PDFs, and Office documents — Word, Excel, PowerPoint "
+        "and OpenDocument — whose text is extracted automatically, so no converter "
+        "is needed to read them. Large files are returned in windows: check "
+        "'has_more' and 'next_start_line' and call again to continue reading."
     ),
     parameters={
         "type": "object",
@@ -410,10 +411,12 @@ _MAKE_CHART = Tool(
 _CONVERT_DOCUMENT = Tool(
     name="convert_document",
     description=(
-        "Convert a document to another format using the local LibreOffice install. "
-        "Handles Word, Excel, PowerPoint and OpenDocument files, which the text "
-        "reader cannot parse directly. Use this to make a .docx or .xlsx readable, "
-        "or to export a document as PDF."
+        "Convert a document to another format. Works with nothing installed: the "
+        "built-in converter reads Word, Excel, PowerPoint, OpenDocument, PDF and "
+        "text files, and writes PDF, txt, csv, html and xlsx. If LibreOffice is "
+        "present it is used for the formats the built-in converter cannot write "
+        "(docx, odt, rtf, ods, odp, pptx, png, jpg) and as a fallback that keeps "
+        "layout. Pass backend='builtin' to guarantee no external program runs."
     ),
     parameters={
         "type": "object",
@@ -429,9 +432,23 @@ _CONVERT_DOCUMENT = Tool(
                 "name with the new extension."
             ),
             "overwrite": _boolean("Replace the output if it already exists.", default=True),
+            "backend": {
+                "type": "string",
+                "enum": ["auto", "builtin", "libreoffice"],
+                "description": (
+                    "Which engine to use. 'auto' (default) prefers the built-in "
+                    "converter and falls back to LibreOffice when it is installed; "
+                    "'builtin' never runs an external program; 'libreoffice' "
+                    "requires it."
+                ),
+                "default": "auto",
+            },
             "timeout": {
                 "type": "number",
-                "description": "Seconds before LibreOffice is stopped. A cold start is slow.",
+                "description": (
+                    "Seconds before LibreOffice is stopped. Ignored by the built-in "
+                    "converter. A cold start is slow."
+                ),
                 "default": 180,
             },
         },

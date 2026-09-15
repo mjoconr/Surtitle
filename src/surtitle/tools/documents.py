@@ -1,10 +1,16 @@
-"""Document conversion through a local LibreOffice install.
+"""Document conversion, built-in first and LibreOffice when it helps.
 
-LibreOffice's headless mode is the most reliable way to turn real-world Office
-documents into something an agent can read: it handles ``.docx``, ``.xlsx``,
-``.pptx``, ``.odt`` and friends, which pure-Python libraries only partly cover.
+Two engines, chosen per call:
 
-Two operational details matter more than the conversion itself:
+* The **built-in** converter (:mod:`surtitle.tools.document_native`) needs
+  nothing installed. It reads Word, Excel, PowerPoint, OpenDocument, PDF and the
+  plain formats, and writes PDF, text, CSV, HTML and XLSX. Fidelity is honest
+  rather than high: it carries content, not layout.
+* **LibreOffice**, when it happens to be installed, keeps layout and handles the
+  formats that would be a research project to parse (legacy ``.doc``, ``.rtf``,
+  high-fidelity export). It is a quality upgrade, never a requirement.
+
+Three operational details matter more than the conversion itself:
 
 * **A private user profile per run.** LibreOffice refuses to start a second
   instance against the same profile, so a shared profile is the classic cause of
@@ -13,6 +19,9 @@ Two operational details matter more than the conversion itself:
 * **Killing the whole process group on timeout.** A hung ``soffice`` used to
   leave orphans behind; the shell runner kills the process group, and the
   ``timeout`` here is generous because a cold LibreOffice start is slow.
+* **Staging the output.** LibreOffice ignores the requested output filename, so a
+  private staging directory is used and the file it actually wrote is moved into
+  place.
 """
 
 from __future__ import annotations
@@ -22,14 +31,23 @@ import logging
 import shutil
 import tempfile
 from pathlib import Path
+from typing import Literal
 
+from surtitle.tools import document_native
 from surtitle.tools.fs_tools import ToolContext, ToolResult
-from surtitle.tools.path_guard import PathEscapeError, resolve_in_root
+from surtitle.tools.path_guard import PathEscapeError, ResolvedPath, resolve_in_root
 from surtitle.tools.project_config import configured_soffice
 
 __all__ = ["SUPPORTED_TARGETS", "convert_document", "list_supported_targets"]
 
 log = logging.getLogger(__name__)
+
+# Which engine performs the conversion. ``auto`` prefers the built-in converter
+# because it is instant and always available, and reaches for LibreOffice when
+# the built-in one cannot do the job and LibreOffice is installed.
+Backend = Literal["auto", "builtin", "libreoffice"]
+
+_BACKENDS: frozenset[str] = frozenset({"auto", "builtin", "libreoffice"})
 
 # Writer, Calc, Impress and the common interchange formats. Keys are the
 # friendly names the model is told to use; values are LibreOffice's filter names,
@@ -68,6 +86,61 @@ def list_supported_targets() -> list[str]:
     return sorted(SUPPORTED_TARGETS)
 
 
+def _readable_formats() -> str:
+    return ", ".join(sorted(suffix.lstrip(".") for suffix in document_native.SOURCE_SUFFIXES))
+
+
+def _no_converter_error(source: str, target: str, suffix: str) -> ToolResult:
+    """Explain why nothing on this machine can perform the conversion."""
+    builtin = (
+        f"The built-in converter reads {_readable_formats()} "
+        f"and writes {', '.join(sorted(document_native.TARGETS))}"
+    )
+    if suffix.lower() in document_native.SOURCE_SUFFIXES:
+        builtin += f", so it cannot produce {target}"
+    else:
+        builtin += f", so it cannot read {suffix or 'that file'}"
+    return ToolResult(
+        ok=False,
+        error=(
+            f"No converter can turn {source} into {target} here. {builtin}, and "
+            "LibreOffice (which covers more formats) is not installed."
+        ),
+        display="No converter available",
+    )
+
+
+def _libreoffice_missing() -> ToolResult:
+    return ToolResult(
+        ok=False,
+        error=(
+            "LibreOffice was not found, so this conversion is unavailable. "
+            "Install it, or set 'soffice_path' in .surtitle.json (or the "
+            "SURTITLE_SOFFICE environment variable) to the soffice binary. "
+            "The built-in converter (backend='builtin') needs none of that."
+        ),
+        display="LibreOffice not found",
+    )
+
+
+def _conversion_result(
+    source: str, destination: Path, relative: str, target: str, backend: str
+) -> ToolResult:
+    extension = SUPPORTED_TARGETS[target][0]
+    return ToolResult(
+        ok=True,
+        data={
+            "source": source,
+            "path": relative,
+            "target": target,
+            "bytes": destination.stat().st_size,
+            "backend": backend,
+        },
+        display=f"Converted {source} to {relative}",
+        artifacts=[relative] if extension in {"pdf", "xlsx", "csv", "png", "jpg"} else [],
+    )
+
+
 async def convert_document(
     ctx: ToolContext,
     source: str,
@@ -76,11 +149,16 @@ async def convert_document(
     output: str | None = None,
     overwrite: bool = True,
     timeout: float = _DEFAULT_TIMEOUT,
+    backend: Backend = "auto",
 ) -> ToolResult:
-    """Convert a document to another format using local LibreOffice.
+    """Convert a document using the built-in converter or LibreOffice.
 
     ``source`` and ``output`` are project-relative. When ``output`` is omitted,
     the converted file lands beside the source with the new extension.
+
+    ``backend`` selects the engine: ``auto`` (the default) uses the built-in
+    converter and falls back to LibreOffice when it is installed and the built-in
+    one cannot help; ``builtin`` never shells out; ``libreoffice`` requires it.
     """
     target_name = target.strip().lower().lstrip(".")
     if target_name not in SUPPORTED_TARGETS:
@@ -92,6 +170,13 @@ async def convert_document(
             ),
         )
 
+    chosen = backend.strip().lower() if isinstance(backend, str) else "auto"
+    if chosen not in _BACKENDS:
+        return ToolResult(
+            ok=False,
+            error=(f"Unknown backend {backend!r}. Use 'auto', 'builtin' or 'libreoffice'."),
+        )
+
     try:
         source_path = resolve_in_root(ctx.root, source)
     except PathEscapeError as exc:
@@ -100,19 +185,7 @@ async def convert_document(
     if not source_path.absolute.is_file():
         return ToolResult(ok=False, error=f"Source file not found: {source_path.relative}")
 
-    soffice = configured_soffice(ctx.root)
-    if soffice is None:
-        return ToolResult(
-            ok=False,
-            error=(
-                "LibreOffice was not found, so document conversion is unavailable. "
-                "Install it, or set 'soffice_path' in .surtitle.json (or the "
-                "SURTITLE_SOFFICE environment variable) to the soffice binary."
-            ),
-            display="LibreOffice not found",
-        )
-
-    extension, filter_name = SUPPORTED_TARGETS[target_name]
+    extension, _filter_name = SUPPORTED_TARGETS[target_name]
 
     if output:
         try:
@@ -141,13 +214,87 @@ async def convert_document(
 
     destination.absolute.parent.mkdir(parents=True, exist_ok=True)
 
-    # LibreOffice ignores the requested output filename: `--convert-to` always
-    # writes `<source stem>.<ext>` into `--outdir`. Asking for
-    # `reports/summary.pdf` from `note.txt` therefore produces `note.pdf` and,
-    # without this staging step, the conversion appears to fail. Convert into a
-    # private staging directory, find what was actually written, then move it
-    # into place. Staging also means a failed run cannot leave a half-written
-    # file at the destination.
+    suffix = source_path.absolute.suffix
+    native_capable = document_native.can_convert(suffix, target_name)
+    soffice = None if chosen == "builtin" else configured_soffice(ctx.root)
+
+    if chosen == "builtin" and not native_capable:
+        return ToolResult(
+            ok=False,
+            error=(
+                f"The built-in converter cannot turn {suffix or 'that file'} into "
+                f"{target_name}. It reads {_readable_formats()} and writes "
+                f"{', '.join(sorted(document_native.TARGETS))}. Use backend='libreoffice' "
+                "or 'auto' to allow LibreOffice to try."
+            ),
+            display="Unsupported conversion",
+        )
+    if chosen == "libreoffice" and soffice is None:
+        return _libreoffice_missing()
+
+    attempts: list[str] = []
+    if chosen == "builtin":
+        attempts = ["builtin"]
+    elif chosen == "libreoffice":
+        attempts = ["libreoffice"]
+    elif native_capable:
+        attempts = ["builtin"] + (["libreoffice"] if soffice is not None else [])
+    elif soffice is not None:
+        attempts = ["libreoffice"]
+    else:
+        return _no_converter_error(source_path.relative, target_name, suffix)
+
+    failure = ""
+    for attempt in attempts:
+        if attempt == "libreoffice" and soffice is not None:
+            # Always the last attempt, so its detailed error is the one reported.
+            return await _convert_with_libreoffice(
+                source_path.absolute,
+                source_path.relative,
+                destination,
+                target_name,
+                soffice,
+                timeout,
+            )
+        try:
+            document_native.convert(source_path.absolute, target_name, destination.absolute)
+        except document_native.NativeConversionError as exc:
+            # Falling back is the whole point of `auto`, so a built-in failure is
+            # recorded rather than returned.
+            failure = str(exc)
+            log.info("built-in conversion of %s failed: %s", source_path.relative, exc)
+            continue
+        return _conversion_result(
+            source_path.relative, destination.absolute, destination.relative, target_name, "builtin"
+        )
+
+    return ToolResult(
+        ok=False,
+        error=f"Could not convert {source_path.relative} to {target_name}: {failure}",
+        display="Conversion failed",
+    )
+
+
+async def _convert_with_libreoffice(
+    source: Path,
+    source_relative: str,
+    destination: ResolvedPath,
+    target_name: str,
+    soffice: Path,
+    timeout: float,
+) -> ToolResult:
+    """Run LibreOffice headless, staging the output before moving it into place.
+
+    LibreOffice ignores the requested output filename: ``--convert-to`` always
+    writes ``<source stem>.<ext>`` into ``--outdir``. Asking for
+    ``reports/summary.pdf`` from ``note.txt`` therefore produces ``note.pdf``
+    and, without this staging step, the conversion appears to fail. Staging also
+    means a failed run cannot leave a half-written file at the destination.
+    """
+    extension, filter_name = SUPPORTED_TARGETS[target_name]
+    destination_path = destination.absolute
+    relative = destination.relative
+
     with tempfile.TemporaryDirectory(prefix="surtitle-lo-out-") as staging:
         staging_dir = Path(staging)
 
@@ -167,7 +314,7 @@ async def convert_document(
                 f"{filter_name}" if target_name == "csv" else extension,
                 "--outdir",
                 str(staging_dir),
-                str(source_path.absolute),
+                str(source),
             ]
             async with _LO_LOCK:
                 result = await _run(argv, timeout=timeout)
@@ -182,7 +329,7 @@ async def convert_document(
                 display="Conversion timed out",
             )
 
-        produced = _find_output(staging_dir, source_path.absolute.stem, extension)
+        produced = _find_output(staging_dir, source.stem, extension)
 
         if produced is None:
             # Report LibreOffice's own output, which names the real cause
@@ -193,32 +340,20 @@ async def convert_document(
                 ok=False,
                 error=(
                     f"LibreOffice did not produce a .{extension} file from "
-                    f"{source_path.relative}. " + (detail[-1] if detail else "No output written.")
+                    f"{source_relative}. " + (detail[-1] if detail else "No output written.")
                 ),
                 display="Conversion failed",
             )
 
         try:
-            if destination.absolute.exists():
-                destination.absolute.unlink()
-            shutil.move(str(produced), str(destination.absolute))
+            if destination_path.exists():
+                destination_path.unlink()
+            shutil.move(str(produced), str(destination_path))
         except OSError as exc:
             return ToolResult(ok=False, error=f"Could not place the converted file: {exc}")
 
-    size = destination.absolute.stat().st_size
-    return ToolResult(
-        ok=True,
-        data={
-            "source": source_path.relative,
-            "path": destination.relative,
-            "target": target_name,
-            "bytes": size,
-            "libreoffice": str(soffice),
-        },
-        display=f"Converted {source_path.relative} to {destination.relative}",
-        artifacts=[destination.relative]
-        if extension in {"pdf", "xlsx", "csv", "png", "jpg"}
-        else [],
+    return _conversion_result(
+        source_relative, destination_path, relative, target_name, "libreoffice"
     )
 
 

@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from surtitle.tools import document_native
 from surtitle.tools.path_guard import (
     PathEscapeError,
     is_probably_binary,
@@ -218,10 +219,13 @@ def read_file(
     start_line: int = 1,
     max_lines: int = DEFAULT_READ_LINES,
 ) -> ToolResult:
-    """Read a text file, a PDF's extracted text, or a CSV as text.
+    """Read a text file, a PDF's extracted text, or an Office document's text.
 
     Large files are returned in windows. The model is told the total line count
     and the range it received so it can ask for more instead of guessing.
+
+    Office formats are read by the built-in extractor, so a `.docx` or `.xlsx`
+    is readable on a machine with no converter installed at all.
     """
     target = _resolve(ctx, path)
     if isinstance(target, ToolResult):
@@ -241,6 +245,9 @@ def read_file(
     if suffix == ".pdf":
         return _read_pdf(target.relative, file_path)
 
+    if suffix in document_native.OFFICE_SUFFIXES:
+        return _read_office(target.relative, file_path, start_line, max_lines)
+
     size = file_path.stat().st_size
     if size == 0:
         return ToolResult(
@@ -254,7 +261,7 @@ def read_file(
             ok=False,
             error=(
                 f"{target.relative} appears to be a binary file ({_human_size(size)}). "
-                "Only text files and PDFs can be read directly."
+                "Only text files, PDFs and Office documents can be read directly."
             ),
         )
 
@@ -263,6 +270,38 @@ def read_file(
     except OSError as exc:
         return ToolResult(ok=False, error=f"Cannot read {target.relative}: {exc}")
 
+    return _windowed_text(target.relative, text, start_line, max_lines)
+
+
+def _read_office(relative: str, file_path: Path, start_line: int, max_lines: int) -> ToolResult:
+    """Read an Office document by extracting its text, with nothing installed."""
+    try:
+        document = document_native.extract(file_path)
+    except document_native.NativeConversionError as exc:
+        return ToolResult(
+            ok=False,
+            error=(
+                f"Could not read {relative}: {exc}. Converting it first may help — "
+                "use convert_document."
+            ),
+        )
+
+    text = document_native.document_to_text(document)
+    if not text.strip():
+        return ToolResult(
+            ok=False,
+            error=(
+                f"{relative} was opened but held no readable text. It may contain only "
+                "images or charts."
+            ),
+        )
+    return _windowed_text(relative, text, start_line, max_lines, kind="office")
+
+
+def _windowed_text(
+    relative: str, text: str, start_line: int, max_lines: int, *, kind: str = "text"
+) -> ToolResult:
+    """Return a numbered window of ``text``, telling the model where it is."""
     lines = text.splitlines()
     total = len(lines)
     first = max(1, start_line)
@@ -279,14 +318,15 @@ def read_file(
     # Numbered so the model can refer to lines precisely and so a following
     # edit_file call can quote exact text.
     numbered = "\n".join(f"{first + i:>5}  {line}" for i, line in enumerate(chunk))
-    display = f"Read {len(chunk)} line(s) from {target.relative}"
+    display = f"Read {len(chunk)} line(s) from {relative}"
     if truncated:
         display += f" (lines {first}-{last} of {total})"
 
     return ToolResult(
         ok=True,
         data={
-            "path": target.relative,
+            "path": relative,
+            "kind": kind,
             "start_line": first,
             "end_line": last,
             "total_lines": total,

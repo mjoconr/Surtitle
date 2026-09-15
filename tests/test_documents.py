@@ -8,6 +8,7 @@ worthless, so these assert the output is genuinely valid.
 from __future__ import annotations
 
 import json
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -21,6 +22,28 @@ from surtitle.tools.project_config import (
     load_project_config,
     save_project_config,
 )
+
+
+def _write_docx(path: Path) -> Path:
+    """A small but genuine .docx: a heading, a paragraph and a table."""
+    document = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+ <w:body>
+  <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr>
+       <w:r><w:t>Quarterly Report</w:t></w:r></w:p>
+  <w:p><w:r><w:t>Revenue rose 12%.</w:t></w:r></w:p>
+  <w:tbl>
+   <w:tr><w:tc><w:p><w:r><w:t>Region</w:t></w:r></w:p></w:tc>
+         <w:tc><w:p><w:r><w:t>Revenue</w:t></w:r></w:p></w:tc></w:tr>
+   <w:tr><w:tc><w:p><w:r><w:t>EMEA</w:t></w:r></w:p></w:tc>
+         <w:tc><w:p><w:r><w:t>4.2M</w:t></w:r></w:p></w:tc></w:tr>
+  </w:tbl>
+ </w:body>
+</w:document>
+"""
+    with zipfile.ZipFile(path, "w") as bundle:
+        bundle.writestr("word/document.xml", document)
+    return path
 
 
 class TestProjectConfig:
@@ -174,7 +197,7 @@ class TestConvertDocument:
     async def test_txt_to_pdf_produces_a_valid_pdf(self, ctx):
         from surtitle.tools.documents import convert_document
 
-        result = await convert_document(ctx, "note.txt", target="pdf")
+        result = await convert_document(ctx, "note.txt", target="pdf", backend="libreoffice")
         assert result.ok, result.error
         assert result.data["path"] == "note.pdf"
         assert result.artifacts == ["note.pdf"]
@@ -190,10 +213,12 @@ class TestConvertDocument:
     async def test_office_round_trip_via_docx(self, ctx):
         from surtitle.tools.documents import convert_document
 
-        to_docx = await convert_document(ctx, "note.txt", target="docx")
+        to_docx = await convert_document(ctx, "note.txt", target="docx", backend="libreoffice")
         assert to_docx.ok, to_docx.error
 
-        back = await convert_document(ctx, "note.docx", target="txt")
+        # Read back through the built-in engine: it must cope with a .docx that
+        # LibreOffice actually wrote, not only with a hand-made fixture.
+        back = await convert_document(ctx, "note.docx", target="txt", backend="builtin")
         assert back.ok, back.error
         content = (ctx.root / "note.txt").read_text(encoding="utf-8")
         assert "Sampling Line Report" in content
@@ -201,7 +226,9 @@ class TestConvertDocument:
     async def test_explicit_output_path(self, ctx):
         from surtitle.tools.documents import convert_document
 
-        result = await convert_document(ctx, "note.txt", target="pdf", output="reports/summary.pdf")
+        result = await convert_document(
+            ctx, "note.txt", target="pdf", output="reports/summary.pdf", backend="libreoffice"
+        )
         assert result.ok, result.error
         assert result.data["path"] == "reports/summary.pdf"
         assert (ctx.root / "reports" / "summary.pdf").is_file()
@@ -319,7 +346,9 @@ class TestConvertDocumentWithoutLibreOffice:
         fake, seen = self._fake_libreoffice()
         monkeypatch.setattr(documents, "_run", fake)
 
-        result = await documents.convert_document(ctx, "note.txt", target="pdf")
+        result = await documents.convert_document(
+            ctx, "note.txt", target="pdf", backend="libreoffice"
+        )
         assert result.ok, result.error
 
         outdir = Path(seen[0][seen[0].index("--outdir") + 1])
@@ -333,7 +362,7 @@ class TestConvertDocumentWithoutLibreOffice:
         fake, seen = self._fake_libreoffice()
         monkeypatch.setattr(documents, "_run", fake)
 
-        await documents.convert_document(ctx, "note.txt", target="pdf")
+        await documents.convert_document(ctx, "note.txt", target="pdf", backend="libreoffice")
         profile = next(arg for arg in seen[0] if arg.startswith("-env:UserInstallation="))
         assert "surtitle-lo-profile" in profile
 
@@ -349,7 +378,7 @@ class TestConvertDocumentWithoutLibreOffice:
         monkeypatch.setattr(documents, "_run", fake)
 
         result = await documents.convert_document(
-            ctx, "note.txt", target="pdf", output="reports/summary.pdf"
+            ctx, "note.txt", target="pdf", output="reports/summary.pdf", backend="libreoffice"
         )
         assert result.ok, result.error
         assert result.data["path"] == "reports/summary.pdf"
@@ -362,7 +391,9 @@ class TestConvertDocumentWithoutLibreOffice:
         fake, _seen = self._fake_libreoffice(output_name="note-converted.pdf")
         monkeypatch.setattr(documents, "_run", fake)
 
-        result = await documents.convert_document(ctx, "note.txt", target="pdf")
+        result = await documents.convert_document(
+            ctx, "note.txt", target="pdf", backend="libreoffice"
+        )
         assert result.ok, result.error
         assert (ctx.root / "note.pdf").is_file()
 
@@ -373,7 +404,9 @@ class TestConvertDocumentWithoutLibreOffice:
         fake, _seen = self._fake_libreoffice(output_name=None)
         monkeypatch.setattr(documents, "_run", fake)
 
-        result = await documents.convert_document(ctx, "note.txt", target="pdf")
+        result = await documents.convert_document(
+            ctx, "note.txt", target="pdf", backend="libreoffice"
+        )
         assert not result.ok
         assert "did not produce" in result.error
 
@@ -384,7 +417,9 @@ class TestConvertDocumentWithoutLibreOffice:
             return documents._RunResult("", "", None, True)
 
         monkeypatch.setattr(documents, "_run", timing_out)
-        result = await documents.convert_document(ctx, "note.txt", target="pdf")
+        result = await documents.convert_document(
+            ctx, "note.txt", target="pdf", backend="libreoffice"
+        )
         assert not result.ok
         assert "did not finish" in result.error
 
@@ -393,7 +428,7 @@ class TestConvertDocumentWithoutLibreOffice:
 
         fake, seen = self._fake_libreoffice()
         monkeypatch.setattr(documents, "_run", fake)
-        await documents.convert_document(ctx, "note.txt", target="pdf")
+        await documents.convert_document(ctx, "note.txt", target="pdf", backend="libreoffice")
 
         assert "--convert-to" in seen[0]
         assert "--headless" in seen[0]
@@ -407,6 +442,150 @@ class TestConvertDocumentWithoutLibreOffice:
         fake, seen = self._fake_libreoffice()
         monkeypatch.setattr(documents, "_run", fake)
 
-        refused = await documents.convert_document(ctx, "../../../etc/hosts", target="pdf")
+        refused = await documents.convert_document(
+            ctx, "../../../etc/hosts", target="pdf", backend="libreoffice"
+        )
         assert not refused.ok
         assert seen == [], "LibreOffice was launched for a rejected path"
+
+
+class TestChoosingAnEngine:
+    """Which engine runs, and what happens when neither can do the job.
+
+    LibreOffice is deliberately hidden here: the point of the built-in engine is
+    that none of this needs it.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _no_libreoffice(self, monkeypatch):
+        import surtitle.tools.documents as documents
+
+        monkeypatch.setattr(documents, "configured_soffice", lambda _root=None: None)
+
+    async def test_auto_converts_without_libreoffice(self, ctx):
+        from surtitle.tools.documents import convert_document
+
+        result = await convert_document(ctx, "note.txt", target="pdf")
+        assert result.ok, result.error
+        assert result.data["backend"] == "builtin"
+        assert (ctx.root / "note.pdf").is_file()
+
+    async def test_office_formats_convert_without_libreoffice(self, ctx):
+        from surtitle.tools.documents import convert_document
+
+        _write_docx(ctx.root / "report.docx")
+        pdf = await convert_document(ctx, "report.docx", target="pdf")
+        assert pdf.ok, pdf.error
+        csv_result = await convert_document(ctx, "report.docx", target="csv")
+        assert csv_result.ok, csv_result.error
+        assert "EMEA,4.2M" in (ctx.root / "report.csv").read_text(encoding="utf-8")
+
+    async def test_builtin_never_launches_an_external_program(self, ctx, monkeypatch):
+        import surtitle.tools.documents as documents
+
+        def explode(*_args, **_kwargs):  # pragma: no cover - only runs on failure
+            raise AssertionError("the built-in backend shelled out")
+
+        monkeypatch.setattr(documents, "_run", explode)
+        result = await documents.convert_document(ctx, "note.txt", target="pdf", backend="builtin")
+        assert result.ok, result.error
+
+    async def test_builtin_refuses_a_target_only_libreoffice_writes(self, ctx):
+        from surtitle.tools.documents import convert_document
+
+        result = await convert_document(ctx, "note.txt", target="rtf", backend="builtin")
+        assert not result.ok
+        assert "built-in" in result.error
+        assert "libreoffice" in result.error.lower()
+
+    async def test_libreoffice_backend_without_libreoffice_explains_itself(self, ctx):
+        from surtitle.tools.documents import convert_document
+
+        result = await convert_document(ctx, "note.txt", target="pdf", backend="libreoffice")
+        assert not result.ok
+        assert "LibreOffice was not found" in result.error
+        # The way out has to be named, because it is the whole point.
+        assert "builtin" in result.error
+
+    async def test_a_format_nothing_can_read_says_so(self, ctx):
+        from surtitle.tools.documents import convert_document
+
+        (ctx.root / "thing.zzz").write_text("?", encoding="utf-8")
+        result = await convert_document(ctx, "thing.zzz", target="pdf")
+        assert not result.ok
+        assert "No converter" in result.error
+
+    async def test_an_unknown_backend_is_refused(self, ctx):
+        from surtitle.tools.documents import convert_document
+
+        result = await convert_document(ctx, "note.txt", target="pdf", backend="magic")
+        assert not result.ok
+        assert "Unknown backend" in result.error
+
+
+class TestFallingBackToLibreOffice:
+    @pytest.fixture(autouse=True)
+    def _pretend_libreoffice_is_installed(self, monkeypatch):
+        import surtitle.tools.documents as documents
+
+        monkeypatch.setattr(
+            documents, "configured_soffice", lambda _root=None: Path("/usr/bin/soffice")
+        )
+
+    async def test_auto_falls_back_when_the_builtin_engine_fails(self, ctx, monkeypatch):
+        """A file the built-in parser chokes on should still convert if it can."""
+        import surtitle.tools.documents as documents
+        from surtitle.tools import document_native
+
+        def refuse(*_args, **_kwargs):
+            raise document_native.NativeConversionError("simulated parser failure")
+
+        seen: list[list[str]] = []
+
+        async def fake_run(argv, *, timeout):
+            seen.append(argv)
+            outdir = Path(argv[argv.index("--outdir") + 1])
+            (outdir / "note.pdf").write_bytes(b"%PDF-1.4 fake")
+            return documents._RunResult("ok", "", 0, False)
+
+        monkeypatch.setattr(document_native, "convert", refuse)
+        monkeypatch.setattr(documents, "_run", fake_run)
+
+        result = await documents.convert_document(ctx, "note.txt", target="pdf")
+        assert result.ok, result.error
+        assert result.data["backend"] == "libreoffice"
+        assert seen, "LibreOffice was never tried"
+
+    async def test_builtin_failure_is_reported_when_libreoffice_also_fails(self, ctx, monkeypatch):
+        import surtitle.tools.documents as documents
+        from surtitle.tools import document_native
+
+        def refuse(*_args, **_kwargs):
+            raise document_native.NativeConversionError("simulated parser failure")
+
+        async def produce_nothing(argv, *, timeout):
+            return documents._RunResult("", "no filter for that format", 2, False)
+
+        monkeypatch.setattr(document_native, "convert", refuse)
+        monkeypatch.setattr(documents, "_run", produce_nothing)
+
+        result = await documents.convert_document(ctx, "note.txt", target="pdf")
+        assert not result.ok
+        assert "no filter for that format" in result.error
+
+    async def test_libreoffice_handles_the_formats_the_builtin_one_cannot(self, ctx, monkeypatch):
+        import surtitle.tools.documents as documents
+
+        seen: list[list[str]] = []
+
+        async def fake_run(argv, *, timeout):
+            seen.append(argv)
+            outdir = Path(argv[argv.index("--outdir") + 1])
+            (outdir / "note.rtf").write_bytes(b"{\\rtf1 fake}")
+            return documents._RunResult("ok", "", 0, False)
+
+        monkeypatch.setattr(documents, "_run", fake_run)
+        result = await documents.convert_document(ctx, "note.txt", target="rtf")
+        assert result.ok, result.error
+        assert result.data["backend"] == "libreoffice"
+        assert seen, "LibreOffice should have been asked to do a format it owns"
