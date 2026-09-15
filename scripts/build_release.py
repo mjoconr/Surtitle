@@ -180,7 +180,12 @@ def build_venv(uv: str, python: Path, target: Path, *, voice_local: bool = False
     able to hear and speak without any network at all.
     """
     print("· creating the runtime virtual environment")
-    run([uv, "venv", "--python", str(python), str(target)])
+    # --relocatable matters: without it the venv's `bin/python` is an absolute
+    # symlink back into the build directory, so the extracted archive only runs
+    # on the machine that built it (and Python 3.12+ refuses to extract the
+    # absolute link at all).
+    run([uv, "venv", "--relocatable", "--python", str(python), str(target)])
+    _relativise_interpreter_links(target)
     venv_python = _venv_python(target)
 
     extra = ".[voice-local]" if voice_local else "."
@@ -239,6 +244,29 @@ def install_application(uv: str, venv: Path) -> None:
 
 def _venv_python(venv: Path) -> Path:
     return venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+
+
+def _relativise_interpreter_links(venv: Path) -> None:
+    """Point the venv's interpreter symlinks at a path inside the archive.
+
+    ``uv venv --relocatable`` makes the console scripts and ``pyvenv.cfg``
+    portable but still writes ``bin/python`` as an absolute symlink into the build
+    directory. That link dangles as soon as the archive is extracted anywhere
+    else — the app then cannot be imported at all — and Python 3.12+ refuses to
+    extract such an archive in the first place. The bundled runtime travels
+    inside the archive, so the link only has to be relative to it.
+    """
+    if os.name == "nt":
+        # Windows virtual environments copy the interpreter instead of linking.
+        return
+    for link in sorted((venv / "bin").glob("python*")):
+        if not link.is_symlink():
+            continue
+        target = Path(os.readlink(link))
+        if not target.is_absolute():
+            continue
+        link.unlink()
+        link.symlink_to(os.path.relpath(target, link.parent))
 
 
 def build_wheelhouse(uv: str, python: Path, destination: Path) -> None:
@@ -387,7 +415,16 @@ def verify_archive(archive_path: Path, *, expect_voice_local: bool = False) -> N
                 bundle.extractall(target)
         else:
             with tarfile.open(archive_path) as bundle:
-                bundle.extractall(target)
+                # `data` is the default from Python 3.12 on and it refuses
+                # absolute links. That refusal is a check rather than an
+                # obstacle: a relocatable archive must not contain a link back
+                # into the build directory.
+                try:
+                    bundle.extractall(target, filter="data")
+                except TypeError:  # interpreter without extract filters
+                    bundle.extractall(target)
+                except tarfile.FilterError as exc:
+                    raise SystemExit(f"archive is not relocatable: {exc}") from exc
 
         roots = [entry for entry in target.iterdir() if entry.is_dir()]
         root = roots[0] if len(roots) == 1 and not (target / "VERSION").exists() else target
@@ -405,6 +442,17 @@ def verify_archive(archive_path: Path, *, expect_voice_local: bool = False) -> N
                     break
         if interpreter is None:
             raise SystemExit("archive has no usable interpreter (looked for venv/)")
+
+        # Verification runs on the machine that built the archive, so a venv that
+        # still points back into the build directory resolves here and dangles
+        # for everyone else — which is exactly how a broken archive ships. Assert
+        # the interpreter lives inside the extracted tree instead.
+        resolved = Path(interpreter).resolve()
+        if target.resolve() not in resolved.parents:
+            raise SystemExit(
+                f"archive is not relocatable: {interpreter} resolves to {resolved}, "
+                f"which is outside the extracted tree"
+            )
 
         checks = (
             (
