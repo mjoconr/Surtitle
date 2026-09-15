@@ -12,10 +12,12 @@ import contextlib
 import importlib.util
 import io
 import json
+import os
 import platform
 import sys
 from dataclasses import dataclass, field
 from enum import StrEnum
+from pathlib import Path
 
 import httpx
 
@@ -163,20 +165,136 @@ def _check_keys(settings: Settings) -> list[Check]:
         )
 
     deepgram = settings.deepgram_key()
+    needs_deepgram = settings.needs_credential("DEEPGRAM_API_KEY")
     if deepgram:
-        checks.append(Check("Deepgram key", CheckStatus.OK, f"present ({_mask(deepgram)})"))
-    elif settings.voice_enabled:
+        configured = (
+            "present" if needs_deepgram else "present, not required by the selected engines"
+        )
+        checks.append(Check("Deepgram key", CheckStatus.OK, f"{configured} ({_mask(deepgram)})"))
+    elif needs_deepgram:
         checks.append(
             Check(
                 "Deepgram key",
                 CheckStatus.FAIL,
                 "DEEPGRAM_API_KEY is not set",
-                "Run `surtitle init`, or start with --text-only to skip voice.",
+                "Run `surtitle init`, add it in Settings, or set "
+                "SURTITLE_STT_BACKEND/TTS_BACKEND=local to use local engines.",
             )
         )
     else:
-        checks.append(Check("Deepgram key", CheckStatus.SKIP, "voice disabled"))
+        selected = []
+        if settings.stt_backend == "deepgram":
+            selected.append("STT")
+        if settings.tts_backend == "deepgram":
+            selected.append("TTS")
+        detail = f"not needed ({'/'.join(selected)} use Deepgram)" if selected else "not needed"
+        checks.append(Check("Deepgram key", CheckStatus.SKIP, detail))
     return checks
+
+
+def _check_local_voice(settings: Settings) -> list[Check]:
+    """Check the local engines: the extra, and the model files themselves.
+
+    A local engine that cannot load is worth failing loudly: the symptom is a
+    microphone that produces no text and a reply that is never spoken, and
+    neither of those points at a missing file.
+    """
+    from surtitle.voice import models
+
+    checks: list[Check] = []
+    selected = {
+        "stt": settings.stt_backend == "local",
+        "tts": settings.tts_backend == "local",
+    }
+    if not settings.voice_enabled or not any(selected.values()):
+        return checks
+
+    if importlib.util.find_spec("sherpa_onnx") is None:
+        checks.append(
+            Check(
+                "Local voice extra",
+                CheckStatus.FAIL,
+                "sherpa-onnx is not installed",
+                "Run `uv sync --extra voice-local` (or `pip install 'surtitle[voice-local]'`).",
+            )
+        )
+    else:
+        checks.append(Check("Local voice extra", CheckStatus.OK, "sherpa-onnx present"))
+
+    for direction, wanted in selected.items():
+        if not wanted:
+            continue
+        name = "STT" if direction == "stt" else "TTS"
+        label = settings.local_stt_model if direction == "stt" else settings.local_tts_model
+        try:
+            if direction == "stt":
+                resolved = models.resolve_stt(settings)
+            else:
+                resolved = models.resolve_tts(settings)
+        except models.ModelUnavailable as exc:
+            checks.append(
+                Check(f"Local {name} model", CheckStatus.FAIL, f"{label}: {exc}", exc.fix)
+            )
+            continue
+        size_mb = sum(
+            Path(path).stat().st_size for path in resolved.values() if Path(path).is_file()
+        ) / (1024 * 1024)
+        checks.append(
+            Check(
+                f"Local {name} model",
+                CheckStatus.OK,
+                f"{label} — {len(resolved)} file(s), {size_mb:.1f} MB",
+            )
+        )
+    return checks
+
+
+def _check_native_conflicts() -> Check:
+    """Report native libraries that could shadow one the engines bundle.
+
+    ``sherpa-onnx`` ships its own ``onnxruntime``, and modern Windows ships its own
+    ``C:\\Windows\\System32\\onnxruntime.dll`` (1.17.x). Windows resolves native
+    DLLs by *base name* and keeps one per process, so a copy loaded earlier by
+    anything else wins — and an API-version mismatch is raised in C++, where no
+    Python exception can catch it: the process simply dies with a status code.
+
+    That was observed once and could not be reproduced, so this is a **warning
+    with evidence**, not a diagnosis: it says what is present on the machine, which
+    is the first thing worth knowing when the local engines die on load. It is not
+    an error, because most machines with a System32 copy work fine.
+
+    Only meaningful on Windows, where the search order is the problem.
+    """
+    if sys.platform != "win32":
+        return Check("Native library conflicts", CheckStatus.SKIP, "not applicable")
+
+    names = ("onnxruntime.dll", "onnxruntime_providers_shared.dll")
+    found: list[str] = []
+    for directory in os.environ.get("PATH", "").split(os.pathsep):
+        if not directory:
+            continue
+        for name in names:
+            candidate = Path(directory) / name
+            if candidate.is_file():
+                found.append(str(candidate))
+
+    if not found:
+        return Check(
+            "Native library conflicts",
+            CheckStatus.OK,
+            "no competing onnxruntime.dll on PATH",
+        )
+    return Check(
+        "Native library conflicts",
+        CheckStatus.WARN,
+        f"onnxruntime.dll on PATH at {found[0]}",
+        "sherpa-onnx bundles its own ONNX runtime and Windows keeps one native "
+        "library per name per process, so a copy loaded earlier can win. This is "
+        "usually harmless, but if the local engines die on load with no Python "
+        "exception, remove a competing copy (`py -m pip uninstall onnxruntime "
+        "onnxruntime-gpu`) or take its directory off PATH. The C:\\Windows copy is "
+        "part of Windows and cannot be removed.",
+    )
 
 
 def _check_port(settings: Settings) -> Check:
@@ -309,6 +427,8 @@ async def run_checks(settings: Settings, *, live: bool = True) -> Report:
     checks.extend(_check_dependencies())
     checks.append(_check_data_dir(settings))
     checks.extend(_check_keys(settings))
+    checks.extend(_check_local_voice(settings))
+    checks.append(_check_native_conflicts())
     checks.append(_check_port(settings))
 
     if live:
@@ -316,21 +436,106 @@ async def run_checks(settings: Settings, *, live: bool = True) -> Report:
         logging.getLogger("websockets").setLevel(logging.WARNING)
         logging.getLogger("httpx").setLevel(logging.WARNING)
         checks.append(await _probe_deepseek(settings))
-        if settings.deepgram_key() and settings.voice_enabled:
-            # Probe the exact URLs a session will use, built by the same code. A
-            # hand-rolled parameter set here previously drifted from the client
-            # and reported a healthy configuration as broken — a worse outcome
-            # than having no diagnostic at all.
-            checks.append(
-                await _probe_deepgram(settings, modality="STT", target=listen_url(settings))
-            )
-            checks.append(
-                await _probe_deepgram(settings, modality="TTS", target=speak_url(settings))
-            )
+        # Only probe what the selected engines actually use. A live socket probe
+        # for an engine that is switched off reports a failure the user does not
+        # have, which is worse than no probe at all.
+        if settings.voice_enabled and settings.deepgram_key():
+            if settings.stt_backend == "deepgram":
+                # Probe the exact URLs a session will use, built by the same code.
+                # A hand-rolled parameter set here previously drifted from the
+                # client and reported a healthy configuration as broken.
+                checks.append(
+                    await _probe_deepgram(settings, modality="STT", target=listen_url(settings))
+                )
+            if settings.tts_backend == "deepgram":
+                checks.append(
+                    await _probe_deepgram(settings, modality="TTS", target=speak_url(settings))
+                )
+        if settings.voice_enabled and "local" in (
+            settings.stt_backend,
+            settings.tts_backend,
+        ):
+            checks.append(await _probe_local_voice(settings))
     else:
         checks.append(Check("Live API probes", CheckStatus.SKIP, "disabled with --offline"))
 
     return Report(checks=checks)
+
+
+async def _probe_local_voice(settings: Settings) -> Check:
+    """Load the local model and synthesise or decode one frame, end to end.
+
+    A file check proves the model is present; only running it proves the wheel
+    matches the ONNX runtime it was installed with. That failure mode is real on
+    a platform whose wheel set is incomplete, and it is exactly the kind of thing
+    a user cannot diagnose.
+    """
+    try:
+        import sherpa_onnx
+    except ImportError as exc:
+        return Check(
+            "Local voice runtime",
+            CheckStatus.FAIL,
+            f"cannot import sherpa-onnx ({exc})",
+            "Run `uv sync --extra voice-local`.",
+        )
+
+    try:
+        from surtitle.voice import models
+
+        if settings.tts_backend == "local":
+            paths = models.resolve_tts(settings)
+            vits = sherpa_onnx.OfflineTtsVitsModelConfig(
+                model=paths["model"], tokens=paths["tokens"], data_dir=paths["data_dir"]
+            )
+            tts = await asyncio.to_thread(
+                sherpa_onnx.OfflineTts,
+                sherpa_onnx.OfflineTtsConfig(
+                    model=sherpa_onnx.OfflineTtsModelConfig(vits=vits, num_threads=1)
+                ),
+            )
+            audio = await asyncio.to_thread(tts.generate, "Voice check.")
+            samples = len(audio.samples)
+            if samples == 0:
+                return Check(
+                    "Local voice runtime",
+                    CheckStatus.FAIL,
+                    "the local voice produced no audio",
+                    "Delete the model directory and download it again.",
+                )
+            return Check(
+                "Local voice runtime",
+                CheckStatus.OK,
+                f"synthesised {samples} samples at {audio.sample_rate} Hz",
+            )
+
+        paths = models.resolve_stt(settings)
+        recognizer = await asyncio.to_thread(
+            sherpa_onnx.OnlineRecognizer.from_transducer,
+            tokens=paths["tokens"],
+            encoder=paths["encoder"],
+            decoder=paths["decoder"],
+            joiner=paths["joiner"],
+            num_threads=1,
+            model_type=paths.get("model_type", ""),
+        )
+        stream = recognizer.create_stream()
+        stream.accept_waveform(settings.stt_sample_rate, [0.0] * 1600)
+        stream.input_finished()
+        while recognizer.is_ready(stream):
+            recognizer.decode_stream(stream)
+        return Check(
+            "Local voice runtime",
+            CheckStatus.OK,
+            f"recogniser loaded ({settings.local_stt_model}), decoded a silent frame",
+        )
+    except Exception as exc:  # noqa: BLE001 - any failure here is reported, not raised
+        return Check(
+            "Local voice runtime",
+            CheckStatus.FAIL,
+            f"{type(exc).__name__}: {exc}",
+            "Delete the model directory and run `surtitle models download` again.",
+        )
 
 
 _SYMBOLS = {

@@ -45,7 +45,21 @@ find_bundled_python() {
 
 if BUNDLED_PYTHON="$(find_bundled_python)"; then
   info "Using the bundled Python runtime."
+  # A "fat" release archive carries the speech models inside it. Pointing the app
+  # at that directory keeps an extracted archive fully offline: the models are
+  # found without a download and without touching the user's data directory.
+  if [ -d "$SCRIPT_DIR/models" ] && [ -z "${SURTITLE_MODELS_DIR:-}" ]; then
+    SURTITLE_MODELS_DIR="$SCRIPT_DIR/models"
+    export SURTITLE_MODELS_DIR
+  fi
   exec "$BUNDLED_PYTHON" -m surtitle "$@"
+fi
+
+# A source checkout that has already installed local voice models: find them so an
+# explicit models directory is not required.
+if [ -z "${SURTITLE_MODELS_DIR:-}" ] && [ -d "$SCRIPT_DIR/models" ]; then
+  SURTITLE_MODELS_DIR="$SCRIPT_DIR/models"
+  export SURTITLE_MODELS_DIR
 fi
 
 # Not a release archive: bootstrap from source.

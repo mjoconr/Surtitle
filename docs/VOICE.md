@@ -2,9 +2,122 @@
 
 How audio gets in, how it gets out, and why interrupting works.
 
-## The path
+## Engines
 
+Each direction has two implementations, chosen independently with
+`SURTITLE_STT_BACKEND` and `SURTITLE_TTS_BACKEND`:
+
+| | `deepgram` (default) | `local` |
+|---|---|---|
+| Where it runs | hosted WebSocket | ONNX in this process |
+| Needs a key | yes | no |
+| Needs the network | yes | no |
+| Cost | per minute | none |
+| Install | an API key | `uv sync --extra voice-local` + `surtitle models download` (~90 MB) |
+| Turn detection | Flux — *contextual*, uses what you said | trailing silence, plus a completeness heuristic |
+| Word errors | low | higher; measured below |
+
+They are independent, so "local ears, hosted voice" is supported and is usually
+the sensible combination — recognition is where the privacy and cost pressure is.
+
+## What the two engines are, measured
+
+Measured on the development machine (2019 Intel i9, macOS, no GPU, CPU only) with
+the shipped default models. These are the honest numbers, and they are why the
+hosted engine is still the default.
+
+| Metric | Deepgram | Local |
+|---|---|---|
+| Recogniser real-time factor | n/a (streamed) | **0.13** (larger zipformer, int8) |
+| Recogniser model load | n/a | **~6 s**, once per session |
+| Word error, model's own test audio | — | **~4%** (larger), **~10%** (small) |
+| First spoken audio | ~0.3–0.7 s (network RTT) | **0.7–1.9 s** (synthesis time) |
+| Voice real-time factor | n/a | **0.63–0.70** |
+| Resident memory | negligible | ~90 MB (STT) + ~60 MB (TTS) |
+| Disk | none | ~90 MB of models |
+
+Two things follow, and both matter more than the raw figures:
+
+- **Local recognition is genuinely real-time.** At 0.13 RTF a 16-second utterance
+  decodes in about 2 seconds, spread across the utterance rather than collapsed at
+  its end, so captions appear while you speak.
+- **Local speech starts slowly but produces faster than it plays.** Synthesising a
+  sentence costs 0.63–0.70 of that sentence's duration, so synthesis stays *ahead*
+  of playback and never underruns — but the first sentence still takes 0.7–1.9 s to
+  begin, because there is no server generating it in parallel with the model that
+  is writing the reply.
+
+Accuracy is where the gap is real. On the models' own test audio the larger local
+model transcribed "the squalid quarter of the brothel" correctly while the small
+one produced "BRAFFLS" for a proper noun; on synthesised instructions the larger
+model produced "MADE" for "Read". Proper nouns and domain jargon are exactly what a
+70 MB model gets wrong, and often exactly what this application is asked about.
+
+## Local turn detection, and why it is weaker
+
+Flux decides the end of a turn from *what was said*. A streaming zipformer offers
+no such judgement, so `voice/local_stt.py` uses a timer with one mitigation:
+
+1. **Trailing silence** — `SURTITLE_LOCAL_EOT_SILENCE_MS` (default 800 ms).
+2. **A completion heuristic** — if the transcript ends in a function word ("and",
+   "but", "the", "because"), the window extends to
+   `SURTITLE_LOCAL_EOT_EXTEND_MS` (default 1200 ms). Those words almost never
+   end a sentence, so waiting longer is nearly free.
+3. **A ceiling** — `SURTITLE_LOCAL_MAX_UTTERANCE_MS` (default 20 s), so a
+   monologue still becomes a turn.
+
+The asymmetry is deliberate: a false positive costs a slightly longer pause before
+the agent answers; a false negative cuts you off mid-sentence. So the heuristic
+leans toward waiting, and it still cannot tell "and then…" from "and that is all."
+If that matters, use the hosted engine for recognition and the local one only for
+speech.
+
+sherpa-onnx ships its own endpoint rules (`rule1`/`rule2`/`rule3`). They are
+deliberately **disabled** (`enable_endpoint_detection=False`) because they fire
+inside the recogniser, before this module can apply the extension — using both
+would mean the shorter rule won.
+
+## Partial results are cumulative
+
+The local recogniser re-emits the whole utterance for the current stream, and the
+engine forwards an update only when the text actually changes: while you pause it
+repeats itself every 320 ms, and forwarding that would put ~30 identical caption
+updates a second on the wire.
+
+That shape — **replace, never append** — is exactly what `Session._accumulate`
+already expects from Flux, so no session-side merging logic differs between the
+engines. The local path emits its text already upper-cased, as the model produces
+it.
+
+## Models
+
+Downloading is explicit and consented, never a side effect of starting the app:
+
+```bash
+surtitle models list       # what is installed, and what it would cost
+surtitle models download   # fetch what is missing (asks first)
+surtitle models verify     # re-check every installed file's checksum
 ```
+
+Everything lands in `<app data>/models` (`SURTITLE_MODELS_DIR` overrides),
+which is why updating or replacing the application never re-downloads them, and
+why deleting the application does not delete them.
+
+Every file is pinned by SHA-256 and checked before it is installed, because a
+truncated ONNX file does not raise — it produces garbage transcripts, which reads
+like a bad model rather than a bad download. Installation stages into a private
+directory and renames into place, so an interrupted download can never be mistaken
+for a complete one.
+
+The Piper voice archive ships espeak-ng data for every language in the world
+(19 MB); the installer keeps the files an English voice actually needs, taking the
+TTS install from 37 MB to 19 MB. Those files are pinned too, because espeak-ng
+prints an error and produces **no audio** rather than raising when one is missing,
+so the failure looks like a broken voice instead of a missing file.
+
+## The path, per engine
+
+```text
 microphone
    │  getUserMedia({echoCancellation, noiseSuppression, autoGainControl})
    ▼
@@ -14,34 +127,59 @@ AudioWorklet  ── downsample to 16 kHz mono ──► PCM16 frames (~32 ms)
    ▼                                                 ▼
 audio thread / main thread                        WebSocket
                                                      │
-                                                     ▼
-                                         Deepgram /v2/listen  (Flux)
-                                                     │
-                       interim ● final ● EndOfTurn ──┤
-                                                     ▼
-                                              agent turn starts
-                                                     │
-                                          DeepSeek streams tokens
-                                                     │
-                                          SpeakParser → <say> sentences
-                                                     │
-                                                     ▼
-                                          Deepgram /v1/speak
-                                                     │  linear16 PCM
-                                                     ▼
-                                        WebSocket binary frame → browser
-                                                     │
-                                                     ▼
-                                     Web Audio schedules AudioBuffers
+                     ┌───────────────────────────────┴────────────────────────┐
+                     ▼                                                        ▼
+       Deepgram /v2/listen (Flux)                        sherpa-onnx OnlineRecognizer
+       interim ● final ● EndOfTurn ──┐                   (320 ms batches, one thread)
+                                     │                   interim ● silence timer ──┐
+                                     └──────────────────┬─────────────────────────┘
+                                                        ▼
+                                                 agent turn starts
+                                                        │
+                                            DeepSeek streams tokens
+                                                        │
+                                            SpeakParser → <say> sentences
+                                                        │
+                     ┌──────────────────────────────────┴─────────────────────┐
+                     ▼                                                        ▼
+       Deepgram /v1/speak (Aura)                        sherpa-onnx OfflineTts (VITS)
+       linear16 PCM ──────────────┐                     22050 Hz → resampled to 24000
+                                   └──────────────────┬───────────────────────────┘
+                                                      ▼
+                                       WebSocket binary frame → browser
+                                                      │
+                                                      ▼
+                                    Web Audio schedules AudioBuffers
 ```
 
-## Speech in
+**The browser contract does not change with the engine.** Capture is 16 kHz mono
+PCM16 either way, and playback is PCM16 either way. The local voice natively
+synthesises at 22050 Hz, so the engine resamples to the configured
+`SURTITLE_TTS_SAMPLE_RATE` (24000) rather than announcing a new rate —
+`Playback.setServerRate()` refuses a change once the audio graph exists, so a
+mid-session change would be silently ignored by the client.
+
+## Barge-in with a local voice
+
+The hosted engine discards audio for interrupted text by **closing the socket**:
+Deepgram has already synthesised it, and leaving the connection open means the
+backlog arrives later and sounds like the agent ignoring you.
+
+A local engine has no socket, and an ONNX call already running cannot be
+cancelled. The equivalent guarantee is enforced by *discarding the result*:
+`barge_in()` increments the generation counter, and `_produce` re-checks it after
+synthesis returns and raises `BargeIn`, so audio for cancelled text never reaches
+the browser. Queued sentences are dropped before they are synthesised at all.
+That is tested directly (`test_barge_in_discards_in_flight_synthesis`).
+
+## Speech in (Deepgram)
 
 Two backends, selectable with `SURTITLE_STT_API`:
 
 **`v2` (default) — Flux.** A model trained for *contextual* end-of-turn detection. It
 uses the linguistic content, not just silence, so it does not cut you off mid-thought
 and does not make you wait out a fixed timeout after you finish.
+
 
 Flux takes a much smaller parameter set than Nova and **rejects anything it does not
 recognise with HTTP 400**. Verified against the live endpoint, these are refused on
@@ -421,7 +559,12 @@ finished, which releases echo suppression mid-turn.
 | TTS socket drops | Reconnect with backoff and re-queue the sentence once, so it is not silently lost. |
 | TTS unavailable | The turn still completes and the transcript is complete; only audio is missing. |
 | Microphone denied | Text-only mode; the error explains that typing still works. |
-| No Deepgram key | Voice disabled at startup; the mic button is disabled. |
+| No Deepgram key | If an engine is set to `deepgram`, that direction is disabled and the reason is reported in the `ready` payload and the Activity panel. A `local` direction is unaffected — the two are built independently. |
+| Local extra not installed | The direction is disabled with the `uv sync --extra voice-local` instruction, at startup rather than on the first click. |
+| Local model missing or corrupt | Reported by filename, with `surtitle models download <key>` as the fix. A partly installed model reads as *damaged*, not as "not installed". |
+| Local model load fails at runtime | Reported once and the session continues text-only; the recogniser does not reconnect-loop, because a missing ONNX runtime is not a transient failure. |
+| Local decode raises | Reported once, engine stops; the turn-based paths continue to work for typing. |
+| Local audio queue backs up | Oldest batch dropped and counted; a stalled decoder is otherwise invisible. |
 | Step budget exhausted | The turn stops, the reason is **spoken** as well as shown, and the log records it. |
 
 ### Failures are spoken, not just displayed
@@ -517,16 +660,25 @@ answer to a new one.
 
 | Setting | Default | Effect |
 |---|---|---|
-| `SURTITLE_STT_API` | `v2` | `v2` = Flux turn detection, `v1` = Nova + endpointing |
-| `DEEPGRAM_STT_MODEL` | `flux-general-en` | STT model |
-| `SURTITLE_ENDPOINTING_MS` | `300` | Silence before end-of-turn (v1 only) |
-| `DEEPGRAM_TTS_MODEL` | `aura-2-thalia-en` | Voice |
-| `SURTITLE_TTS_SPEED` | `1.0` | Speaking rate, 0.5–2.0 |
+| `SURTITLE_STT_BACKEND` | `deepgram` | `deepgram` or `local` |
+| `SURTITLE_TTS_BACKEND` | `deepgram` | `deepgram` or `local` (independent) |
+| `SURTITLE_STT_API` | `v2` | Deepgram only: `v2` = Flux, `v1` = Nova + endpointing |
+| `DEEPGRAM_STT_MODEL` | `flux-general-en` | Deepgram STT model |
+| `SURTITLE_ENDPOINTING_MS` | `300` | Silence before end-of-turn (Deepgram v1 only) |
+| `DEEPGRAM_TTS_MODEL` | `aura-2-thalia-en` | Deepgram voice |
+| `SURTITLE_TTS_SPEED` | `1.0` | Speaking rate, 0.5–2.0 (both engines) |
 | `SURTITLE_TTS_SAMPLE_RATE` | `24000` | Output sample rate |
+| `SURTITLE_LOCAL_STT_MODEL` | `streaming-zipformer-en-2023-06-26` | Local recogniser |
+| `SURTITLE_LOCAL_TTS_MODEL` | `vits-piper-en_US-lessac-medium` | Local voice |
+| `SURTITLE_LOCAL_EOT_SILENCE_MS` | `800` | Local: silence before a turn ends |
+| `SURTITLE_LOCAL_EOT_EXTEND_MS` | `1200` | Local: longer wait after "and", "the", … |
+| `SURTITLE_LOCAL_MAX_UTTERANCE_MS` | `20000` | Local: hard ceiling on one turn |
+| `SURTITLE_MODELS_DIR` | `<data dir>/models` | Where local models are cached |
 
 To verify the voice path end to end, run `./scripts/run.sh doctor` — it opens brief
-sockets to both the STT and TTS endpoints and reports whether the key is accepted,
-and prints which configuration files were read.
+sockets to both the Deepgram endpoints (when selected) and reports whether the key
+is accepted, loads the local model and synthesises or decodes one frame (when
+selected), and prints which configuration files were read.
 
 ### If voice fails to connect
 

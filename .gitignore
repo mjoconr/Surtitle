@@ -36,6 +36,10 @@ settings.json
 # Test and diagnostic scratch
 .ci-home/
 .testhome/
+# Speech models downloaded for a manual end-to-end check. They are large binaries
+# and are never part of the repository; `surtitle models download` fetches
+# them into the app data directory for normal use.
+.local-voice-test/
 
 # Editor and OS noise
 .DS_Store

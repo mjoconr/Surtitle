@@ -166,11 +166,28 @@ def build_api(state: AppState) -> APIRouter:
             "version": __version__,
             "model": settings.deepseek_model,
             "voice_enabled": settings.voice_enabled,
+            # Which engine each direction uses, so a support question does not
+            # have to start with "what is your configuration?".
+            "voice_backends": {
+                "stt": settings.stt_backend,
+                "tts": settings.tts_backend,
+            },
             "deepseek_configured": bool(settings.deepseek_key()),
             "deepgram_configured": bool(settings.deepgram_key()),
             "sessions": state.sessions.count,
             "data_dir": str(settings.data_dir),
         }
+
+    @api.get("/models")
+    async def local_models() -> dict[str, Any]:
+        """Local model inventory, for the Settings screen.
+
+        Read-only and cheap: it stats files rather than loading them, so the UI
+        can show what is installed without a multi-second ONNX load.
+        """
+        from surtitle.voice import models
+
+        return {"models": models.describe(state.settings)}
 
     # --- settings --------------------------------------------------------
     @api.get("/settings")

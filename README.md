@@ -36,33 +36,88 @@ sentence while the model is still generating. You hear the conclusion, not the l
 The archive bundles its own Python and every dependency, so nothing is downloaded
 on first run and no system Python is required.
 
+To install from source instead, or to add the offline speech engines later:
+
+```powershell
+.\scripts\install.ps1 -Yes       # Python, dependencies, local voice, models
+.\scripts\install.ps1 -Update    # update an existing installation
+```
+
 ### macOS / Linux
 
 ```bash
 git clone <this repo> && cd Surtitle
-./scripts/run.sh
+./scripts/install.sh          # Python, dependencies, and optionally offline voice
+./scripts/run.sh              # start it
 ```
 
-`run.sh` bootstraps everything with [uv](https://docs.astral.sh/uv/) — installing
-it if you have it, and telling you exactly how if you don't. A released archive is
-just as easy: extract and run `./scripts/run.sh`.
+`install.sh` uses [uv](https://docs.astral.sh/uv/) for Python and dependencies —
+installing uv if you do not have it — and is safe to re-run. `--no-voice` skips the
+local speech engines, and `--update` refreshes an existing install. A released archive
+is just as easy: extract and run `./scripts/run.sh`.
+
+If you would rather not install anything up front, `./scripts/run.sh` alone still
+bootstraps a working environment; `install.sh` simply does the same thing, plus the
+local voice extra and the model download, in one step.
 
 ### First run
 
 1. The app opens at `http://127.0.0.1:8765`.
-2. **Settings → API keys**: add a DeepSeek key and a Deepgram key. They are stored
-   locally with owner-only permissions and are never sent back to the browser.
+2. **Settings → API keys**: add a DeepSeek key and, for hosted voice, a Deepgram key.
+   They are stored locally with owner-only permissions and are never sent back to the
+   browser.
 3. **New project**: create one, or point it at a folder you already have.
 4. Click the mic and talk — or type. Click again to stop listening.
+
+To install everything — Python, dependencies, and optionally offline voice — use the
+installer instead of doing the above by hand. It is idempotent and has an update path:
+
+```bash
+./scripts/install.sh                 # macOS/Linux
+./scripts/install.sh --update        # refresh an existing install
+```
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1 -Yes
+.\scripts\install.ps1 -Update
+```
 
 ### Do I need both keys?
 
 | Key | Needed for | Without it |
 |---|---|---|
 | `DEEPSEEK_API_KEY` | Everything — it is the agent | The app will not start |
-| `DEEPGRAM_API_KEY` | Voice in and out | Text-only mode still works |
+| `DEEPGRAM_API_KEY` | Hosted voice in and out | Voice works only if you set the engines to `local` |
 
 Run `./scripts/run.sh doctor` to check both keys with live probes before starting.
+
+### Voice engines: hosted or local
+
+Each direction chooses its engine independently, in Settings → Voice or with
+`SURTITLE_STT_BACKEND` / `SURTITLE_TTS_BACKEND`:
+
+| | `deepgram` (default) | `local` |
+|---|---|---|
+| Runs | hosted WebSocket | on your CPU, offline |
+| Key | required | none |
+| Cost | per minute | none |
+| Install | an API key | `uv sync --extra voice-local` + `surtitle models download` (~90 MB) |
+| Turn taking | contextual (uses what you said) | trailing silence, plus a completeness heuristic |
+| Accuracy | low word error | higher word error, especially proper nouns |
+
+Local voice is genuinely usable — recognition runs at about **0.13× real time** and
+speech synthesis at **0.63–0.70×**, so it keeps ahead of playback on a laptop CPU
+with no GPU. It is not a straight upgrade: turn detection is a timer rather than an
+understanding of what you said, and a 70 MB model transcribes proper nouns and jargon
+noticeably worse. [`docs/VOICE.md`](docs/VOICE.md) has the measured figures and the
+trade-offs, including the hybrid "local ears, hosted voice" setting, which is usually
+the right one.
+
+```bash
+surtitle models list       # what is installed, and what it would cost
+surtitle models download   # fetch or repair the speech models
+surtitle models verify     # re-check every installed file's checksum
+```
 
 ## Projects
 
@@ -257,36 +312,47 @@ confuse you.
 ## Architecture
 
 ```
-Browser ── mic PCM16 ──► FastAPI ──► Deepgram /v2/listen (Flux turn detection)
-        ◄── audio ─────  127.0.0.1 ─► Deepgram /v1/speak
-        ◄── events ────       │
-                              └──► DeepSeek chat completions (streaming + tools)
-                                        │
-                                        └──► tool registry → project directory
+Browser ── mic PCM16 ──► FastAPI ──┬─► Deepgram /v2/listen (Flux turn detection)
+        ◄── audio ─────  127.0.0.1 │   or sherpa-onnx OnlineRecognizer (local)
+        ◄── events ────       │    ├─► Deepgram /v1/speak
+                              │    │   or sherpa-onnx OfflineTts (local)
+                              │    └─► DeepSeek chat completions (streaming + tools)
+                              │              │
+                              │              └─► tool registry → project directory
 ```
 
-Three decisions shape everything:
+Four decisions shape everything:
 
 **Audio never touches the Python process.** Capture and playback both live in the
 browser (an `AudioWorklet` and Web Audio). No PortAudio, no device enumeration, one
-code path for macOS and Windows.
+code path for macOS and Windows — and the same one for both voice engines, since
+the contract is PCM16 either way.
 
 **One process, one port.** HTTP and WebSocket share a FastAPI app — no second server
 to pair up, and no macOS `fork` hazard.
 
-**Turn detection is contextual.** Flux (Deepgram's Listen v2) decides when you have
-finished based on *what you said*, not a silence timer, so it neither cuts you off
-mid-thought nor makes you wait out a timeout. Nova with `endpointing` is the
-configurable fallback.
+**Turn detection is contextual — on the hosted engine.** Flux (Deepgram's Listen v2)
+decides when you have finished based on *what you said*, not a silence timer, so it
+neither cuts you off mid-thought nor makes you wait out a timeout. Nova with
+`endpointing` is the configurable fallback. The local engine has no such judgement and
+uses a silence timer with a completeness heuristic; that difference is the single
+biggest reason the hosted engine remains the default.
+
+**The voice engine is a backend, not the architecture.** `voice/engine.py` chooses
+which implementation each direction uses, so the session, the browser protocol and the
+agent loop are unaware of it. The local engines are an optional extra, imported lazily
+— the app, its test suite and its release archive never require them.
 
 ### Barge-in
 
 Interrupting the agent stops audio in two stages: the browser silences its local
 playback queue the instant speech is detected, and the server cancels the model
-stream and abandons the Deepgram TTS socket so audio already synthesised for
-cancelled text is never delivered. A short grace window after playback begins
-prevents the speaker tail from triggering a false interruption before echo
-cancellation has converged.
+stream and abandons the voice engine so audio already synthesised for cancelled text
+is never delivered. On the hosted engine that means closing the Deepgram socket; on
+the local engine it means discarding the synthesis result that arrives after the
+interruption, because an ONNX call already running cannot be cancelled. A short grace
+window after playback begins prevents the speaker tail from triggering a false
+interruption before echo cancellation has converged.
 
 ### The speak layer
 
@@ -300,23 +366,27 @@ URLs and file paths are stripped before speech, because they read terribly aloud
 
 ```bash
 uv sync                              # install
+uv sync --extra voice-local          # plus the offline speech engines
 uv run pytest                        # full suite, offline
 uv run pytest -m live                # the subset that reaches the network
 uv run ruff format src tests scripts
 uv run ruff check src tests scripts
 uv run surtitle doctor           # live-probe your configuration
+uv run surtitle models download  # fetch local speech models (~90 MB)
 ```
 
 The default suite is **fully offline**: every DeepSeek and Deepgram interaction is
 replayed through scripted fakes, so tests are deterministic and need no API keys.
-`pytest -m live` is the opt-in subset that really installs a package from PyPI and
-really converts a document.
+The local engines are tested the same way — a fake `sherpa_onnx` is injected, so no
+test needs the optional extra, a model file, or ONNX. `pytest -m live` is the opt-in
+subset that really installs a package from PyPI and really converts a document.
 
 ```
 src/surtitle/
   core/       agent loop, speak layer, session orchestration, event protocol
   llm/        DeepSeek streaming client
-  voice/      Deepgram STT (Flux) and TTS clients
+  voice/      engine selection, Deepgram STT/TTS clients, local (sherpa-onnx)
+              STT/TTS adapters, the model registry and installer
   tools/      registry, path guard, filesystem, shell, artifacts, documents,
               environments, MCP client
   store/      SQLite sessions, settings and credentials

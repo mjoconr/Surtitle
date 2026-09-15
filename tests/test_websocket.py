@@ -533,3 +533,77 @@ class TestUnconfiguredStartup:
         response = client.put("/api/settings", json={"reasoning_effort": "high"})
         assert response.status_code == 200
         assert response.json()["sections"]["model"]
+
+
+class TestReadyReportsTheVoiceEngines:
+    """The `ready` payload is how the UI explains a voice configuration.
+
+    A configured engine that cannot start is the hardest voice failure to
+    diagnose from the outside, so the reason and the fix travel with the session
+    rather than only appearing in a log the user will not read.
+    """
+
+    def test_ready_names_both_engines(self, tmp_path):
+        settings = make_settings(tmp_path, voice_enabled=True)
+        app = create_app_for(settings)
+        with TestClient(app) as client:
+            state = app.state.app_state
+            root = tmp_path / "proj-engines"
+            root.mkdir()
+            project = state.store.create_project("Engines", root)
+            session = state.store.create_session(project.id)
+            with client.websocket_connect("/ws") as socket:
+                socket.send_text(hello(project.id, session.id))
+                events = receive_until(socket, {"ready"}, limit=5)
+            ready = next(e for e in events if e["kind"] == "ready")["data"]
+            assert ready["voice_backends"] == {"stt": "deepgram", "tts": "deepgram"}
+
+    def test_a_local_model_that_is_missing_explains_itself(self, tmp_path):
+        settings = make_settings(
+            tmp_path,
+            voice_enabled=True,
+            SURTITLE_STT_BACKEND="local",
+            SURTITLE_TTS_BACKEND="local",
+            SURTITLE_MODELS_DIR=str(tmp_path / "no-models-here"),
+        )
+        app = create_app_for(settings)
+        with TestClient(app) as client:
+            state = app.state.app_state
+            root = tmp_path / "proj-local"
+            root.mkdir()
+            project = state.store.create_project("Local", root)
+            session = state.store.create_session(project.id)
+            with client.websocket_connect("/ws") as socket:
+                socket.send_text(hello(project.id, session.id))
+                events = receive_until(socket, {"ready"}, limit=5)
+            ready = next(e for e in events if e["kind"] == "ready")["data"]
+
+        assert ready["voice_enabled"] is False, "voice must not claim to work"
+        assert ready["voice_problem"], "the reason must travel with the session"
+        assert "local stt model" in ready["voice_problem"]
+        assert ready["voice_fix"] and "models download" in ready["voice_fix"]
+
+    def test_a_missing_local_voice_does_not_remove_hosted_recognition(self, tmp_path):
+        """Half a pipeline is strictly better than none."""
+        settings = make_settings(
+            tmp_path,
+            voice_enabled=True,
+            SURTITLE_TTS_BACKEND="local",
+            SURTITLE_MODELS_DIR=str(tmp_path / "no-models-here"),
+        )
+        app = create_app_for(settings)
+        with TestClient(app) as client:
+            state = app.state.app_state
+            root = tmp_path / "proj-half"
+            root.mkdir()
+            project = state.store.create_project("Half", root)
+            session = state.store.create_session(project.id)
+            with client.websocket_connect("/ws") as socket:
+                socket.send_text(hello(project.id, session.id))
+                events = receive_until(socket, {"ready"}, limit=5)
+            ready = next(e for e in events if e["kind"] == "ready")["data"]
+
+        # Recognition is hosted and has a key, so it is present; only the spoken
+        # reply is missing, and the session says so rather than going silent.
+        assert ready["voice_problem"]
+        assert ready["voice_backends"]["stt"] == "deepgram"

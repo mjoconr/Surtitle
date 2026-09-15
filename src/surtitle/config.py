@@ -39,6 +39,12 @@ DEEPGRAM_SPEAK_URL = "wss://api.deepgram.com/v1/speak"
 DEEPGRAM_STT_MODEL = "flux-general-en"
 DEEPGRAM_TTS_MODEL = "aura-2-thalia-en"
 
+# Local (sherpa-onnx) defaults. These are registry keys in
+# :mod:`surtitle.voice.models`, which owns the URLs and checksums; keeping
+# the *names* here means configuration needs no import of the model layer.
+LOCAL_STT_MODEL = "streaming-zipformer-en-2023-06-26"
+LOCAL_TTS_MODEL = "vits-piper-en_US-lessac-medium"
+
 
 class ConfigError(RuntimeError):
     """Raised when the app cannot start because configuration is unusable."""
@@ -132,9 +138,18 @@ class Settings(BaseSettings):
     request_timeout: float = Field(default=180.0, alias="SURTITLE_REQUEST_TIMEOUT")
 
     # --- voice -----------------------------------------------------------
+    # Which implementation of each half of the pipeline to use:
+    #   "deepgram" — the hosted streaming service (the default).
+    #   "local"    — sherpa-onnx inside this process, with no network at all.
+    # The two directions are independent, so "local ears, hosted voice" is a
+    # supported combination. Selecting a backend implies nothing about the other.
+    stt_backend: str = Field(default="deepgram", alias="SURTITLE_STT_BACKEND")
+    tts_backend: str = Field(default="deepgram", alias="SURTITLE_TTS_BACKEND")
+
     # "v2" uses Flux with contextual turn detection; "v1" uses Nova with
     # endpointing. v2 is the default because turn-taking quality is the single
-    # biggest contributor to conversational feel.
+    # biggest contributor to conversational feel. Deepgram backend only; the
+    # local backend has its own settings below.
     stt_api: str = Field(default="v2", alias="SURTITLE_STT_API")
     stt_model: str = Field(default=DEEPGRAM_STT_MODEL, alias="DEEPGRAM_STT_MODEL")
     stt_language: str = Field(default="en", alias="DEEPGRAM_STT_LANGUAGE")
@@ -154,6 +169,26 @@ class Settings(BaseSettings):
     # Capture rate is fixed by Deepgram's linear16 expectation.
     stt_sample_rate: int = Field(default=16000, alias="SURTITLE_STT_SAMPLE_RATE")
     voice_enabled: bool = Field(default=True, alias="SURTITLE_VOICE")
+
+    # --- local (sherpa-onnx) voice ---------------------------------------
+    # Model names are registry keys in :mod:`surtitle.voice.models`, not
+    # paths, so a model can be swapped without touching the filesystem layout.
+    local_stt_model: str = Field(default=LOCAL_STT_MODEL, alias="SURTITLE_LOCAL_STT_MODEL")
+    local_tts_model: str = Field(default=LOCAL_TTS_MODEL, alias="SURTITLE_LOCAL_TTS_MODEL")
+    # Prefer the int8 encoder when the model ships both: roughly half the RAM
+    # for a small accuracy cost, which is the right trade on a laptop CPU.
+    local_stt_int8: bool = Field(default=True, alias="SURTITLE_LOCAL_STT_INT8")
+
+    # Turn detection. The local recogniser has no contextual end-of-turn model,
+    # so a turn ends on trailing silence — and, when the transcript looks
+    # unfinished, on a longer silence instead. See docs/VOICE.md.
+    local_eot_silence_ms: int = Field(default=800, alias="SURTITLE_LOCAL_EOT_SILENCE_MS")
+    local_eot_extend_ms: int = Field(default=1200, alias="SURTITLE_LOCAL_EOT_EXTEND_MS")
+    # Hard ceiling: a monologue still has to become a turn at some point.
+    local_max_utterance_ms: int = Field(default=20000, alias="SURTITLE_LOCAL_MAX_UTTERANCE_MS")
+    # Where model files live. Defaults under the data directory so uninstalling
+    # is still "delete one tree".
+    models_dir: Path | None = Field(default=None, alias="SURTITLE_MODELS_DIR")
 
     # --- server ----------------------------------------------------------
     host: str = Field(default="127.0.0.1", alias="SURTITLE_HOST")
@@ -191,6 +226,15 @@ class Settings(BaseSettings):
             raise ValueError(f"stt_api must be one of {sorted(allowed)}, got {value!r}")
         return normalised
 
+    @field_validator("stt_backend", "tts_backend")
+    @classmethod
+    def _check_backend(cls, value: str) -> str:
+        allowed = {"deepgram", "local"}
+        normalised = value.lower()
+        if normalised not in allowed:
+            raise ValueError(f"voice backend must be one of {sorted(allowed)}, got {value!r}")
+        return normalised
+
     @field_validator("tts_speed")
     @classmethod
     def _check_speed(cls, value: float) -> float:
@@ -212,6 +256,16 @@ class Settings(BaseSettings):
     def log_path(self) -> Path:
         return self.data_dir / "surtitle.log"
 
+    @property
+    def models_path(self) -> Path:
+        """Where local speech models are cached.
+
+        Under the data directory by default, so removing the app removes them,
+        and overridable because a shared or read-only install may want them
+        somewhere else entirely.
+        """
+        return self.models_dir or (self.data_dir / "models")
+
     # --- credential helpers ---------------------------------------------
     def deepseek_key(self) -> str | None:
         """Return the DeepSeek key value, or ``None`` when unset."""
@@ -221,12 +275,25 @@ class Settings(BaseSettings):
         """Return the Deepgram key value, or ``None`` when unset."""
         return self.deepgram_api_key.get_secret_value() if self.deepgram_api_key else None
 
+    def needs_credential(self, name: str) -> bool:
+        """True when ``name`` is required by the selected backends.
+
+        Only a *Deepgram* backend needs a Deepgram key. A fully local setup
+        needs no key at all, which is the whole point of it — and asking for one
+        would make a working offline configuration look broken.
+        """
+        if name == "DEEPGRAM_API_KEY":
+            if not self.voice_enabled:
+                return False
+            return "deepgram" in (self.stt_backend, self.tts_backend)
+        return name == "DEEPSEEK_API_KEY"
+
     def missing_credentials(self) -> list[str]:
         """Names of credentials that are absent, for ``doctor`` and startup errors."""
         missing = []
-        if not self.deepseek_key():
+        if self.needs_credential("DEEPSEEK_API_KEY") and not self.deepseek_key():
             missing.append("DEEPSEEK_API_KEY")
-        if self.voice_enabled and not self.deepgram_key():
+        if self.needs_credential("DEEPGRAM_API_KEY") and not self.deepgram_key():
             missing.append("DEEPGRAM_API_KEY")
         return missing
 
@@ -234,13 +301,17 @@ class Settings(BaseSettings):
         """Raise :class:`ConfigError` when a needed credential is absent.
 
         ``voice`` forces the Deepgram requirement on or off regardless of the
-        stored setting, so text-only mode can run without a Deepgram key.
+        stored setting, so text-only mode can run without a Deepgram key. A
+        local-only voice configuration never needs one, because nothing in it
+        talks to Deepgram.
         """
-        need_voice = self.voice_enabled if voice is None else voice
         missing = []
         if not self.deepseek_key():
             missing.append("DEEPSEEK_API_KEY")
-        if need_voice and not self.deepgram_key():
+        need_deepgram = self.needs_credential("DEEPGRAM_API_KEY")
+        if voice is not None:
+            need_deepgram = voice and "deepgram" in (self.stt_backend, self.tts_backend)
+        if need_deepgram and not self.deepgram_key():
             missing.append("DEEPGRAM_API_KEY")
         if missing:
             joined = ", ".join(missing)

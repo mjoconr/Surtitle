@@ -14,6 +14,15 @@ How that is achieved:
 3. A **wheelhouse** is bundled too, so a user with no network can still repair or
    extend the environment offline with `pip install --no-index --find-links`.
 
+Local voice is optional in two independent halves, and the flags say which:
+
+* ``--with-voice-local`` installs the ``sherpa-onnx`` runtime into the archive, so
+  the local engines work without a network at all. It adds roughly 30 MB.
+* ``--with-local-models`` downloads the speech models (~90 MB) into ``models/``
+  inside the archive, so an extracted archive can run fully offline out of the
+  box. Without it, the app downloads whatever models the user asks for on first
+  use — which keeps the archive small, and is the default.
+
 Run on the target platform: a macOS build produces a macOS archive, and the
 Windows build must run on Windows because compiled wheels are platform-specific.
 The GitHub Actions workflow does exactly that.
@@ -162,15 +171,21 @@ def copy_python_runtime(source_root: Path, destination: Path) -> Path:
     return interpreter
 
 
-def build_venv(uv: str, python: Path, target: Path) -> None:
+def build_venv(uv: str, python: Path, target: Path, *, voice_local: bool = False) -> None:
     """Create the runtime virtual environment with all dependencies installed.
 
     Installs from the project's lockfile so an archive is reproducible, falling
     back to resolving from pyproject.toml if locking is unavailable offline.
+    ``voice_local`` adds the local speech engines, which is what makes an archive
+    able to hear and speak without any network at all.
     """
     print("· creating the runtime virtual environment")
     run([uv, "venv", "--python", str(python), str(target)])
     venv_python = _venv_python(target)
+
+    extra = ".[voice-local]" if voice_local else "."
+    if voice_local:
+        print("· including the local voice engines (sherpa-onnx)")
 
     try:
         run(
@@ -191,7 +206,7 @@ def build_venv(uv: str, python: Path, target: Path) -> None:
                 "--python",
                 str(venv_python),
                 "--editable",
-                ".",
+                extra,
             ],
             cwd=REPO_ROOT,
         )
@@ -250,6 +265,36 @@ def build_wheelhouse(uv: str, python: Path, destination: Path) -> None:
         )
     except SystemExit as exc:
         print(f"  (skipped: {exc})")
+
+
+def prefetch_models(venv: Path, destination: Path) -> None:
+    """Download the local speech models into the archive tree.
+
+    Run against the *archive's* interpreter, so the download uses the same model
+    registry the shipped app will use. A failure is fatal here rather than
+    skipped: a build that claims to include models and does not is worse than one
+    that refuses to build.
+    """
+    print("· downloading local speech models into the archive")
+    interpreter = _venv_python(venv)
+    destination.mkdir(parents=True, exist_ok=True)
+    environment = dict(os.environ)
+    environment["SURTITLE_MODELS_DIR"] = str(destination)
+    result = subprocess.run(
+        [str(interpreter), "-m", "surtitle", "models", "download", "--yes"],
+        capture_output=True,
+        text=True,
+        env=environment,
+        check=False,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip().splitlines()
+        raise SystemExit(
+            "could not download the local speech models:\n  "
+            + ("\n  ".join(detail[-5:]) if detail else "no output")
+        )
+    total = sum(path.stat().st_size for path in destination.rglob("*") if path.is_file())
+    print(f"  models: {total / (1024 * 1024):.0f} MB")
 
 
 def copy_sources(destination: Path) -> None:
@@ -319,7 +364,7 @@ def archive(destination: Path, version: str) -> Path:
     return path
 
 
-def verify_archive(archive_path: Path) -> None:
+def verify_archive(archive_path: Path, *, expect_voice_local: bool = False) -> None:
     """Extract the archive and prove the bundled runtime actually runs.
 
     A release archive is only useful if it starts on a machine with no Python and
@@ -384,6 +429,25 @@ def verify_archive(archive_path: Path) -> None:
             ),
         )
 
+        if expect_voice_local:
+            # Importing the engines is the cheap half; constructing a recogniser
+            # config proves the bundled wheel matches the ONNX runtime it shipped
+            # with, which is the failure a wheel/ABI break produces. No model file
+            # is needed for that, so this stays fast.
+            checks += (
+                (
+                    "bundles the local voice engines",
+                    [
+                        str(interpreter),
+                        "-c",
+                        "import sherpa_onnx, surtitle.voice.local_stt,"
+                        " surtitle.voice.local_tts;"
+                        " sherpa_onnx.OnlineRecognizer;"
+                        " print('sherpa-onnx', getattr(sherpa_onnx, '__version__', '?'))",
+                    ],
+                ),
+            )
+
         # Run in a scratch home with a cleared environment, so nothing resolves
         # back to this build machine.
         environment = {
@@ -426,7 +490,21 @@ def main() -> int:
         action="store_true",
         help="Skip extracting and smoke-testing the finished archive.",
     )
+    parser.add_argument(
+        "--with-voice-local",
+        action="store_true",
+        help="Bundle the local speech engines (sherpa-onnx, ~30 MB).",
+    )
+    parser.add_argument(
+        "--with-local-models",
+        action="store_true",
+        help="Bundle the speech models too (~90 MB), for a fully offline archive. "
+        "Implies --with-voice-local.",
+    )
     args = parser.parse_args()
+
+    if args.with_local_models:
+        args.with_voice_local = True
 
     uv = find_uv()
     version = project_version()
@@ -442,19 +520,27 @@ def main() -> int:
     print(f"· bundled interpreter: {bundled_python.relative_to(BUILD_DIR)}")
 
     venv_dir = BUILD_DIR / "venv"
-    build_venv(uv, bundled_python, venv_dir)
+    build_venv(uv, bundled_python, venv_dir, voice_local=args.with_voice_local)
     install_application(uv, venv_dir)
 
     if not args.skip_wheelhouse:
         build_wheelhouse(uv, _venv_python(venv_dir), BUILD_DIR / "wheelhouse")
 
+    if args.with_local_models:
+        prefetch_models(venv_dir, BUILD_DIR / "models")
+
     copy_sources(BUILD_DIR)
     write_launchers(BUILD_DIR, version)
     manifest = write_manifest(BUILD_DIR, version)
+    manifest["voice_local"] = args.with_voice_local
+    manifest["local_models"] = args.with_local_models
+    (BUILD_DIR / "BUILD-INFO.json").write_text(
+        json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
+    )
 
     output = archive(BUILD_DIR, version)
     if not args.skip_verify:
-        verify_archive(output)
+        verify_archive(output, expect_voice_local=args.with_voice_local)
 
     size_mb = output.stat().st_size / (1024 * 1024)
     print(f"\nBuilt {output}")

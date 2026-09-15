@@ -66,6 +66,112 @@ powershell -ExecutionPolicy Bypass -File .\scripts\run.ps1
 
 Or use `run.bat`, which has no execution-policy restriction.
 
+## Installing and updating
+
+`scripts/install.ps1` does the whole job — Python, dependencies, and optionally the
+local speech engines and their models — with no administrator rights:
+
+```powershell
+# Everything, including offline speech recognition and synthesis
+powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1 -Yes
+
+# Hosted voice only (smaller and faster; needs a Deepgram key)
+.\scripts\install.ps1 -NoVoice
+
+# Update an existing installation
+.\scripts\install.ps1 -Update
+
+# Report what is installed and what is missing; change nothing
+.\scripts\install.ps1 -Check
+```
+
+The script is idempotent: running it twice is a fast no-op.
+
+**Why updating is cheap.** The code and its virtual environment live in the
+checkout; the speech models live in `%LOCALAPPDATA%\Surtitle\models`. Updating
+replaces the code and re-verifies the models without re-downloading ~90 MB, and
+deleting the checkout does not delete the models. Nothing is written to the
+registry, to `Program Files`, or to `PATH`.
+
+```powershell
+.\scripts\run.ps1 models list       # what is installed, and its size
+.\scripts\run.ps1 models download   # fetch or repair models
+.\scripts\run.ps1 models verify     # re-check checksums
+```
+
+## Offline voice
+
+The local engines run entirely on the CPU, with no API key and no network:
+
+```powershell
+.\scripts\install.ps1                    # installs the extra and downloads models
+# then: Settings -> Voice -> Speech-to-text engine / Text-to-speech engine = local
+```
+
+`uv sync --extra voice-local` installs `sherpa-onnx` (which ships its own ONNX
+runtime), and `surtitle models download` fetches the models. Both are needed;
+the first without the second reports a missing model by filename rather than
+failing silently.
+
+Measured on a 2019 Intel i9: recognition runs at about 0.13× real time, and speech
+synthesis at about 0.63–0.70× — fast enough to stay ahead of playback. Turn
+detection is silence-based, which is weaker than the hosted engine's contextual
+detector; see [`VOICE.md`](VOICE.md) for the numbers and the trade-off.
+
+### If the local voice crashes instead of erroring
+
+Seen once on a real Windows 11 machine, and recorded because it is genuinely
+frustrating to diagnose: the process died with a Windows status code
+(`0xC0000409`, stack buffer overrun) *after* printing
+
+```
+The requested API version [28] is not available, only API versions [1, 17] are
+supported in this build. Current ORT Version is: 1.17.1
+```
+
+That is an ONNX Runtime API-version mismatch, raised in C++ where no Python
+exception can catch it. It could not be reproduced on demand — the same machine,
+same wheel, same commands subsequently synthesised speech successfully, and a
+fresh environment never showed it — so it is attributed to that machine's state
+rather than to a defect here. What is known, and worth checking first, is that
+modern Windows ships its **own** `onnxruntime.dll`:
+
+```
+C:\Windows\System32\onnxruntime.dll   1.17.x
+```
+
+while `sherpa-onnx` bundles 1.23 next to its extension module. Windows resolves
+native DLLs by base name and keeps one per process, so a copy loaded earlier by
+anything else wins — which is why `surtitle doctor` reports it:
+
+```
+[warn] Native library conflicts: onnxruntime.dll on PATH at C:\WINDOWS\system32\onnxruntime.dll
+```
+
+**If the local engines die on load,** check for a competing copy and remove it:
+
+```powershell
+where.exe onnxruntime.dll                       # several copies is normal
+py -m pip list | Select-String onnx             # a global install is the usual cause
+py -m pip uninstall onnxruntime onnxruntime-gpu
+```
+
+The System32 copy belongs to Windows and cannot be removed; it is what the warning
+is telling you about. The local engines are otherwise self-contained — `sherpa-onnx`
+needs no separately installed ONNX runtime — and `surtitle doctor` verifies the
+model files, the wheel and a real synthesis independently of this problem.
+
+### What the installer needs on Windows
+
+Nothing but a network connection: `scripts\install.ps1` installs `uv`, which brings
+its own Python, into `%USERPROFILE%\.local\bin`. No administrator rights, no
+registry writes, and nothing added to the system `PATH`.
+
+Python **3.13** works: `sherpa-onnx` 1.13.8 publishes `win_amd64` wheels for
+`cp311` through `cp314`, and the project supports all of them.
+
+
+
 ## Package installation by the agent
 
 The agent can install Python packages it needs. On Windows this stays entirely inside
@@ -95,6 +201,12 @@ Output lands in `dist\`. Useful flags:
 |---|---|
 | `--skip-wheelhouse` | Smaller archive; offline repair is no longer possible |
 | `--keep-build` | Reuse `build\release` instead of starting fresh |
+| `--with-voice-local` | Bundle the local speech engines (~30 MB); models still download on first use |
+| `--with-local-models` | Bundle the models too (~90 MB), for a fully offline archive |
+
+The default archive contains neither local-voice piece, which keeps the documented
+"no network needed to start" property true for the shipped download. The two flags
+are independent so the trade-off is a build decision rather than a surprise.
 
 To cut the size of the archive (roughly 130–180 MB, dominated by matplotlib and the
 interpreter), consider a `requirements-release.txt` that omits matplotlib for

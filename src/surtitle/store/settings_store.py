@@ -192,17 +192,69 @@ SETTINGS_FIELDS: tuple[_Field, ...] = (
         section="voice",
     ),
     _Field(
+        "stt_backend",
+        str,
+        "Speech-to-text engine",
+        "'deepgram' streams from the hosted service (needs a key). "
+        "'local' recognises on this machine, offline.",
+        choices=("deepgram", "local"),
+        section="voice",
+    ),
+    _Field(
+        "tts_backend",
+        str,
+        "Text-to-speech engine",
+        "'deepgram' uses the hosted Aura voices (needs a key). "
+        "'local' speaks on this machine, offline.",
+        choices=("deepgram", "local"),
+        section="voice",
+    ),
+    _Field(
         "stt_model",
         str,
-        "Speech-to-text model",
-        "Deepgram listen model used for transcription.",
+        "Deepgram speech-to-text model",
+        "Listen model used for transcription when the engine is deepgram.",
         section="voice",
     ),
     _Field(
         "tts_model",
         str,
-        "Text-to-speech voice",
-        "Deepgram Aura voice used for spoken replies.",
+        "Deepgram text-to-speech voice",
+        "Aura voice used for spoken replies when the engine is deepgram.",
+        section="voice",
+    ),
+    _Field(
+        "local_stt_model",
+        str,
+        "Local speech-to-text model",
+        "Model key from `surtitle models list`. Used when the engine is local.",
+        section="voice",
+    ),
+    _Field(
+        "local_tts_model",
+        str,
+        "Local text-to-speech voice",
+        "Model key from `surtitle models list`. Used when the engine is local.",
+        section="voice",
+    ),
+    _Field(
+        "local_eot_silence_ms",
+        int,
+        "Local end-of-turn silence (ms)",
+        "How long you must pause before a locally recognised turn is finished. "
+        "A local model has no contextual end-of-turn detector, so this is a timer.",
+        minimum=200,
+        maximum=5000,
+        section="voice",
+    ),
+    _Field(
+        "local_eot_extend_ms",
+        int,
+        "Local unfinished-sentence extension (ms)",
+        "Longer wait applied when the transcript ends in 'and', 'the', or similar, "
+        "so a half-finished thought is not cut off.",
+        minimum=200,
+        maximum=8000,
         section="voice",
     ),
     _Field(
@@ -589,6 +641,11 @@ _ENV_FOR_PREF = {
     "deepseek_model": "DEEPSEEK_MODEL",
     "stt_model": "DEEPGRAM_STT_MODEL",
     "tts_model": "DEEPGRAM_TTS_MODEL",
+    # The engine selectors have a plain SURTITLE_<NAME> alias, so the generic
+    # check in _env_locked already covers them; these are only listed because the
+    # model *names* use the backend-specific prefixes above.
+    "local_stt_model": "SURTITLE_LOCAL_STT_MODEL",
+    "local_tts_model": "SURTITLE_LOCAL_TTS_MODEL",
 }
 
 

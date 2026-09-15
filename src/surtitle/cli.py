@@ -22,8 +22,8 @@ from surtitle.store.settings_store import SettingsStore, SettingsValidationError
 
 app = typer.Typer(
     name="surtitle",
-    help="Voice-first agentic workbench: talk to an agent that reads your documents, "
-    "writes code, and produces PDFs and spreadsheets.",
+    help="Voice-first agentic workbench — talk to an agent that reads your documents, "
+    "writes and runs code, and answers out loud. Hear the conclusion, not the log.",
     no_args_is_help=True,
     add_completion=False,
 )
@@ -232,6 +232,181 @@ _FALLBACK_ENV_TEMPLATE = """\
 DEEPSEEK_API_KEY=
 DEEPGRAM_API_KEY=
 """
+
+
+# --- local speech models -------------------------------------------------
+
+models_app = typer.Typer(
+    name="models",
+    help="Download and verify the local speech models (no API key needed).",
+    no_args_is_help=True,
+)
+app.add_typer(models_app, name="models")
+
+
+def _human_bytes(count: int) -> str:
+    size = float(count)
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024 or unit == "GB":
+            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} GB"
+
+
+def _model_table(rows: list) -> Table:
+    table = Table(box=None)
+    table.add_column("Model", style="cyan")
+    table.add_column("Kind")
+    table.add_column("Size", justify="right")
+    table.add_column("Status")
+    for item in rows:
+        status = "[green]installed[/green]" if item.present else "[yellow]missing[/yellow]"
+        table.add_row(item.key, item.kind, _human_bytes(item.total_bytes), status)
+    return table
+
+
+@models_app.command("list")
+def models_list() -> None:
+    """Show every registered local model and whether it is installed."""
+    from surtitle.voice import models
+
+    store = _open_store()
+    assert store is not None
+    settings = store.effective()
+    rows = models.status(settings)
+    console.print(_model_table(rows))
+    for item in rows:
+        if not item.present:
+            console.print(f"[dim]{item.key}: {item.summary}[/dim]")
+    console.print(f"[dim]Model cache: {readable_path(models.models_dir(settings))}[/dim]")
+
+
+@models_app.command("status")
+def models_status() -> None:
+    """Alias for `models list`."""
+    models_list()
+
+
+@models_app.command("download")
+def models_download(
+    keys: list[str] = typer.Argument(
+        None, help="Model keys to install. Default: everything registered."
+    ),
+    kind: str = typer.Option(None, "--kind", help="Install only this kind: 'stt' or 'tts'."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Do not ask for confirmation."),
+    force: bool = typer.Option(
+        False, "--force", help="Re-download even when the model is already installed."
+    ),
+) -> None:
+    """Download local speech models into the app data directory."""
+    from surtitle.voice import models
+    from surtitle.voice.models import ModelUnavailable
+
+    if kind is not None and kind not in {"stt", "tts"}:
+        console.print("[red]--kind must be 'stt' or 'tts'[/red]")
+        raise typer.Exit(code=2)
+
+    store = _open_store()
+    assert store is not None
+    settings = store.effective()
+
+    wanted = tuple(keys) if keys else ()
+    if wanted:
+        unknown = [key for key in wanted if key not in models.MODEL_REGISTRY]
+        if unknown:
+            console.print(
+                f"[red]Unknown model(s):[/red] {', '.join(unknown)}\n"
+                f"Available: {', '.join(models.model_keys())}"
+            )
+            raise typer.Exit(code=2)
+        selected = [models.MODEL_REGISTRY[key] for key in wanted]
+    else:
+        selected = list(models.iter_assets(kind))
+
+    todo = [
+        asset
+        for asset in selected
+        if force or models.missing_files(asset, models.model_root(settings, asset))
+    ]
+    where = readable_path(models.models_dir(settings))
+
+    if not todo:
+        console.print(f"[green]Nothing to do[/green] — every selected model is in {where}.")
+        return
+
+    total = sum(asset.total_bytes for asset in todo)
+    console.print(f"Installing {len(todo)} model(s), {_human_bytes(total)} on disk, into {where}:")
+    for asset in todo:
+        console.print(f"  · {asset.key} — {asset.label}")
+
+    if not yes and not typer.confirm("Continue?", default=True):
+        raise typer.Exit(code=1)
+
+    failures = 0
+    for asset in todo:
+        with console.status(f"Downloading {asset.key}…") as status:
+            last = {"line": ""}
+            key = asset.key
+
+            def on_progress(update, _status=status, _last=last, _key=key) -> None:
+                if update.stage == "download" and update.total:
+                    pct = 100 * update.received / update.total
+                    line = f"{_key}: {pct:5.1f}% ({_human_bytes(update.received)})"
+                else:
+                    line = f"{_key}: {update.message or update.stage}"
+                if line != _last["line"]:
+                    _last["line"] = line
+                    _status.update(line)
+
+            try:
+                models.download(settings, keys=(key,), progress=on_progress, force=force)
+            except ModelUnavailable as exc:
+                failures += 1
+                console.print(f"[red]{asset.key} failed:[/red] {exc.reason}")
+                if exc.fix:
+                    console.print(f"  [dim]{exc.fix}[/dim]")
+    if failures:
+        raise typer.Exit(code=1)
+    console.print("[green]Done.[/green] Restart the app to pick up the new engines.")
+
+
+@models_app.command("verify")
+def models_verify() -> None:
+    """Re-check every installed model's checksum.
+
+    Only models that are *partly* present or corrupt cause a failure: a model you
+    chose not to install is not a problem, and treating it as one would make this
+    command useless on a machine that installed one voice out of three.
+    """
+    from surtitle.voice import models
+
+    store = _open_store()
+    assert store is not None
+    settings = store.effective()
+    rows = models.verify(settings)
+    console.print(_model_table(rows))
+
+    # A model that is absent is a choice; a model that is partly present or whose
+    # files fail their checksum is damage, and it is the only thing worth failing
+    # over. Otherwise this command is unusable on a machine that installed one
+    # voice out of three.
+    broken = [item for item in rows if item.partial]
+    for item in broken:
+        console.print(f"[red]{item.key}[/red]: {item.summary}")
+    if broken:
+        console.print("Run `surtitle models download` to repair the affected models.")
+        raise typer.Exit(code=1)
+    console.print("[green]Every installed model verified.[/green]")
+
+
+@models_app.command("path")
+def models_path() -> None:
+    """Print where models are stored, for scripting."""
+    from surtitle.voice import models
+
+    store = _open_store()
+    assert store is not None
+    sys.stdout.write(str(models.models_dir(store.effective())) + "\n")
 
 
 @app.command()

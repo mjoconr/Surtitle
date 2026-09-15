@@ -1,12 +1,23 @@
 [project]
 name = "surtitle"
 version = "0.1.0"
-description = "Voice-first agentic workbench: talk to an agent that reads your documents, writes code, and produces PDFs and spreadsheets."
+description = "Voice-first agentic workbench — talk to an agent that reads your documents, writes and runs code, and answers out loud. Hear the conclusion, not the log."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.11"
-keywords = ["voice", "agent", "deepseek", "deepgram", "llm", "stt", "tts"]
+keywords = [
+    "voice",
+    "agent",
+    "agentic",
+    "voice-assistant",
+    "mcp",
+    "deepseek",
+    "deepgram",
+    "llm",
+    "stt",
+    "tts",
+]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Console",
@@ -43,6 +54,18 @@ extras = [
     "python-docx>=1.1",
     "Markdown>=3.6",
 ]
+# Local speech engines: recognition and synthesis that never leave the machine.
+# Kept out of the default install because it is ~13 MB of native runtime that a
+# hosted voice user does not need, and because the wheels must exist for the
+# platform. `sherpa-onnx` ships its own ONNX runtime, so there is no separate
+# onnxruntime dependency to keep in step.
+#
+# The models themselves are NOT here: they are downloaded on demand by
+# `surtitle models download` into the app data directory. See
+# docs/VOICE.md.
+voice-local = [
+    "sherpa-onnx>=1.13,<2",
+]
 
 [project.scripts]
 surtitle = "surtitle.cli:main"
@@ -71,6 +94,8 @@ module-name = "surtitle"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+# Put the repo root on sys.path so tests can share helpers via `tests.*` imports.
+pythonpath = ["."]
 markers = [
     "live: requires real DEEPSEEK_API_KEY / DEEPGRAM_API_KEY and network access",
 ]

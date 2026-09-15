@@ -32,8 +32,13 @@ from surtitle.store.db import Store
 from surtitle.tools.environment import environment_summary
 from surtitle.tools.project_config import load_project_config
 from surtitle.tools.registry import default_registry, mount_mcp_tools
-from surtitle.voice.stt import SpeechToText, TranscriptEvent
-from surtitle.voice.tts import TextToSpeech
+from surtitle.voice.engine import (
+    SttEngine,
+    TtsEngine,
+    VoiceBundle,
+    build_voice,
+)
+from surtitle.voice.stt import TranscriptEvent
 
 __all__ = ["Session", "SessionManager"]
 
@@ -95,8 +100,14 @@ class Session:
     send_audio: Callable[[bytes], Awaitable[None]]
 
     approvals: ApprovalBroker = field(default_factory=ApprovalBroker)
-    stt: SpeechToText | None = None
-    tts: TextToSpeech | None = None
+    stt: SttEngine | None = None
+    tts: TtsEngine | None = None
+    # Why voice is partly or wholly unavailable, if it is. Reported in the
+    # `ready` payload so the UI can say what to fix instead of showing a dead
+    # microphone button.
+    voice_problem: str | None = None
+    voice_fix: str | None = None
+    voice_backends: dict[str, str] = field(default_factory=dict)
     events: int = 0
     _turn: asyncio.Task[None] | None = None
     _outbox: asyncio.Queue[Event] = field(default_factory=asyncio.Queue)
@@ -140,21 +151,33 @@ class Session:
 
     async def start(self) -> None:
         """Wire up the voice pipeline and start the drainer."""
-        if self.settings.voice_enabled and self.settings.deepgram_key():
-            self.stt = SpeechToText(
-                self.settings,
-                on_transcript=self._on_transcript,
-                on_error=self._on_voice_problem,
-            )
-            self.tts = TextToSpeech(
-                self.settings,
-                on_audio=self._on_audio_out,
-                on_started=self._on_speaking_started,
-                on_finished=self._on_speaking_finished,
-                on_error=self._on_voice_problem,
-                on_speed_fallback=self._on_speed_fallback,
-            )
+        bundle: VoiceBundle = build_voice(
+            self.settings,
+            on_transcript=self._on_transcript,
+            on_audio=self._on_audio_out,
+            on_started=self._on_speaking_started,
+            on_finished=self._on_speaking_finished,
+            on_error=self._on_voice_problem,
+            on_speed_fallback=self._on_speed_fallback,
+        )
+        self.stt = bundle.stt
+        self.tts = bundle.tts
+        self.voice_backends = {
+            "stt": self.settings.stt_backend,
+            "tts": self.settings.tts_backend,
+        }
+        if bundle.problem is not None:
+            self.voice_problem = bundle.problem.reason
+            self.voice_fix = bundle.problem.fix
+            # Loud, because a configured engine that did not start is the single
+            # hardest voice failure to diagnose from the outside.
+            log.warning("voice partially disabled: %s", bundle.problem.reason)
+            if bundle.problem.fix:
+                log.warning("voice fix: %s", bundle.problem.fix)
+
+        if self.stt is not None:
             await self.stt.start()
+        if self.tts is not None:
             await self.tts.start()
 
         # Project-scoped configuration: MCP servers, tool trust, LibreOffice
@@ -172,11 +195,13 @@ class Session:
             self.approvals.trust(self.project_config.trusted_tools)
 
         log.info(
-            "session ready: id=%s project=%s root=%s voice=%s",
+            "session ready: id=%s project=%s root=%s voice=%s (stt=%s tts=%s)",
             self.session_id,
             self.project_id,
             self.root,
-            self.settings.voice_enabled and self.tts is not None,
+            self.settings.voice_enabled and self.tts is not None and self.stt is not None,
+            self.settings.stt_backend if self.stt else "off",
+            self.settings.tts_backend if self.tts else "off",
         )
         await self.announce()
 
@@ -192,7 +217,16 @@ class Session:
             session_id=self.session_id,
             project_id=self.project_id,
             root=str(self.root),
-            voice_enabled=self.settings.voice_enabled and self.tts is not None,
+            # Both directions are required for a *spoken* conversation, which is
+            # what the microphone button represents. A session that only speaks,
+            # or only listens, reports voice_enabled=false and explains why in
+            # voice_problem rather than silently disabling the feature.
+            voice_enabled=(
+                self.settings.voice_enabled and self.tts is not None and self.stt is not None
+            ),
+            voice_problem=self.voice_problem,
+            voice_fix=self.voice_fix,
+            voice_backends=self.voice_backends,
             model=self.settings.deepseek_model,
             stt_api=self.settings.stt_api if self.stt else None,
             sample_rate=self.settings.tts_sample_rate,
@@ -293,13 +327,15 @@ class Session:
         self._peak_in = max(self._peak_in, _peak_level(frame))
         if self.stt is None:
             # Reported once per session: audio arriving with no recogniser means
-            # voice is disabled or the key is missing, not that capture failed.
+            # voice is disabled or the configured engine could not start, not
+            # that capture failed.
             if self._frames_in == 1:
                 log.warning(
                     "audio arriving but speech recognition is not running "
-                    "(voice_enabled=%s, key=%s)",
+                    "(voice_enabled=%s, backend=%s, problem=%s)",
                     self.settings.voice_enabled,
-                    bool(self.settings.deepgram_key()),
+                    self.settings.stt_backend,
+                    self.voice_problem or "none",
                 )
             return
         self.stt.push_audio(frame)

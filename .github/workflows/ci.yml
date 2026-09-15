@@ -62,6 +62,50 @@ jobs:
           fi
           echo "doctor exited $code as expected (missing credentials)"
 
+  local-voice:
+    # The local speech engines are an optional extra, and an optional extra that
+    # does not install on a supported platform is a feature nobody can use. This
+    # job is deliberately cheap: install the extra and import it, on every platform
+    # the project ships to and on both ends of the supported Python range. It never
+    # downloads a model, so it costs a minute rather than a gigabyte.
+    name: Local voice wheels (${{ matrix.os }} · Python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest, ubuntu-latest]
+        python: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: The app must still work without the extra
+        # The default install is the one most people get, and it must not have
+        # acquired a hard dependency on the local engines. Checked first, so a
+        # leftover `.venv` from an earlier local-voice job cannot mask it.
+        run: |
+          uv sync --frozen --python ${{ matrix.python }}
+          uv run --frozen --python ${{ matrix.python }} python -c "
+          import surtitle.voice.engine as engine
+          import surtitle.voice.models as models
+          print('core import ok; registered models:', len(models.MODEL_REGISTRY))
+          "
+      - name: Install the local voice extra
+        run: uv sync --frozen --python ${{ matrix.python }} --extra voice-local
+      - name: The engines must import and a recogniser config must construct
+        run: |
+          uv run --frozen --python ${{ matrix.python }} python -c "
+          import sherpa_onnx
+          import surtitle.voice.local_stt as stt
+          import surtitle.voice.local_tts as tts
+          import surtitle.voice.models as models
+          sherpa_onnx.OnlineRecognizer
+          sherpa_onnx.OfflineTts
+          assert models.model_keys('stt') and models.model_keys('tts')
+          print('local voice extra ok:', sherpa_onnx.__file__)
+          "
+
   package:
     name: Build release archive
     runs-on: ${{ matrix.os }}

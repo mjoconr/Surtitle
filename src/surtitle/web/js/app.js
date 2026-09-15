@@ -690,6 +690,24 @@ function handleEvent(event) {
         }
       }
       if (data.model) el.modelBadge.textContent = data.model;
+      if (data.voice_backends) {
+        // Which engine each direction uses belongs in the Activity panel: it is
+        // the first thing a voice bug report needs, and it is never obvious from
+        // the UI otherwise.
+        state.activity.push({
+          label: "Voice engines",
+          detail: `speech in: ${data.voice_backends.stt}; speech out: ${data.voice_backends.tts}`,
+        });
+      }
+      if (data.voice_problem) {
+        // A configured engine that did not start must say so, with the fix. The
+        // alternative is a microphone button that looks fine and records nothing.
+        state.activity.push({
+          label: "Voice unavailable",
+          detail: data.voice_fix ? `${data.voice_problem} — ${data.voice_fix}` : data.voice_problem,
+        });
+        toast(data.voice_problem, "error");
+      }
       // The server synthesises at this rate. Adopting it is what keeps a
       // configured rate from being decoded as if it were the default.
       if (data.sample_rate && !playback.setServerRate(data.sample_rate)) {

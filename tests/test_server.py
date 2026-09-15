@@ -53,6 +53,27 @@ class TestHealth:
         assert "sk-test-deepseek" not in body
         assert "dg-test-deepgram" not in body
 
+    async def test_health_reports_which_engines_are_selected(self, client):
+        body = (await client.get("/api/health")).json()
+        assert body["voice_backends"] == {"stt": "deepgram", "tts": "deepgram"}
+
+
+class TestLocalModels:
+    async def test_models_endpoint_reports_every_registered_model(self, client):
+        """The Settings screen needs to know what is installed before offering it."""
+        response = await client.get("/api/models")
+        assert response.status_code == 200
+        rows = response.json()["models"]
+        assert rows, "no models were reported"
+        assert {"key", "kind", "label", "present", "missing", "bytes", "path"} <= set(rows[0])
+        assert all(row["present"] is False for row in rows), "the test home has no models"
+        assert {"stt", "tts"} <= {row["kind"] for row in rows}
+
+    async def test_models_endpoint_does_not_leak_a_key(self, client):
+        body = (await client.get("/api/models")).text
+        assert "sk-test-deepseek" not in body
+        assert "dg-test-deepgram" not in body
+
 
 class TestProjects:
     async def test_create_and_list(self, client, tmp_path):

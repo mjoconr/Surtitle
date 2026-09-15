@@ -9,14 +9,34 @@ Browser ──HTTP──► FastAPI ──► Store (SQLite)
    │                │
    └──WebSocket─────┤
       audio up      │
-      audio down    ├──► Deepgram /v2/listen   (STT, Flux turn detection)
-      events out    ├──► Deepgram /v1/speak    (TTS)
-      commands in   └──► DeepSeek /chat/completions (streaming + tools)
+      audio down    ├──► Deepgram /v2/listen      (STT, Flux turn detection)
+      events out    │    or sherpa-onnx OnlineRecognizer   (STT, local)
+      commands in   ├──► Deepgram /v1/speak       (TTS)
+                    │    or sherpa-onnx OfflineTts        (TTS, local)
+                    └──► DeepSeek /chat/completions (streaming + tools)
                               │
                               └──► ToolRegistry ──► project directory
                                                 └──► project venv (installs)
                                                 └──► MCP servers (stdio)
 ```
+
+Each half of the voice pipeline chooses its engine independently
+(`SURTITLE_STT_BACKEND`, `SURTITLE_TTS_BACKEND`), and
+`voice/engine.py` is the only place that decides — so the session never learns
+where its audio came from. The local engines are an optional extra, imported
+lazily inside `start()`, so the application, its test suite and its release
+archive never require them.
+
+Because a local engine is CPU-bound ONNX work, its inference runs on one dedicated
+thread per engine: sherpa-onnx streams and ONNX sessions are not documented as
+thread-safe, and the cost of being certain is a single thread. Audio is batched
+(~320 ms) before decoding so per-frame overhead does not dominate, and the batch
+queue is bounded — a decoder that falls behind drops audio rather than falling
+further behind the speaker.
+
+Nothing else about the audio path changes. Capture is still 16 kHz mono PCM16 and
+playback is still PCM16 scheduled by Web Audio, so the browser cannot tell which
+engine produced the audio it is given.
 
 There is deliberately **one** server and **one** port. Serving HTTP and the
 realtime channel from the same app removes a whole class of problems: no second
@@ -233,6 +253,34 @@ human summary for the approval prompt, an approval policy, and a `mutating` flag
 offline wheelhouse, the app, and platform launchers. See
 [`WINDOWS.md`](WINDOWS.md).
 
+Local voice is two independent, opt-in halves of the build:
+
+| Flag | Adds | Result |
+|---|---|---|
+| `--with-voice-local` | the `sherpa-onnx` runtime (~30 MB) | local engines work; models download on first use |
+| `--with-local-models` | the speech models (~90 MB) | the archive is fully offline out of the box |
+
+The default build contains neither, so the documented "extract and run, no
+network" property is unchanged and the archive stays small. `verify_archive()`
+asserts the local engines actually import when they were requested, because a
+wheel/ABI mismatch is invisible until the first model load.
+
 Building must happen **on** the target OS, because compiled wheels are
 platform-specific — `release.yml` runs the build on `windows-latest` and
-`macos-latest` rather than cross-compiling.
+`macos-latest` rather than cross-compiling. That applies double to the local
+engines, whose `sherpa-onnx` wheels are per-platform binaries.
+
+## Installation and updates
+
+`scripts/install.sh` (macOS/Linux) and `scripts/install.ps1` (Windows) exist
+because "clone the repo and hope `uv` is installed" is not an installation story.
+Each one finds or installs `uv`, creates the virtual environment, optionally
+installs the local voice extra and downloads models, then runs `doctor --offline`
+to prove the result.
+
+The layout they create is what makes updating cheap and safe: **code and models
+live in different places.** The code and its virtual environment are in the
+checkout; the models are in the app data directory. Re-running the installer with
+`--update` refreshes the environment and re-verifies the models without
+re-downloading them, and deleting the checkout does not delete them.
+

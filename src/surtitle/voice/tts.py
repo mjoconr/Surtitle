@@ -1,14 +1,23 @@
-"""Deepgram text-to-speech with low-latency streaming and true barge-in.
+"""Text-to-speech with low-latency streaming and true barge-in.
 
-Two design points matter more than anything else here:
+Two design points matter more than anything else here, and both survive the
+choice of engine:
 
-**One socket per turn, closed on barge-in.** When the user interrupts, we cannot
-simply stop reading from the socket: Deepgram has already synthesised audio for
-text we sent, and that backlog would arrive later and sound like the agent
-ignoring the interruption. Closing the socket discards it by construction.
+**One socket per turn, closed on barge-in** (Deepgram). When the user
+interrupts, the socket cannot simply stop being read: Deepgram has already
+synthesised audio for text we sent, and that backlog would arrive later and
+sound like the agent ignoring the interruption. Closing discards it by
+construction.
 
 **Sentences, not paragraphs.** The speak layer hands us one sentence at a time,
 so the first words are audible while the model is still generating the rest.
+
+The engine-independent parts — the queue, the generation counter that makes
+barge-in work, the speaking/no-longer-speaking transitions that drive echo
+suppression — live in :class:`_UtteranceWorker`. That is deliberate: echo
+suppression that is set and never cleared made the microphone appear dead after
+the first reply once already, and a second engine duplicating that logic would
+be a second chance to reintroduce it.
 """
 
 from __future__ import annotations
@@ -17,8 +26,10 @@ import asyncio
 import contextlib
 import json
 import logging
+from array import array
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from typing import Any
 from urllib.parse import urlencode
 
 import websockets
@@ -26,11 +37,23 @@ from websockets.protocol import State
 
 from surtitle.config import DEEPGRAM_SPEAK_URL, Settings
 
-__all__ = ["TextToSpeech", "Utterance", "speak_url"]
+__all__ = [
+    "BargeIn",
+    "TextToSpeech",
+    "Utterance",
+    "float_to_pcm16",
+    "resample_linear",
+    "speak_url",
+]
 
 log = logging.getLogger(__name__)
 
 _BACKOFF_SCHEDULE = (0.5, 1.0, 2.0, 4.0)
+
+# Local synthesis is CPU-bound and produce-then-play rather than socket-streamed,
+# so its backoff is shorter and its retry budget smaller: a failure here is a
+# model problem, not a network one, and retrying it forever would just be noise.
+_LOCAL_BACKOFF = (0.25, 0.5)
 
 
 class BargeIn(Exception):
@@ -67,8 +90,27 @@ def speak_url(settings: Settings, *, speed_supported: bool = True) -> str:
     return f"{DEEPGRAM_SPEAK_URL}?{urlencode(params)}"
 
 
-class TextToSpeech:
-    """Streams spoken audio for queued utterances."""
+def float_to_pcm16(samples: Any) -> bytes:
+    """Convert float samples in -1..1 to little-endian PCM16 bytes."""
+    out = array("h")
+    for value in samples:
+        scaled = int(value * 32767.0)
+        out.append(-32768 if scaled < -32768 else 32767 if scaled > 32767 else scaled)
+    return out.tobytes()
+
+
+class _UtteranceWorker:
+    """Queue, barge-in generations and speaking transitions, engine-independent.
+
+    Subclasses implement :meth:`_produce`, which yields PCM16 chunks for one
+    utterance. Everything else — including the exact order in which ``on_started``
+    and ``on_finished`` fire, which is what keeps echo suppression honest — is
+    shared.
+    """
+
+    #: Announced start failure text, overridden per engine.
+    failure_notice = "Voice output hiccup; reconnecting."
+    backoff: tuple[float, ...] = _BACKOFF_SCHEDULE
 
     def __init__(
         self,
@@ -86,20 +128,15 @@ class TextToSpeech:
         self._on_finished = on_finished
         self._on_error = on_error
         self._on_speed_fallback = on_speed_fallback
-        self._api_key = settings.deepgram_key() or ""
 
         self._queue: asyncio.Queue[Utterance | None] = asyncio.Queue()
         self._worker: asyncio.Task[None] | None = None
-        self._socket: object | None = None
-        self._socket_lock = asyncio.Lock()
         self._active = False
         self._stopped = False
         self._sequence = 0
         # Incremented by barge_in(); a worker notices the change and abandons the
         # turn instead of finishing its queue.
         self._generation = 0
-        # Set after Deepgram rejects a speed parameter, so we only retry once.
-        self._speed_supported = True
 
     # --- properties ------------------------------------------------------
     @property
@@ -114,18 +151,18 @@ class TextToSpeech:
 
     @property
     def url(self) -> str:
-        """The socket URL, built by the shared helper."""
-        return speak_url(self.settings, speed_supported=self._speed_supported)
+        """Where audio comes from, for the log and ``doctor``."""
+        return "local"
 
     # --- public API ------------------------------------------------------
     async def start(self) -> None:
         """Start the synthesis worker."""
         if self._worker is None or self._worker.done():
             self._stopped = False
-            self._worker = asyncio.create_task(self._run(), name="deepgram-tts")
+            self._worker = asyncio.create_task(self._run(), name="tts-worker")
 
     async def stop(self) -> None:
-        """Shut down the worker and close the socket."""
+        """Shut down the worker and release any engine resource."""
         self._stopped = True
         self._generation += 1
         with contextlib.suppress(asyncio.QueueFull):
@@ -135,7 +172,7 @@ class TextToSpeech:
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await self._worker
             self._worker = None
-        await self._close_socket()
+        await self._close()
         await self._finish_if_active()
 
     def speak(self, text: str, *, final: bool = False) -> None:
@@ -147,12 +184,11 @@ class TextToSpeech:
     def end_of_turn(self) -> None:
         """No more text is coming for this turn.
 
-        Queues a marker that the worker turns into the `on_finished` callback once
-        every queued sentence has been synthesised. That callback is what releases
-        echo suppression, and without it the session stayed marked as speaking
-        after its very first reply — so every later transcript was discarded as
-        though it were the agent's own voice, and the microphone appeared to stop
-        working after the first exchange.
+        Queues a marker that the worker turns into ``on_finished`` once every
+        queued sentence has been synthesised. That callback is what releases echo
+        suppression; without it the session stayed marked as speaking after its
+        very first reply, so every later transcript was discarded as though it
+        were the agent's own voice.
         """
         if self._stopped:
             return
@@ -168,9 +204,7 @@ class TextToSpeech:
         while not self._queue.empty():
             with contextlib.suppress(asyncio.QueueEmpty):
                 self._queue.get_nowait()
-        # Tell Deepgram to discard text it has not synthesised, then close so the
-        # audio it already produced for cancelled text is never sent.
-        await self._abandon_socket()
+        await self._abandon()
         await self._finish_if_active(notify=False)
 
     async def wait_until_idle(self, *, timeout: float | None = None) -> None:
@@ -188,7 +222,7 @@ class TextToSpeech:
 
     # --- worker ----------------------------------------------------------
     async def _run(self) -> None:
-        """Consume utterances until stopped, surviving socket failures."""
+        """Consume utterances until stopped, surviving engine failures."""
         attempt = 0
         try:
             while not self._stopped:
@@ -216,14 +250,11 @@ class TextToSpeech:
                         self._active = True
                         if self._on_started:
                             await self._on_started()
-                    await self._synthesise(utterance, generation)
+                    await self._emit(utterance, generation)
                     if utterance.final and self._queue.empty():
-                        # The turn's last sentence has been synthesised and nothing
-                        # is queued behind it, so speaking is over. Reporting that
-                        # here is what releases the session's echo suppression;
-                        # nothing else ever did, so `is_speaking` stayed true from
-                        # the first reply onwards and every later transcript was
-                        # dropped as if it were the agent's own voice.
+                        # The turn's last sentence has been produced and nothing is
+                        # queued behind it, so speaking is over. Reporting that here
+                        # is what releases the session's echo suppression.
                         await self._finish_if_active()
                     attempt = 0
                 except BargeIn:
@@ -234,12 +265,12 @@ class TextToSpeech:
                 except Exception as exc:
                     if self._stopped or generation != self._generation:
                         continue
-                    await self._close_socket()
-                    delay = _BACKOFF_SCHEDULE[min(attempt, len(_BACKOFF_SCHEDULE) - 1)]
+                    await self._close()
+                    delay = self.backoff[min(attempt, len(self.backoff) - 1)]
                     attempt += 1
-                    log.warning("Deepgram TTS failed (%s); retrying in %.1fs", exc, delay)
+                    log.warning("TTS failed (%s); retrying in %.1fs", exc, delay)
                     if self._on_error:
-                        await self._on_error("Voice output hiccup; reconnecting.")
+                        await self._on_error(self.failure_notice)
                     try:
                         await asyncio.sleep(delay)
                     except asyncio.CancelledError:
@@ -248,16 +279,25 @@ class TextToSpeech:
                     if generation == self._generation and not self._stopped:
                         self._queue.put_nowait(utterance)
         finally:
-            # Drain anything left so the socket is not held open, and never let
-            # teardown raise out of the task.
+            # Drain anything left and never let teardown raise out of the task.
             while not self._queue.empty():
                 with contextlib.suppress(asyncio.QueueEmpty):
                     self._queue.get_nowait()
             with contextlib.suppress(Exception):
-                await self._close_socket()
+                await self._close()
             # Do not notify here: the worker is being torn down, and the session
             # decides what to report when it stops the client.
             await self._finish_if_active(notify=False)
+
+    async def _emit(self, utterance: Utterance, generation: int) -> None:
+        """Forward one utterance's audio, checking for interruption as it goes."""
+        async for chunk in self._produce(utterance, generation):
+            if generation != self._generation:
+                raise BargeIn
+            if not chunk:
+                continue
+            self._sequence += 1
+            await self._on_audio(chunk, self._sequence)
 
     async def _finish_if_active(self, *, notify: bool = True) -> None:
         """Clear the speaking flag once, optionally notifying the session."""
@@ -268,7 +308,44 @@ class TextToSpeech:
             with contextlib.suppress(Exception):
                 await self._on_finished()
 
-    async def _synthesise(self, utterance: Utterance, generation: int) -> None:
+    # --- engine hooks ----------------------------------------------------
+    async def _produce(self, utterance: Utterance, generation: int) -> Any:
+        """Yield PCM16 chunks for one utterance. Engines implement this."""
+        raise NotImplementedError
+
+    async def _close(self) -> None:
+        """Release any engine resource. Default: nothing to do."""
+        return
+
+    async def _abandon(self) -> None:
+        """Discard pending engine output after an interruption."""
+        await self._close()
+
+
+# ---------------------------------------------------------------------------
+# Deepgram
+# ---------------------------------------------------------------------------
+
+
+class TextToSpeech(_UtteranceWorker):
+    """Streams spoken audio from Deepgram Aura, one socket per turn."""
+
+    failure_notice = "Voice output hiccup; reconnecting."
+
+    def __init__(self, settings: Settings, **kwargs: Any) -> None:
+        super().__init__(settings, **kwargs)
+        self._api_key = settings.deepgram_key() or ""
+        self._socket: object | None = None
+        self._socket_lock = asyncio.Lock()
+        # Set after Deepgram rejects a speed parameter, so we only retry once.
+        self._speed_supported = True
+
+    @property
+    def url(self) -> str:
+        """The socket URL, built by the shared helper."""
+        return speak_url(self.settings, speed_supported=self._speed_supported)
+
+    async def _produce(self, utterance: Utterance, generation: int) -> Any:
         """Send one utterance and stream its audio back."""
         socket = await self._ensure_socket()
         await socket.send(json.dumps({"type": "Speak", "text": utterance.text}))
@@ -292,8 +369,7 @@ class TextToSpeech:
             if isinstance(message, (bytes, bytearray)):
                 if not message:
                     continue
-                self._sequence += 1
-                await self._on_audio(bytes(message), self._sequence)
+                yield bytes(message)
                 continue
 
             try:
@@ -342,7 +418,7 @@ class TextToSpeech:
             ping_timeout=20,
         )
 
-    async def _close_socket(self) -> None:
+    async def _close(self) -> None:
         """Close the socket politely, ignoring any error during teardown."""
         async with self._socket_lock:
             socket, self._socket = self._socket, None
@@ -353,7 +429,7 @@ class TextToSpeech:
         with contextlib.suppress(Exception):
             await socket.close()
 
-    async def _abandon_socket(self) -> None:
+    async def _abandon(self) -> None:
         """Discard pending audio and close, without waiting for a flush.
 
         ``Clear`` tells Deepgram to throw away audio it has generated but not
@@ -369,3 +445,35 @@ class TextToSpeech:
             await socket.send(json.dumps({"type": "Close"}))
         with contextlib.suppress(Exception):
             await socket.close()
+
+    # Kept as an alias: the base worker calls `_abandon`, while the existing
+    # regression tests for barge-in patch `_abandon_socket` by name. Renaming a
+    # seam that is deliberately patched is how a test suite stops testing what it
+    # says it tests.
+    _abandon_socket = _abandon
+
+
+def resample_linear(samples: Any, source_rate: int, target_rate: int) -> Any:
+    """Resample float samples by linear interpolation.
+
+    The local voice synthesises at 22050 Hz and the browser is told 24000 Hz, so
+    something has to convert. Linear interpolation is not the highest quality
+    resampler, but at a 24000/22050 ratio the interpolation error is inaudible,
+    and it keeps the client contract — one declared rate, buffers declared at the
+    rate the PCM really is — exactly as it is for the hosted engine.
+    """
+    if source_rate == target_rate:
+        return samples
+    count = len(samples)
+    if count == 0:
+        return samples
+    out_count = int(count * target_rate / source_rate)
+    out = array("f")
+    step = source_rate / target_rate
+    for index in range(out_count):
+        position = index * step
+        left = int(position)
+        right = left + 1 if left + 1 < count else left
+        fraction = position - left
+        out.append(samples[left] + (samples[right] - samples[left]) * fraction)
+    return out

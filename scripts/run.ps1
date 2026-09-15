@@ -34,6 +34,14 @@ function Fail([string] $Message) {
 }
 
 try {
+    # A "fat" release archive carries the speech models inside it. Pointing the app
+    # at that directory keeps an extracted archive fully offline: the models are
+    # found without a download and without touching the user's data directory.
+    $bundledModels = Join-Path $ScriptDir 'models'
+    if ((Test-Path $bundledModels) -and (-not $env:SURTITLE_MODELS_DIR)) {
+        $env:SURTITLE_MODELS_DIR = $bundledModels
+    }
+
     # --- 1. bundled release runtime ---------------------------------------
     $bundled = Join-Path $ScriptDir 'venv\Scripts\python.exe'
     if (Test-Path $bundled) {
