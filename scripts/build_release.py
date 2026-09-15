@@ -124,18 +124,35 @@ def standalone_python(uv: str) -> Path:
     return root
 
 
-def _interpreter_in(root: Path) -> Path | None:
-    """Find the interpreter inside a Python installation root."""
-    major, minor = sys.version_info.major, sys.version_info.minor
-    if os.name == "nt":
-        candidates = (root / "python.exe", root / "bin" / "python.exe")
-    else:
-        candidates = (
-            root / "bin" / f"python{major}.{minor}",
-            root / "bin" / "python3",
-            root / "bin" / "python",
+def _interpreter_candidates(root: Path, windows: bool) -> tuple[Path, ...]:
+    """Where an interpreter can sit, for a venv or for a bundled runtime.
+
+    Windows puts a virtual environment's interpreter in ``Scripts/`` while a
+    bundled runtime keeps it at the top level, so both are checked. Missing the
+    first one is what made archive verification run the raw runtime on Windows.
+    """
+    if windows:
+        return (
+            root / "Scripts" / "python.exe",
+            root / "python.exe",
+            root / "bin" / "python.exe",
         )
-    for candidate in candidates:
+    major, minor = sys.version_info.major, sys.version_info.minor
+    return (
+        root / "bin" / f"python{major}.{minor}",
+        root / "bin" / "python3",
+        root / "bin" / "python",
+    )
+
+
+def _interpreter_in(root: Path, *, windows: bool | None = None) -> Path | None:
+    """Find the interpreter inside a Python installation root.
+
+    ``windows`` overrides the platform, so the layout that matters on Windows can
+    be exercised by a test running anywhere.
+    """
+    on_windows = os.name == "nt" if windows is None else windows
+    for candidate in _interpreter_candidates(root, on_windows):
         if candidate.is_file():
             return candidate
     return None
@@ -429,19 +446,23 @@ def verify_archive(archive_path: Path, *, expect_voice_local: bool = False) -> N
         roots = [entry for entry in target.iterdir() if entry.is_dir()]
         root = roots[0] if len(roots) == 1 and not (target / "VERSION").exists() else target
 
-        # The venv interpreter must be used: it is the one that can see the
-        # installed application. The raw runtime is only a fallback for the
-        # layout check.
-        interpreter = _interpreter_in(root / "venv") or _interpreter_in(root / "python")
-        if interpreter is None:
+        # Only the venv interpreter can see the installed application, so it is
+        # the only one that makes these checks mean anything. Falling back to the
+        # bundled runtime would run them against an interpreter that cannot
+        # import the app at all — which is exactly how a Windows archive came to
+        # be "verified" with the wrong executable.
+        venv_root = root / "venv"
+        if not venv_root.is_dir():
             # Some layouts nest everything under a single top-level directory.
-            interpreter = _interpreter_in(root / "venv") or None
             for candidate_root in (root, *[p for p in root.iterdir() if p.is_dir()]):
-                interpreter = _interpreter_in(candidate_root / "venv")
-                if interpreter is not None:
+                if (candidate_root / "venv").is_dir():
+                    venv_root = candidate_root / "venv"
                     break
+
+        interpreter = _interpreter_in(venv_root)
         if interpreter is None:
-            raise SystemExit("archive has no usable interpreter (looked for venv/)")
+            found = "no venv/ directory" if not venv_root.is_dir() else f"{venv_root} is empty"
+            raise SystemExit(f"archive has no usable venv interpreter: {found}")
 
         # Verification runs on the machine that built the archive, so a venv that
         # still points back into the build directory resolves here and dangles
