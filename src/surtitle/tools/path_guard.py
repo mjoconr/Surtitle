@@ -97,13 +97,33 @@ def _reject_if_absolute(raw: str) -> None:
         raise PathEscapeError(raw)
 
 
+def _strip_extended_prefix(path: Path) -> Path:
+    """Drop the ``\\\\?\\`` prefix Windows adds for some paths.
+
+    ``Path.resolve()`` returns an extended-length path for inputs Windows treats
+    as unusual — a component with a trailing dot, or a path past ``MAX_PATH`` —
+    and a plain path for everything else. The prefix becomes a different first
+    component (``\\\\?\\C:\\`` against ``C:\\``), so comparing the two makes a
+    perfectly contained path look like an escape. Long paths are the real
+    casualty; the odd-name case just made it visible.
+    """
+    text = str(path)
+    if not text.startswith("\\\\?\\"):
+        return path
+    stripped = text[4:]
+    # \\?\UNC\server\share is the extended spelling of \\server\share.
+    if stripped.startswith("UNC\\"):
+        stripped = "\\\\" + stripped[4:]
+    return Path(stripped)
+
+
 def resolve_in_root(root: Path, requested: str | Path) -> ResolvedPath:
     """Resolve ``requested`` and prove it is inside ``root``.
 
     Returns a :class:`ResolvedPath`; raises :class:`PathEscapeError` otherwise.
     The target does not need to exist, so this works for writes as well as reads.
     """
-    root_resolved = root.resolve()
+    root_resolved = _strip_extended_prefix(root.resolve())
     raw = str(requested)
 
     _reject_if_absolute(raw)
@@ -115,7 +135,7 @@ def resolve_in_root(root: Path, requested: str | Path) -> ResolvedPath:
         # Containment is judged on the *resolved* result, so a path that climbs
         # out and back in (``sub/../notes.txt``) is allowed, while one that ends
         # up outside is refused below.
-        resolved = joined.resolve()
+        resolved = _strip_extended_prefix(joined.resolve())
     except (OSError, RuntimeError) as exc:  # RuntimeError: symlink loops
         raise PathEscapeError(raw) from exc
 

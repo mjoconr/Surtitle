@@ -7,11 +7,13 @@ read or write outside the directory the user attached it to.
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import pytest
 
 from surtitle.tools.path_guard import (
     PathEscapeError,
+    _strip_extended_prefix,
     is_probably_binary,
     resolve_in_root,
 )
@@ -81,8 +83,15 @@ class TestTraversalRejection:
         assert resolve_in_root(root, "sub/../notes.txt").relative == "notes.txt"
 
     def test_odd_but_contained_names_are_allowed(self, root):
-        """`....` is a legal directory name, not traversal, and stays in root."""
-        assert resolve_in_root(root, "....//outside.txt").relative == "..../outside.txt"
+        """`....` is not traversal, and must not be mistaken for an escape.
+
+        Windows strips trailing dots from a path component, so the odd segment
+        vanishes there and the file lands beside the root rather than in a
+        directory named `....`; POSIX keeps it. Both are contained, which is the
+        property that matters — refusing either would be a false escape.
+        """
+        relative = resolve_in_root(root, "....//outside.txt").relative
+        assert relative in {"..../outside.txt", "outside.txt"}
 
     @pytest.mark.parametrize(
         "requested",
@@ -216,3 +225,33 @@ class TestWindowsSpecifics:
     def test_unc_path_is_refused(self, root):
         with pytest.raises(PathEscapeError):
             resolve_in_root(root, r"\\server\share\file.txt")
+
+
+class TestExtendedLengthPrefixes:
+    """Windows returns `\\\\?\\` paths for long and unusual paths, not all paths.
+
+    Comparing a prefixed path against a plain one makes every component differ,
+    so a contained path is refused as an escape. These are string operations, so
+    they mean the same thing on any platform.
+    """
+
+    def test_the_prefix_is_removed(self):
+        stripped = _strip_extended_prefix(Path(r"\\?\C:\proj\notes.txt"))
+        assert str(stripped) == r"C:\proj\notes.txt"
+
+    def test_a_long_path_prefix_is_removed(self):
+        long_path = r"\\?\C:\proj\a-fairly-long-directory-name\notes.txt"
+        assert str(_strip_extended_prefix(Path(long_path))) == long_path[4:]
+
+    def test_an_extended_unc_path_becomes_a_plain_unc_path(self):
+        stripped = _strip_extended_prefix(Path(r"\\?\UNC\server\share\notes.txt"))
+        assert str(stripped) == r"\\server\share\notes.txt"
+
+    def test_an_ordinary_path_is_untouched(self):
+        plain = Path("notes.txt")
+        assert _strip_extended_prefix(plain) == plain
+
+    def test_a_single_backslash_prefix_is_not_touched(self):
+        """`\\foo` is a relative name, not an extended-length path."""
+        odd = Path(r"\foo\bar")
+        assert _strip_extended_prefix(odd) == odd
