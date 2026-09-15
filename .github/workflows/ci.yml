@@ -96,14 +96,21 @@ jobs:
       - name: The engines must import and a recogniser config must construct
         run: |
           uv run --frozen --python ${{ matrix.python }} python -c "
+          import importlib.metadata as md
           import sherpa_onnx
           import surtitle.voice.local_stt as stt
           import surtitle.voice.local_tts as tts
           import surtitle.voice.models as models
           sherpa_onnx.OnlineRecognizer
           sherpa_onnx.OfflineTts
+          # The bindings and the native runtime are one ABI. uv cannot see the
+          # dependency between them (its metadata is dynamic), so nothing else
+          # would notice the pair drifting apart.
+          bindings = md.version('sherpa-onnx')
+          runtime = md.version('sherpa-onnx-core')
+          assert bindings == runtime, f'sherpa-onnx {bindings} with core {runtime}'
           assert models.model_keys('stt') and models.model_keys('tts')
-          print('local voice extra ok:', sherpa_onnx.__file__)
+          print('local voice extra ok:', sherpa_onnx.__file__, bindings)
           "
 
   package:

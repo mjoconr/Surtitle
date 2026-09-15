@@ -65,6 +65,13 @@ extras = [
 # docs/VOICE.md.
 voice-local = [
     "sherpa-onnx>=1.13,<2",
+    # Declared explicitly even though `sherpa-onnx` depends on it: that wheel
+    # marks `requires-dist` as dynamic in its metadata, so uv's resolver cannot
+    # see the edge and would install the bindings without the native runtime
+    # they link against. The symptom is an import that fails looking for
+    # libonnxruntime/onnxruntime. The two are one ABI, so keep them at the same
+    # version — a CI step asserts the installed pair matches.
+    "sherpa-onnx-core>=1.13,<2",
 ]
 
 [project.scripts]
