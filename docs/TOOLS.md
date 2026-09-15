@@ -116,11 +116,31 @@ hand-rolled boilerplate on every request. `run_python` remains the escape hatch.
 
 ## Documents
 
-**`convert_document`** — LibreOffice headless. Handles `.docx`, `.xlsx`, `.pptx`, `.odt`
-and friends, which pure-Python libraries only partly cover. Targets include `pdf`, `csv`,
-`xlsx`, `txt`, `html` and more.
+**`read_file`** — reads text, CSV, JSON, Markdown, PDF, and Office documents. A
+`.docx`, `.xlsx`, `.pptx` or `.odt` is turned into text by the built-in extractor
+(headings, paragraphs, lists and tables as tab-separated rows), so no converter has to
+be installed to read one.
 
-Two operational details matter more than the conversion itself:
+**`convert_document`** — two engines, chosen per call.
+
+The **built-in** engine needs nothing installed. It reads `docx`, `xlsm`, `xlsx`,
+`pptx`, `odt`, `ods`, `odp`, `pdf`, `csv`, `tsv`, `json`, `html`, `md` and plain text,
+and writes `pdf`, `txt`, `csv`, `html` and `xlsx`. It carries *content*, not layout:
+fonts, colours, columns, headers and images are dropped. The pipeline is deliberately
+two halves — every source is extracted into one small neutral document model
+(headings, paragraphs, list items, code, tables) and every target is rendered from it
+— so a new format is one function on one side rather than a converter per pair.
+
+**LibreOffice** is used when it is installed: for the targets the built-in engine
+cannot write (`docx`, `odt`, `rtf`, `ods`, `odp`, `pptx`, `png`, `jpg`), and as a
+fallback when the built-in parser fails on a file. It keeps layout, so it is the better
+answer for a document whose appearance matters.
+
+`backend` selects the engine: `auto` (default) prefers the built-in converter and falls
+back to LibreOffice; `builtin` guarantees no external program is run; `libreoffice`
+requires it. The result reports which one ran in `data.backend`.
+
+Two operational details matter on the LibreOffice path:
 
 - **A private user profile per run.** LibreOffice refuses to start a second instance
   against one profile; a shared profile is the classic cause of "conversion hangs

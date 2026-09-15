@@ -240,9 +240,14 @@ human summary for the approval prompt, an approval policy, and a `mutating` flag
   the whole tree, not just the parent.
 - `artifacts.py` — PDF/XLSX/chart generation with typed schemas, so the model does not
   hand-roll reportlab boilerplate.
-- `documents.py` — LibreOffice conversion. LibreOffice ignores the requested output
-  filename and always writes `<source stem>.<ext>`, so conversion stages into a
-  private directory and moves the result into place.
+- `documents.py` — document conversion. Picks between the built-in engine and
+  LibreOffice for each call. LibreOffice ignores the requested output filename and
+  always writes `<source stem>.<ext>`, so that path stages into a private directory and
+  moves the result into place.
+- `document_native.py` — the built-in engine, which needs nothing installed. Extractors
+  turn every supported source into one neutral document model and renderers write every
+  target out of it, so adding a format is one function on one side rather than a
+  converter per pair.
 - `environment.py` — per-project virtual environments.
 - `mcp.py` — stdio JSON-RPC client.
 

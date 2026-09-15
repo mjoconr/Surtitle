@@ -25,6 +25,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   | `agenticvoice.db`, `agenticvoice.log` | `surtitle.db`, `surtitle.log` |
   | `agenticvoice-<version>-<platform>-<arch>` (archive) | `surtitle-<version>-<platform>-<arch>` |
 
+- **Document conversion no longer requires LibreOffice.** A built-in engine reads
+  Word, Excel, PowerPoint, OpenDocument and PDF files and writes PDF, text, CSV,
+  HTML and XLSX with nothing installed. It carries content rather than layout.
+  LibreOffice is still used when it is present — for the formats the built-in
+  engine cannot write (`docx`, `odt`, `rtf`, `ods`, `odp`, `pptx`, `png`, `jpg`)
+  and as a fallback that preserves appearance. The new `backend` argument
+  (`auto`, `builtin`, `libreoffice`) selects one, and the result reports which
+  ran in `data.backend`.
+- `read_file` reads Office documents directly, extracting headings, paragraphs,
+  lists and tables, so a `.docx` or `.xlsx` no longer has to be converted before
+  it can be read.
+
 ### Added
 
 - Local, offline speech recognition and synthesis, with models that never leave
@@ -36,6 +48,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an update path (`--update` on macOS/Linux, `-Update` on Windows).
 - `pythonpath` in the pytest configuration so tests can share helpers through
   `tests.*` imports.
+
+### Fixed
+
+- `scripts/run.sh` and `scripts/run.ps1` no longer remove the optional
+  `voice-local` extra. A plain `uv sync` prunes anything the lock does not name,
+  and `uv run` synced a second time on every launch, so installing the offline
+  engines appeared to work and was undone by the next run.
+- The `voice-local` extra now installs `sherpa-onnx-core` next to the bindings.
+  That wheel marks its dependency as dynamic, which hides the edge from the
+  resolver, so `sherpa-onnx` was installed without the native runtime it links
+  against and failed to import.
+- Release archives run on the machine that receives them. The bundled virtual
+  environment linked `venv/bin/python` to an absolute path inside the build
+  directory, so an extracted archive could only start where it was built — and
+  Python 3.12 and later refused to extract it at all. Archive verification now
+  asserts that the interpreter resolves inside the extracted tree, which is the
+  check that would have caught this.
+- Two tests that passed only on a machine with the right tools installed: the
+  document-conversion tests needed a real LibreOffice, and the search test
+  assumed ripgrep was on `PATH`.
 
 ### Migration — this rename is breaking
 

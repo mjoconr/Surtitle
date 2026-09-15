@@ -35,6 +35,12 @@ Markers:
 | *(default)* | Offline, deterministic, no network, no keys |
 | `live` | Reaches the network (real PyPI install, real LibreOffice conversion) |
 
+Document conversion is covered on both paths: the built-in engine by
+`tests/test_document_native.py`, which needs nothing installed, and the LibreOffice
+path by the `live` tests, which skip themselves when `soffice` is absent. A new format
+is one extractor plus one renderer in `src/surtitle/tools/document_native.py`, not a
+converter per source/target pair.
+
 `addopts = "-m 'not live'"` keeps the default suite offline. Run the network subset
 explicitly:
 

@@ -251,8 +251,11 @@ Windows Settings → Privacy → Microphone → allow desktop apps. Browsers wil
 microphone access to a non-secure origin except `localhost`, which is why the app binds
 `127.0.0.1`; do not change the host to a LAN address and expect the mic to work.
 
-**LibreOffice conversion is unavailable**
-Install LibreOffice, or set `soffice_path` in `.surtitle.json`:
+**A conversion needs a format only LibreOffice can write**
+Document conversion itself needs nothing installed: the built-in engine reads Word,
+Excel, PowerPoint, OpenDocument and PDF files and writes PDF, text, CSV, HTML and
+XLSX. Only the remaining targets (`docx`, `odt`, `rtf`, `ods`, `odp`, `pptx`, `png`,
+`jpg`) need LibreOffice. Install it, or set `soffice_path` in `.surtitle.json`:
 
 ```json
 { "soffice_path": "C:/Program Files/LibreOffice/program/soffice.exe" }
@@ -280,5 +283,5 @@ These are the places Windows genuinely differs, and how each is handled:
 | Case-insensitive paths | Containment compares case-folded, so `C:\Proj` and `c:\proj` are the same directory |
 | Credential file permissions | `0600` is applied on POSIX; on Windows the file inherits the user profile ACL, so it stays per-user but is not mode-enforced |
 | Shell | `cmd.exe /d /s /c` |
-| LibreOffice | `soffice.exe`, discovered at `C:\Program Files\LibreOffice\program` |
+| LibreOffice (optional) | `soffice.exe`, discovered at `C:\Program Files\LibreOffice\program`. Only needed for the formats the built-in converter cannot write |
 | Virtual environment layout | `Scripts\python.exe` and `Lib\site-packages` instead of `bin/` and `lib/` |

@@ -142,7 +142,7 @@ configuration.
 | `run_python` | Execute Python in the project directory. |
 | `run_shell` | Run a shell command (`cmd.exe` on Windows, `/bin/sh` elsewhere). |
 | `make_pdf`, `make_spreadsheet`, `make_chart` | Produce formatted documents directly. |
-| `convert_document` | Convert Word/Excel/PowerPoint/OpenDocument via local LibreOffice. |
+| `convert_document` | Convert documents — Word/Excel/PowerPoint/OpenDocument/PDF. Needs nothing installed; uses LibreOffice when present for more formats and layout. |
 | `environment_info` | Report which Python environment code runs in. |
 | `search_packages`, `install_packages` | **Acquire new capability on demand** (below). |
 | Attachments | Drag, paste or pick files; they are saved into the project and read like any other file. |
@@ -229,10 +229,18 @@ rejected upload leaves nothing behind.
 
 ### Documents and CAD
 
-LibreOffice conversion works on both platforms — it is discovered automatically, or
-set `soffice_path` in `.surtitle.json` to point at `soffice`. For **CAD**
-(Fusion 360, OpenCASCADE, or your own tooling), the answer is
-[MCP](#mcp-servers) rather than a bespoke integration.
+Document handling needs nothing installed. Word, Excel, PowerPoint, OpenDocument and
+PDF files are read, and PDF, text, CSV, HTML and XLSX are written, by a built-in
+engine that carries content — headings, paragraphs, lists, tables — rather than
+layout. Reading works directly through `read_file`, so a `.docx` never has to be
+converted first.
+
+If LibreOffice is installed it is used as well: for the formats the built-in engine
+cannot write (`.docx`, `.odt`, `.rtf`, `.ods`, `.odp`, `.pptx`, `.png`, `.jpg`), and
+as a fallback that preserves appearance. It is discovered automatically, or set
+`soffice_path` in `.surtitle.json` to point at `soffice`. Pass `backend='builtin'`
+to guarantee no external program runs. For **CAD** (Fusion 360, OpenCASCADE, or your
+own tooling), the answer is [MCP](#mcp-servers) rather than a bespoke integration.
 
 ## MCP servers
 
