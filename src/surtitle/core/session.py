@@ -436,6 +436,28 @@ class Session:
         return incoming
 
     # --- the turn --------------------------------------------------------
+    async def _speak_problem(self, data: dict[str, Any]) -> None:
+        """Say aloud that the turn ended badly.
+
+        A voice-first user is listening, not reading. The error is displayed, but
+        silence is indistinguishable from the agent having quietly stopped — which
+        is exactly how a turn that exhausted its step budget was reported. The
+        screen keeps the detail; the spoken channel gets one short sentence saying
+        what happened and what to do.
+        """
+        if self.tts is None:
+            return
+        spoken = {
+            "step_limit": (
+                "I ran out of steps before finishing that. Ask me to carry on, "
+                "or give me a smaller piece of it."
+            ),
+            "llm": "I lost the connection to the model, so that turn stopped.",
+            "internal": "Something went wrong part-way through that turn.",
+        }.get(str(data.get("kind_detail") or ""), "That turn ended before it finished.")
+        with contextlib.suppress(Exception):
+            await self._speak_chunk(Chunk(ChunkKind.SAY, spoken, final=True))
+
     async def _run_turn(self, user_text: str) -> None:
         """Run one agent turn, streaming speech and events as they are produced."""
         loop = AgentLoop(
@@ -457,6 +479,8 @@ class Session:
             async for event in loop.run(history, user_text, on_chunk=self._speak_chunk):
                 if event.kind is EventKind.APPROVAL_REQUEST:
                     await self._on_approval_requested(event.data)
+                elif event.kind is EventKind.ERROR:
+                    await self._speak_problem(event.data)
                 await self._emit_or_queue(event)
         except asyncio.CancelledError:
             if self.tts is not None:

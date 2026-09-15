@@ -243,6 +243,75 @@ class TestSuppressionIsReleasedAfterATurn:
             "has stopped speaking"
         )
 
+
+class TestFailuresAreSpoken:
+    """A voice-first user is listening, not reading.
+
+    A turn that exhausted its step budget ended in silence: the error was on
+    screen, the agent said nothing, and the turn wrote no assistant message. It was
+    reported as "it seems to have stopped" — which is exactly what silence means to
+    someone who is listening rather than reading.
+    """
+
+    @staticmethod
+    def _recorder(spoken: list[str]):
+        class Recorder:
+            is_speaking = False
+
+            def speak(self, text, *, final=False):
+                spoken.append(text)
+
+        return Recorder()
+
+    async def test_the_step_limit_is_spoken(self, wired):
+        session = wired[0]
+        spoken: list[str] = []
+        session.tts = self._recorder(spoken)  # type: ignore[assignment]
+
+        await session._speak_problem({"kind_detail": "step_limit"})
+
+        assert spoken, "running out of steps must not be silent"
+        assert "ran out of steps" in spoken[0]
+        # Actionable, not just an alarm.
+        assert "carry on" in spoken[0] or "smaller" in spoken[0]
+
+    async def test_a_model_failure_is_spoken(self, wired):
+        session = wired[0]
+        spoken: list[str] = []
+        session.tts = self._recorder(spoken)  # type: ignore[assignment]
+
+        await session._speak_problem({"kind_detail": "llm", "message": "boom"})
+
+        assert spoken and "connection" in spoken[0]
+
+    async def test_an_unmodelled_failure_still_says_something(self, wired):
+        session = wired[0]
+        spoken: list[str] = []
+        session.tts = self._recorder(spoken)  # type: ignore[assignment]
+
+        await session._speak_problem({"kind_detail": "something_new"})
+
+        assert spoken, "a new failure kind must still not be silent"
+
+    async def test_text_only_mode_is_unaffected(self, wired):
+        """No synthesiser means nothing to say, and nothing to break."""
+        session = wired[0]
+        session.tts = None
+        await session._speak_problem({"kind_detail": "step_limit"})
+
+    async def test_the_step_limit_leaves_a_trace_in_the_log(self):
+        """Nothing recorded it, so a cut-short turn vanished from the log."""
+        import inspect
+
+        from surtitle.core.agent import AgentLoop
+
+        source = inspect.getsource(AgentLoop.run)
+        assert "step limit reached" in source, (
+            "a turn cut short by the budget must be visible in the log"
+        )
+
+
+class TestSuppressionIsObservable:
     """A suppressed transcript must not be invisible.
 
     While this was a debug line, a permanently stuck suppression produced no log

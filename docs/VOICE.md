@@ -392,6 +392,21 @@ one utterance cannot fire several barge-ins in a row.
 | TTS unavailable | The turn still completes and the transcript is complete; only audio is missing. |
 | Microphone denied | Text-only mode; the error explains that typing still works. |
 | No Deepgram key | Voice disabled at startup; the mic button is disabled. |
+| Step budget exhausted | The turn stops, the reason is **spoken** as well as shown, and the log records it. |
+
+### Failures are spoken, not just displayed
+
+A voice-first user is listening, not reading. Every failure used to be displayed
+silently, and a turn cut short by the step budget (`SURTITLE_MAX_STEPS`,
+default 24) ended with the agent saying nothing at all — which is indistinguishable
+from the agent having stopped. It was reported exactly that way: the agent worked
+for eight minutes making 33 tool calls, exhausted its budget, wrote no assistant
+message, and left no trace in the log either.
+
+Each failure now gets one short spoken sentence saying what happened and what to
+do next ("I ran out of steps before finishing that. Ask me to carry on, or give me
+a smaller piece of it."), while the screen keeps the detail. The step limit is also
+logged, and it is adjustable in Settings → Agent.
 
 ### Why a dead send half used to be permanent
 

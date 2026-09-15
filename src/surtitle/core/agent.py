@@ -561,6 +561,15 @@ class AgentLoop:
                 return
 
             # Step cap reached.
+            #
+            # Logged, because nothing else recorded it: the turn simply stopped,
+            # wrote no assistant message, and left no trace in the log to explain
+            # why. That is what made "it seems to have stopped" so hard to place.
+            log.warning(
+                "step limit reached after %d step(s); the turn was cut short "
+                "(SURTITLE_MAX_STEPS)",
+                state.step,
+            )
             yield self._event(
                 EventKind.ERROR,
                 message=(
