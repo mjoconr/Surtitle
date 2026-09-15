@@ -136,9 +136,7 @@ class TestSofficeDiscovery:
     def test_returns_none_when_nothing_present(self, monkeypatch):
         monkeypatch.delenv("SURTITLE_SOFFICE", raising=False)
         monkeypatch.setattr("shutil.which", lambda _name: None)
-        monkeypatch.setattr(
-            "surtitle.tools.project_config._SOFFICE_CANDIDATES", {}, raising=False
-        )
+        monkeypatch.setattr("surtitle.tools.project_config._SOFFICE_CANDIDATES", {}, raising=False)
         monkeypatch.setattr(
             "surtitle.tools.project_config._SOFFICE_LINUX", ("/nope/soffice",), raising=False
         )

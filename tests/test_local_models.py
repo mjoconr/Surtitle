@@ -464,9 +464,7 @@ class TestModelsDir:
         assert models.models_dir(settings) == tmp_path / "home" / "models"
 
     def test_override_is_honoured(self, tmp_path):
-        settings = Settings(
-            DEEPSEEK_API_KEY="k", SURTITLE_MODELS_DIR=str(tmp_path / "elsewhere")
-        )
+        settings = Settings(DEEPSEEK_API_KEY="k", SURTITLE_MODELS_DIR=str(tmp_path / "elsewhere"))
         assert models.models_dir(settings) == tmp_path / "elsewhere"
 
 

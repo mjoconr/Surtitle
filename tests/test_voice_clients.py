@@ -494,9 +494,7 @@ class TestTheSenderIsSupervised:
             async def __aexit__(self, *exc):
                 return False
 
-        monkeypatch.setattr(
-            "surtitle.voice.stt.websockets.connect", lambda *a, **k: FakeConnect()
-        )
+        monkeypatch.setattr("surtitle.voice.stt.websockets.connect", lambda *a, **k: FakeConnect())
 
     async def test_a_failing_sender_ends_the_connection(self, monkeypatch):
         """The failure must propagate so `_run` reconnects."""
