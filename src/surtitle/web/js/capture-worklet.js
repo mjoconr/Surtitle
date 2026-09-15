@@ -19,20 +19,33 @@
 const TARGET_SAMPLE_RATE = 16000;
 const FRAME_SAMPLES = 512; // ~32 ms at 16 kHz
 
-// Speech must exceed this RMS and then persist for this many frames before it
-// counts as the user taking the floor.
+// `process()` is called once per render quantum, which the specification fixes at
+// 128 sample-frames — about 2.7 ms at 48 kHz. Anything expressed in "frames" is
+// therefore ~12x shorter than it looks, and these windows were written as if a
+// frame were a 32 ms audio frame. Four of them was 11 ms rather than the intended
+// 130 ms, so the detector fired almost immediately on any loudness; the grace
+// window was 32 ms rather than 400 ms, so it had expired before echo cancellation
+// had settled. The result was the agent's own voice tripping barge-in and cutting
+// its reply off — heard as audio breaking up.
 //
-// These are deliberately conservative. A false positive truncates the agent
-// mid-sentence, which is far worse than an interruption arriving a fraction of a
-// second late: in a real session the agent's own voice through the speakers
-// tripped a 0.02 threshold and cut replies off. 0.05 sustained for four frames is
-// roughly 130 ms of speech, which a person talking over the agent easily reaches
-// while speaker bleed does not.
+// Everything below is therefore expressed in milliseconds and converted.
+const RENDER_QUANTUM = 128;
+
+// Speech must exceed this RMS and then hold for SPEECH_HOLD_MS before it counts as
+// the user taking the floor. Deliberately conservative: a false positive truncates
+// the agent mid-sentence, far worse than an interruption arriving slightly late.
 const SPEECH_RMS_THRESHOLD = 0.05;
-const CONSECUTIVE_SPEECH_FRAMES = 4;
-// Ignore input right after playback starts: the speaker tail can trip the
-// threshold before echo cancellation has converged.
-const SPEECH_GRACE_FRAMES = 12;
+const SPEECH_HOLD_MS = 130;
+// Ignore input for this long after playback starts: the speaker tail can trip the
+// threshold before echo cancellation has converged. Matches the client's own
+// `_graceUntil` window.
+const SPEECH_GRACE_MS = 400;
+// The level meter is redrawn from these messages, so they are throttled: one per
+// render quantum is ~375 a second, each one a DOM write on the main thread, which
+// delays playback scheduling and shows up as gaps in the audio.
+const LEVEL_INTERVAL_MS = 50;
+
+const quantaFor = (ms) => Math.max(1, Math.round(((ms / 1000) * sampleRate) / RENDER_QUANTUM));
 
 class CaptureProcessor extends AudioWorkletProcessor {
   constructor() {
@@ -42,8 +55,12 @@ class CaptureProcessor extends AudioWorkletProcessor {
     this._bufferIndex = 0;
     this._acc = 0;
     this._accCount = 0;
-    this._speechFrames = 0;
-    this._graceFrames = 0;
+    this._holdQuanta = quantaFor(SPEECH_HOLD_MS);
+    this._graceQuantaLimit = quantaFor(SPEECH_GRACE_MS);
+    this._levelEveryQuanta = quantaFor(LEVEL_INTERVAL_MS);
+    this._speechQuanta = 0;
+    this._graceQuanta = 0;
+    this._quantaSinceLevel = 0;
     this._speaking = false;
     this._muted = true;
 
@@ -73,11 +90,11 @@ class CaptureProcessor extends AudioWorkletProcessor {
     data = data || {};
     if (data.type === "mute") {
       this._muted = Boolean(data.value);
-      this._speechFrames = 0;
+      this._speechQuanta = 0;
       this._speaking = false;
     } else if (data.type === "playback") {
       // The main thread tells us playback started, to open a grace window.
-      if (data.value) this._graceFrames = SPEECH_GRACE_FRAMES;
+      if (data.value) this._graceQuanta = this._graceQuantaLimit;
     }
   }
 
@@ -88,7 +105,7 @@ class CaptureProcessor extends AudioWorkletProcessor {
     const channel = input[0];
     if (!channel) return true;
 
-    if (this._graceFrames > 0) this._graceFrames -= 1;
+    if (this._graceQuanta > 0) this._graceQuanta -= 1;
 
     if (!this._muted) {
       this._measure(channel);
@@ -118,14 +135,14 @@ class CaptureProcessor extends AudioWorkletProcessor {
     for (let i = 0; i < channel.length; i += 1) sum += channel[i] * channel[i];
     const rms = Math.sqrt(sum / channel.length);
 
-    if (rms > SPEECH_RMS_THRESHOLD && this._graceFrames === 0) {
-      this._speechFrames += 1;
-      if (this._speechFrames >= CONSECUTIVE_SPEECH_FRAMES && !this._speaking) {
+    if (rms > SPEECH_RMS_THRESHOLD && this._graceQuanta === 0) {
+      this._speechQuanta += 1;
+      if (this._speechQuanta >= this._holdQuanta && !this._speaking) {
         this._speaking = true;
         this.port.postMessage({ type: "speech-start" });
       }
     } else {
-      this._speechFrames = 0;
+      this._speechQuanta = 0;
       // Require a real pause before re-arming, so one utterance cannot fire
       // several barge-ins in a row.
       if (this._speaking && rms < SPEECH_RMS_THRESHOLD * 0.6) {
@@ -133,7 +150,13 @@ class CaptureProcessor extends AudioWorkletProcessor {
       }
     }
 
-    this.port.postMessage({ type: "level", value: Math.min(1, rms * 6) });
+    // Throttled: the meter is a redraw, and posting this every quantum put ~375
+    // messages a second on the main thread.
+    this._quantaSinceLevel += 1;
+    if (this._quantaSinceLevel >= this._levelEveryQuanta) {
+      this._quantaSinceLevel = 0;
+      this.port.postMessage({ type: "level", value: Math.min(1, rms * 6) });
+    }
   }
 
   _flush() {

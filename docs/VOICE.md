@@ -374,6 +374,36 @@ A single loud spike must not truncate a sentence, so detection requires the thre
 to be exceeded for **three consecutive frames** and a genuine pause before re-arming, so
 one utterance cannot fire several barge-ins in a row.
 
+### Barge-in windows are in milliseconds, not render quanta
+
+`process()` runs once per render quantum, fixed by the specification at 128
+sample-frames — about 2.7 ms at 48 kHz. The detector's thresholds were written as
+if a quantum were a 32 ms audio frame, so the intended "130 ms of sustained speech"
+was really 11 ms and the intended 400 ms grace window was 32 ms.
+
+That mattered because the client silences playback on its own VAD **before** the
+server validates the interruption: the server would log "ignoring an interruption
+with no transcribed speech behind it" while the audio had already been cut. The
+agent's own voice through the speakers was enough, so replies stopped and restarted
+— reported as the audio breaking up. Measured in a browser against the shipped
+processor:
+
+| Burst | Interrupts? (before) | Interrupts? (now) |
+|---|---|---|
+| 50 ms loud | yes | no |
+| 100 ms loud | yes | no |
+| 400 ms loud | yes | yes |
+| 400 ms quiet | no | no |
+
+The level meter was also posting one message per quantum, roughly 375 a second,
+each one a DOM write on the main thread — which delays playback scheduling and
+shows up as gaps. It is throttled to ~20 a second.
+
+A progress line ("still working on this") is deliberately **not** a final
+utterance: marking it final makes the synthesiser report that speaking has
+finished, which releases echo suppression mid-turn.
+
+
 ## Push-to-talk and open mic
 
 - Click the mic to toggle listening.

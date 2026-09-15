@@ -311,6 +311,48 @@ class TestFailuresAreSpoken:
         )
 
 
+class TestTheProgressLineDoesNotEndTheTurn:
+    """A "still working" line is not the end of the turn.
+
+    Marking it final makes the synthesiser report that speaking has finished, which
+    releases echo suppression while the agent is still working and still going to
+    speak. The speaking state then flips mid-turn and the agent's own voice is let
+    back in through the microphone.
+    """
+
+    async def test_progress_is_not_marked_final(self, wired):
+        session = wired[0]
+        recorded: list[tuple[str, bool]] = []
+
+        class Recorder:
+            is_speaking = False
+
+            def speak(self, text, *, final=False):
+                recorded.append((text, final))
+
+        session.tts = Recorder()  # type: ignore[assignment]
+        await session._speak_progress(20)
+
+        assert recorded, "a long silent turn should say it is still working"
+        text, final = recorded[0]
+        assert "still working" in text.lower()
+        assert final is False, "the turn has not finished, so this must not be final"
+
+    async def test_the_turn_end_marker_is_separate(self, wired):
+        """`end_of_turn` is what marks the end, and only that."""
+        _session, tts, _stt = wired
+        assert hasattr(tts, "end_of_turn")
+
+        import inspect
+
+        from surtitle.core.session import Session
+
+        source = inspect.getsource(Session._run_turn)
+        assert "end_of_turn()" in source, (
+            "the end of the turn must be announced deliberately, not implied by a progress line"
+        )
+
+
 class TestSuppressionIsObservable:
     """A suppressed transcript must not be invisible.
 

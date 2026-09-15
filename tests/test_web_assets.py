@@ -409,6 +409,49 @@ class TestTranscriptScroll:
         )
 
 
+class TestBargeInTiming:
+    """The detector's windows must be real time, not render quanta.
+
+    `process()` is called once per render quantum, which the specification fixes at
+    128 sample-frames — about 2.7 ms at 48 kHz. The thresholds were written as if a
+    quantum were a 32 ms audio frame, so "four frames" was 11 ms rather than the
+    intended 130 ms and the grace window was 32 ms rather than 400 ms. The detector
+    therefore fired on almost any loudness, and since the client silences playback
+    on its own VAD *before* the server validates the interruption, the agent's own
+    voice cut its replies off. Heard as audio breaking up.
+
+    Measured in a browser against the shipped processor: before the change a 50 ms
+    burst interrupted; after it, 50 ms and 100 ms bursts do not and 400 ms does.
+    """
+
+    @pytest.fixture(scope="module")
+    def worklet(self) -> str:
+        return (WEB / "js" / "capture-worklet.js").read_text(encoding="utf-8")
+
+    def test_windows_are_declared_in_milliseconds(self, worklet):
+        assert "SPEECH_HOLD_MS" in worklet
+        assert "SPEECH_GRACE_MS" in worklet
+        assert "CONSECUTIVE_SPEECH_FRAMES" not in worklet, (
+            "counting render quanta as if they were audio frames is the bug"
+        )
+        assert "SPEECH_GRACE_FRAMES" not in worklet or "SPEECH_GRACE_MS" in worklet
+
+    def test_the_conversion_accounts_for_the_render_quantum(self, worklet):
+        assert "RENDER_QUANTUM = 128" in worklet
+        assert "quantaFor" in worklet
+        assert "sampleRate" in worklet, "the quantum count depends on the sample rate"
+
+    def test_the_grace_window_matches_the_client(self, worklet, audio):
+        """The client opens a 400 ms grace window; the worklet must agree."""
+        assert "SPEECH_GRACE_MS = 400" in worklet
+        assert "400" in audio
+
+    def test_level_messages_are_throttled(self, worklet):
+        """One per quantum is ~375 a second, each a DOM write on the main thread."""
+        assert "LEVEL_INTERVAL_MS" in worklet
+        assert "_quantaSinceLevel" in worklet
+
+
 class TestActivityPanelNoise:
     """Reasoning must not flood the panel.
 

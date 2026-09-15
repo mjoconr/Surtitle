@@ -470,12 +470,18 @@ class Session:
         reported, after eight minutes and thirty-three tool calls. One short line
         removes the ambiguity; the tool activity is already on screen for anyone
         watching it.
+
+        Deliberately **not** the final utterance of the turn. Marking it final makes
+        the synthesiser report that speaking has finished, which releases echo
+        suppression while the agent is still working and still going to speak:
+        the speaking state flips mid-turn and the agent's own voice is let back in
+        through the microphone.
         """
         if self.tts is None:
             return
         with contextlib.suppress(Exception):
             await self._speak_chunk(
-                Chunk(ChunkKind.SAY, f"Still working on this, about {step} steps in.", final=True)
+                Chunk(ChunkKind.SAY, f"Still working on this, about {step} steps in.", final=False)
             )
 
     async def _run_turn(self, user_text: str) -> None:
