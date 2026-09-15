@@ -39,6 +39,10 @@ __all__ = ["Session", "SessionManager"]
 
 log = logging.getLogger(__name__)
 
+# Step counts at which a long, silent turn says it is still working. Escalating,
+# so the first is early enough to reassure and the rest are rare.
+_PROGRESS_STEPS = (8, 20, 45, 90, 180)
+
 # How many transcript messages to replay into the model as context.
 _HISTORY_LIMIT = 40
 
@@ -458,6 +462,22 @@ class Session:
         with contextlib.suppress(Exception):
             await self._speak_chunk(Chunk(ChunkKind.SAY, spoken, final=True))
 
+    async def _speak_progress(self, step: int) -> None:
+        """Say that a long turn is still going.
+
+        A turn that makes tool calls for minutes without speaking is
+        indistinguishable from an agent that has hung — that is exactly how one was
+        reported, after eight minutes and thirty-three tool calls. One short line
+        removes the ambiguity; the tool activity is already on screen for anyone
+        watching it.
+        """
+        if self.tts is None:
+            return
+        with contextlib.suppress(Exception):
+            await self._speak_chunk(
+                Chunk(ChunkKind.SAY, f"Still working on this, about {step} steps in.", final=True)
+            )
+
     async def _run_turn(self, user_text: str) -> None:
         """Run one agent turn, streaming speech and events as they are produced."""
         loop = AgentLoop(
@@ -475,12 +495,33 @@ class Session:
 
         history = self._build_history()
 
+        # Progress narration: a long tool-using turn is otherwise silent, and
+        # silence reads as "it stopped". Announced at increasing step counts, and
+        # only while the agent has not said anything of its own.
+        announced: set[int] = set()
+        spoke = False
+
+        async def on_chunk(chunk: Chunk) -> None:
+            nonlocal spoke
+            if chunk.kind is ChunkKind.SAY and chunk.text.strip():
+                spoke = True
+            await self._speak_chunk(chunk)
+
         try:
-            async for event in loop.run(history, user_text, on_chunk=self._speak_chunk):
+            async for event in loop.run(history, user_text, on_chunk=on_chunk):
                 if event.kind is EventKind.APPROVAL_REQUEST:
                     await self._on_approval_requested(event.data)
                 elif event.kind is EventKind.ERROR:
                     await self._speak_problem(event.data)
+                elif event.kind is EventKind.STATE and not spoke:
+                    step = event.data.get("step")
+                    due = next(
+                        (n for n in _PROGRESS_STEPS if n <= int(step or 0) and n not in announced),
+                        None,
+                    )
+                    if due is not None:
+                        announced.add(due)
+                        await self._speak_progress(int(step))
                 await self._emit_or_queue(event)
         except asyncio.CancelledError:
             if self.tts is not None:
@@ -578,9 +619,14 @@ class Session:
           task calls for it. Injecting the full interface guides either squeezed out
           the short important file or pushed the conversation out of the window
           before the user had spoken.
-        * A file too large for the remaining budget is **skipped, not truncated**.
-          A document cut to a tenth of itself reads as the whole document, which is
-          worse than not showing it at all.
+        * A file too large for the remaining budget is **skipped, not truncated**,
+          because a document cut to a tenth of itself reads as the whole document.
+          The one exception is the project's primary instruction file, which is
+          always present and cut short if it must be: it carries the project's
+          conventions and its accumulated learnings, so its absence would mean
+          starting a session knowing nothing. When that happens the file is named
+          under "Instructions shown in part" so a fragment is never mistaken for
+          the whole.
         """
         from surtitle.core.agent import build_system_prompt
 
@@ -635,9 +681,10 @@ class Session:
         loaded: list[str] = []
         loaded_names: set[str] = set()
         skipped: list[str] = []
+        truncated: list[str] = []
         budget = self._INSTRUCTION_MAX_CHARS
 
-        for name, path in candidates:
+        for position, (name, path) in enumerate(candidates):
             try:
                 text = path.read_text(encoding="utf-8", errors="replace").strip()
             except OSError:
@@ -645,10 +692,16 @@ class Session:
             if not text:
                 continue
             if len(text) > budget:
-                if len(text) > budget * 2:
-                    # Showing half a document invites the agent to treat a fragment
-                    # as the whole thing, which is worse than not showing it. Name
-                    # it instead so it is read deliberately.
+                # The project's primary instruction file is always present, cut
+                # short if it has to be. It is where conventions and cross-session
+                # learnings live, and it is the one file whose absence means the
+                # agent starts a session knowing nothing about the project — which
+                # is the loss this whole priming stack exists to prevent. Every
+                # other file is named rather than shredded, because a document cut
+                # to a tenth of itself reads as the whole document.
+                if position == 0:
+                    truncated.append(name)
+                elif len(text) > budget * 2:
                     skipped.append(name)
                     continue
                 text = f"{text[:budget]}\n... [truncated; read the file for the rest]"
@@ -666,6 +719,17 @@ class Session:
                 "they describe how to reach a system, use that path rather than "
                 "inventing one. More specific files take precedence over broader "
                 "ones.\n\n" + "\n\n".join(loaded)
+            )
+
+        if truncated:
+            # Being explicit matters more than usual here: the whole reason
+            # oversized documents are normally skipped is that a fragment gets
+            # mistaken for the whole thing.
+            sections.append(
+                "## Instructions shown in part\n"
+                "These were longer than the space available, so only the start is "
+                "above. Read the file itself before relying on it:\n"
+                + "\n".join(f"- {name}" for name in truncated)
             )
 
         # Documentation the agent has not been shown, named so it knows it exists.

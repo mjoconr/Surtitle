@@ -118,7 +118,17 @@ class Settings(BaseSettings):
     max_tokens: int = Field(default=4096, alias="SURTITLE_MAX_TOKENS")
 
     # --- agent loop limits ----------------------------------------------
-    max_steps: int = Field(default=24, alias="SURTITLE_MAX_STEPS")
+    # A backstop against runaway tool use, not a work budget.
+    #
+    # This was 24, which cut off legitimate work: a request to investigate and
+    # report on a machine ran 24 rounds of real, productive tool calls and was
+    # stopped mid-task with no answer. The guard against a *stuck* agent is the
+    # repeat-call guard, which refuses consecutive identical calls on an escalating
+    # threshold and feeds back a reminder — a model that repeats itself cannot make
+    # progress, and that is caught mechanically. A model making twenty-four
+    # *different* calls is usually working, so this has to be high enough to be a
+    # genuine backstop rather than a budget that decides when to give up.
+    max_steps: int = Field(default=200, alias="SURTITLE_MAX_STEPS")
     request_timeout: float = Field(default=180.0, alias="SURTITLE_REQUEST_TIMEOUT")
 
     # --- voice -----------------------------------------------------------

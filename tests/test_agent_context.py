@@ -172,12 +172,21 @@ class TestProjectInstructionsAreInjected:
         assert "SECRET NOT AN INSTRUCTION" not in session._system_prompt()
 
     def test_a_large_instruction_file_is_capped(self, project_session):
-        """A file too big to show honestly is skipped and named, not shredded."""
+        """An oversized file is shown in part, and declared as partial.
+
+        It used to be skipped entirely, on the grounds that a fragment reads as the
+        whole document. For the project's *primary* instruction file that trade is
+        the wrong way round: conventions and accumulated learnings live there, so
+        dropping it means starting the session knowing nothing about the project.
+        The fragment-is-not-the-whole concern is met by saying so explicitly.
+        """
         session, root = project_session
         (root / "AGENTS.md").write_text("x" * 50000)
         prompt = session._system_prompt()
-        assert "x" * 5000 not in prompt, "an oversized file was admitted wholesale"
-        assert "AGENTS.md" in prompt, "and it must still be named"
+        assert "x" * 5000 in prompt, "the primary file must be present, if only in part"
+        assert "AGENTS.md" in prompt
+        assert "truncated; read the file for the rest" in prompt
+        assert "Instructions shown in part" in prompt, "a fragment must be declared partial"
         # The whole prompt stays bounded well below the file size.
         assert len(prompt) < 30000, "an unbounded instruction file crowded the conversation"
 
@@ -591,13 +600,20 @@ class TestDocumentationAwareness:
         assert "README.md" not in index
 
     def test_an_oversized_document_is_not_shredded(self, project_session):
-        """A file cut to a fraction of itself reads as the whole document."""
+        """A *secondary* file cut to a fraction of itself reads as the whole.
+
+        The primary instruction file is the documented exception: it is shown in
+        part and declared partial, because losing it entirely costs the session all
+        knowledge of the project. Everything after it is still named rather than
+        shredded.
+        """
         session, root = project_session
-        (root / "AGENTS.md").write_text("x" * 90000)
+        (root / "AGENTS.md").write_text("# Rules\n")
+        (root / "CLAUDE.md").write_text("x" * 90000)
         prompt = self._prompt(session)
-        # Skipped entirely, so the body is absent and it is named instead.
+        # Skipped, so its body is absent and it is named instead.
         assert "x" * 2000 not in prompt
-        assert "AGENTS.md" in prompt
+        assert "CLAUDE.md" in prompt
 
     def test_no_duplicate_sections_are_emitted(self, project_session):
         session, root = project_session

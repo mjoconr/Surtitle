@@ -75,6 +75,32 @@ Three things make this a *voice* agent rather than a generic tool runner:
 Assistant messages are assembled into OpenAI-compatible `tool_calls` shape, so the
 conversation replays correctly on the next turn.
 
+### What survives a growing conversation
+
+Only the last `_HISTORY_LIMIT` messages are replayed to the model, so the
+conversation is not durable memory: anything worked out and kept only in the
+transcript decays away, and a later session never sees it at all. Two things carry
+knowledge forward instead.
+
+**The project's own Markdown is re-read from disk on every turn.** `AGENTS.md` and
+the files under `docs/` are assembled into the *system* prompt, not the
+conversation, so they are unaffected by history trimming and a file the agent
+writes mid-session takes effect on the next turn. That is why the agent is told as
+a standing rule to record what it learns in those files rather than only saying it:
+they are the only channel that reaches the next session.
+
+The assistant's notebook (`.surtitle/notes.md`) is injected the same way, but it
+is app-local and unshared, so it is for scratch notes. Anything affecting future
+work belongs in the project's Markdown, where it is reviewable and committed.
+
+**The primary instruction file is never dropped.** Other oversized documents are
+named rather than included, because a document cut to a tenth of itself reads as
+the whole thing. The first one is the exception: it carries the project's
+conventions and its accumulated learnings, so its absence would mean starting a
+session knowing nothing about the project. It is shown in part and listed under
+"Instructions shown in part", which addresses the fragment problem directly instead
+of by omission.
+
 ### The completion sentinel
 
 `_stream_completion` is an async generator that yields UI events *and* needs to hand

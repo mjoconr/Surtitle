@@ -178,9 +178,10 @@ SETTINGS_FIELDS: tuple[_Field, ...] = (
         "max_steps",
         int,
         "Max steps",
-        "Hard cap on agent iterations per turn, to bound runaway tool use.",
+        "Backstop against runaway tool use, not a work budget. The repeat-call "
+        "guard already stops a stuck agent, so leave this high.",
         minimum=1,
-        maximum=200,
+        maximum=2000,
         section="agent",
     ),
     _Field(
