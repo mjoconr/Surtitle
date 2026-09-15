@@ -68,6 +68,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Two tests that passed only on a machine with the right tools installed: the
   document-conversion tests needed a real LibreOffice, and the search test
   assumed ripgrep was on `PATH`.
+- Windows archive verification tested the wrong interpreter. It looked for the
+  POSIX venv layout and the Windows runtime layout but not `venv\Scripts\python.exe`,
+  then silently fell back to the bundled runtime — which cannot import the
+  application, so the smoke test failed while proving nothing about the archive.
+- Path confinement on Windows refused paths it should have allowed.
+  `Path.resolve()` returns an extended-length (`\\?\`) path for some inputs, and
+  that prefix is a different first component, so a contained path looked like an
+  escape. Long project paths hit this too.
 
 ### Migration — this rename is breaking
 
