@@ -144,6 +144,20 @@ class TextToSpeech:
             return
         self._queue.put_nowait(Utterance(text=text.strip(), final=final))
 
+    def end_of_turn(self) -> None:
+        """No more text is coming for this turn.
+
+        Queues a marker that the worker turns into the `on_finished` callback once
+        every queued sentence has been synthesised. That callback is what releases
+        echo suppression, and without it the session stayed marked as speaking
+        after its very first reply — so every later transcript was discarded as
+        though it were the agent's own voice, and the microphone appeared to stop
+        working after the first exchange.
+        """
+        if self._stopped:
+            return
+        self._queue.put_nowait(Utterance(text="", final=True))
+
     async def barge_in(self) -> None:
         """Stop speaking immediately and discard everything queued.
 
@@ -190,11 +204,27 @@ class TextToSpeech:
 
                 generation = self._generation
                 try:
+                    if not utterance.text:
+                        # A turn boundary with nothing to say. Speaking must not be
+                        # announced for it, or a silent turn (an error, a
+                        # display-only reply) would flash echo suppression on and
+                        # off and briefly claim the agent is talking.
+                        if utterance.final and self._queue.empty():
+                            await self._finish_if_active()
+                        continue
                     if not self._active:
                         self._active = True
                         if self._on_started:
                             await self._on_started()
                     await self._synthesise(utterance, generation)
+                    if utterance.final and self._queue.empty():
+                        # The turn's last sentence has been synthesised and nothing
+                        # is queued behind it, so speaking is over. Reporting that
+                        # here is what releases the session's echo suppression;
+                        # nothing else ever did, so `is_speaking` stayed true from
+                        # the first reply onwards and every later transcript was
+                        # dropped as if it were the agent's own voice.
+                        await self._finish_if_active()
                     attempt = 0
                 except BargeIn:
                     # Expected: the user interrupted. Nothing to report.

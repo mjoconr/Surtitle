@@ -484,6 +484,19 @@ class Session:
         except Exception as exc:  # a turn failure must not kill the session
             log.exception("turn failed")
             await self.emit(EventKind.ERROR, message=f"{type(exc).__name__}: {exc}")
+        else:
+            # The model has finished producing this turn's text. Tell the synthesiser
+            # so that once the queued sentences have been spoken it reports the end
+            # of speaking, which releases echo suppression.
+            #
+            # Nothing did this before. `is_speaking` therefore stayed true from the
+            # first reply onwards, so `handle_mic` re-armed suppression on every
+            # later press of the mic button, every transcript was silently
+            # discarded as the agent's own voice, and the microphone looked broken
+            # from the second exchange onward — in every browser, with the audio
+            # demonstrably arriving and loud.
+            if self.tts is not None:
+                self.tts.end_of_turn()
         finally:
             # Counters are intentionally left in place: they describe the listening
             # session, and clearing them here is what made a failed second attempt
@@ -747,6 +760,7 @@ class Session:
 
         if self.stt is not None:
             self.stt.set_suppression(True)
+        log.info("speaking started; echo suppression on")
 
     def _turn_in_flight(self) -> bool:
         """True while an agent turn is still running."""
@@ -757,6 +771,10 @@ class Session:
         self._speaking = False
         if self.stt is not None:
             self.stt.set_suppression(False)
+        # Worth a line: while this never ran, echo suppression stayed on for the
+        # rest of the session and every later transcript was discarded — which is
+        # indistinguishable from a dead microphone, and produced no log output.
+        log.info("speaking finished; echo suppression released")
         if self._state.state is SessionState.SPEAKING:
             self._set_state(SessionState.LISTENING if self._state.mic_open else SessionState.IDLE)
 

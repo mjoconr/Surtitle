@@ -410,6 +410,32 @@ Both halves are now waited on together and whichever ends is surfaced, so the
 failure reaches the reconnect path. A backing-up queue is also logged, because
 dropped frames are the only visible sign of a stalled sender.
 
+### Echo suppression must be released, or the mic looks broken
+
+`_on_speaking_started` turns on echo suppression so the agent does not transcribe
+its own voice. **Nothing turned it off.** `on_finished` was reachable only through
+`TextToSpeech.stop()`, so after the agent's very first reply `is_speaking` stayed
+true for the rest of the session.
+
+`Session.handle_mic(open=True)` derives suppression from `is_speaking`, so every
+later press of the microphone button **re-armed** suppression rather than clearing
+it. Every transcript from then on was discarded as the agent's own voice — and
+because the drop was a debug line, the log showed nothing at all.
+
+Symptoms, all of which were reported:
+
+- the first question works, and the microphone then appears dead;
+- toggling the microphone does not help;
+- audio is demonstrably arriving and loud — the log recorded `peak 0.996`;
+- it happens in every browser, because none of it is browser-specific.
+
+`Session._run_turn` now calls `TextToSpeech.end_of_turn()` when the model has
+finished producing text. The synthesiser queues a turn-boundary marker and reports
+`on_finished` once every queued sentence has been spoken, which releases
+suppression. Both transitions are now logged (`speaking started; echo suppression
+on` / `speaking finished; echo suppression released`), and a suppressed transcript
+is logged rather than dropped in silence.
+
 ### Attributing a missing transcript
 
 A frame count cannot tell a working microphone from one delivering silence, and
@@ -424,6 +450,23 @@ microphone closed (#3); received  109 frame(s),  3.49s of audio, peak 0.712
 The second line means capture is fine and the audio reached recognition; the first
 means the browser delivered nothing but zeros, so the fault is in capture. Sessions
 with silence are logged as a warning naming capture as the cause.
+
+### A completed turn must show something
+
+An answer can be produced and stored while its events never reach the page: a
+dropped or half-dead socket loses them silently, and `_safe_send` suppresses every
+send error, so the server carries on working.
+
+Reported as "it finished and gave me no result and I had to prompt it again". The
+database held a 7,072-character answer for that turn, written when the agent
+finished — the work was done and only the delivery failed.
+
+The client could not tell "the agent produced nothing" from "the events never
+arrived", so it showed an empty turn. On `done`, a turn with nothing rendered is now
+reconciled against the stored transcript and the reply is displayed, with a line in
+the Activity panel saying why it appeared late. The recovery only accepts an answer
+newer than the most recent question, so a stale reply is never presented as the
+answer to a new one.
 
 ## Tuning
 

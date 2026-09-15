@@ -181,6 +181,10 @@ class SpeechToText:
         # Set while TTS is playing so echo-contaminated finals can be dropped.
         self._suppress_finals = False
         self._dropped_frames = 0
+        # How many transcripts have been discarded as the agent's own voice. A
+        # large or ever-growing number means suppression never lifted, which is
+        # indistinguishable from a dead microphone unless it is reported.
+        self._suppressed_transcripts = 0
 
     # --- configuration ---------------------------------------------------
     @property
@@ -249,6 +253,24 @@ class SpeechToText:
         for devices where it is unavailable.
         """
         self._suppress_finals = suppressed
+        if suppressed:
+            self._suppressed_transcripts = 0
+
+    def _note_suppressed(self, text: str, *, kind: str) -> None:
+        """Record a transcript discarded as the agent's own voice.
+
+        Logged at INFO for the first few and then sparsely: suppression that never
+        lifts looks exactly like a broken microphone, and while this was a debug
+        line the entire failure was invisible in the log.
+        """
+        self._suppressed_transcripts += 1
+        if self._suppressed_transcripts <= 3 or self._suppressed_transcripts % 25 == 0:
+            log.info(
+                "dropping %s transcript %d during playback (echo suppression): %r",
+                kind,
+                self._suppressed_transcripts,
+                text[:60],
+            )
 
     # --- pumps -----------------------------------------------------------
     async def _run(self) -> None:
@@ -420,7 +442,7 @@ class SpeechToText:
 
         if is_final and self._suppress_finals:
             # Almost certainly the agent hearing itself; ignore silently.
-            log.debug("dropping final transcript during playback: %r", text[:60])
+            self._note_suppressed(text, kind="final")
             return
 
         await self._on_transcript(
@@ -475,7 +497,7 @@ class SpeechToText:
             return
 
         if self._suppress_finals:
-            log.debug("dropping Flux transcript during playback: %r", text[:60])
+            self._note_suppressed(text, kind="Flux")
             return
 
         await self._on_transcript(

@@ -307,6 +307,63 @@ class TestCaptureWorkletWiring:
         assert "capture-worklet.js?v=" in audio
 
 
+class TestMissingReplyRecovery:
+    """A completed turn that showed nothing must be recovered from the store.
+
+    Reported as "it finished and gave me no result and I had to prompt it again".
+    The database held a 7,072-character answer for that turn, written when the
+    agent finished — so the work was done and only the delivery failed. The client
+    could not tell "the agent produced nothing" from "the events never arrived", so
+    it showed an empty turn and the user re-asked.
+    """
+
+    def test_a_finished_turn_with_nothing_shown_is_recovered(self, script):
+        assert "recoverMissingAnswer(finished)" in script, (
+            "a silently empty turn must be reconciled against the stored transcript"
+        )
+
+    def test_emptiness_is_measured_on_both_channels(self, script):
+        block = script[script.index("function turnHasVisibleText(") :]
+        block = block[: block.index("\n}") + 2]
+        assert "saidText" in block and "shownText" in block, "a spoken-only reply is still a reply"
+
+    def test_the_display_channel_is_tracked_per_turn(self, script):
+        assert "turn.shownText += text;" in script
+
+    def test_recovery_reads_the_stored_transcript(self, script):
+        block = script[script.index("async function recoverMissingAnswer(") :]
+        block = block[: block.index("\n}\n") + 2]
+        assert "/api/sessions/" in block, "it must re-read the transcript, not re-ask"
+        assert 'role === "assistant"' in block
+
+    def test_recovery_never_shows_a_stale_answer(self, script):
+        """An answer to an earlier question reads as a real answer to this one."""
+        block = script[script.index("async function recoverMissingAnswer(") :]
+        block = block[: block.index("\n}\n") + 2]
+        assert 'role === "user"' in block
+        assert "last.id < lastUser.id" in block, (
+            "the recovered reply must belong to the question just asked"
+        )
+
+    def test_a_turn_with_no_events_still_gets_a_turn_to_recover_into(self, script):
+        """With every text event lost, no turn object exists at all."""
+        assert 'state.currentTurn || beginTurn("assistant")' in script, (
+            "the turn is created by the first rendering event, so nothing arriving "
+            "means there is no turn unless one is made"
+        )
+
+    def test_recovery_is_reported_rather_than_silent(self, script):
+        block = script[script.index("async function recoverMissingAnswer(") :]
+        block = block[: block.index("\n}\n") + 2]
+        assert "Recovered a missing reply" in block, (
+            "a reply appearing late for no visible reason is as confusing as none"
+        )
+
+    def test_a_failed_turn_is_not_treated_as_missing(self, script):
+        """An errored turn already says what went wrong; do not stack on it."""
+        assert "if (!data.failed && !turnHasVisibleText(finished))" in script
+
+
 class TestTranscriptScroll:
     """Selecting a conversation must show its newest message.
 

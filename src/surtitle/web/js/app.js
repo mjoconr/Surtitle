@@ -147,13 +147,33 @@ function beginTurn(kind) {
     turn.append(bubble);
     el.turns.append(turn);
     scrollToBottom();
-    return { id: Symbol("turn"), kind, root: turn, bubble, spoken, shown, tools, saidText: "" };
+    return {
+      id: Symbol("turn"),
+      kind,
+      root: turn,
+      bubble,
+      spoken,
+      shown,
+      tools,
+      saidText: "",
+      shownText: "",
+    };
   }
 
   turn.append(spoken, shown, tools);
   el.turns.append(turn);
   scrollToBottom();
-  return { id: Symbol("turn"), kind, root: turn, bubble: null, spoken, shown, tools, saidText: "" };
+  return {
+    id: Symbol("turn"),
+    kind,
+    root: turn,
+    bubble: null,
+    spoken,
+    shown,
+    tools,
+    saidText: "",
+    shownText: "",
+  };
 }
 
 function assistantTurn() {
@@ -177,6 +197,7 @@ function appendSaid(turn, text) {
 
 function appendShown(turn, text) {
   if (!text) return;
+  turn.shownText += text;
   const last = turn.shown.lastElementChild;
   // Consecutive display chunks belong to one block unless a tool row or a
   // spoken line intervened, which is the visual promise of the speak layer.
@@ -827,13 +848,69 @@ function handleEvent(event) {
     case "done": {
       clearApproval();
       if (!data.failed && !data.truncated) setAgentState(state.micOpen ? "listening" : "idle");
+      // A turn that produced no rendered output has no current turn at all: the
+      // turn object is created by the first event that renders something. So make
+      // one rather than concluding there is nothing to recover.
+      const finished = state.currentTurn || beginTurn("assistant");
       state.currentTurn = null;
+      // A completed turn must show something. If nothing was rendered, the events
+      // never arrived: a dropped or half-dead socket loses them silently, and the
+      // server carries on working and stores the answer. The user was then left
+      // with an empty turn, no error, and no way to know an answer existed, so
+      // they asked again. The answer is in the store, so fetch it and show it.
+      if (!data.failed && !turnHasVisibleText(finished)) {
+        recoverMissingAnswer(finished);
+      }
       break;
     }
     default:
       break;
   }
   if (event.seq) scrollToBottom();
+}
+
+/** True when a turn ended up showing the user anything at all. */
+function turnHasVisibleText(turn) {
+  return Boolean((turn.saidText && turn.saidText.trim()) || (turn.shownText && turn.shownText.trim()));
+}
+
+/**
+ * Show the answer for a turn whose events never arrived.
+ *
+ * The transcript on the server is the source of truth, so re-read it rather than
+ * asking the model again: the work is already done and only the delivery failed.
+ * Reported in the Activity panel, because a reply that appears a moment late for
+ * no visible reason is as confusing as one that never appears.
+ */
+async function recoverMissingAnswer(turn) {
+  if (!state.session) return;
+  try {
+    const session = await api(`/api/sessions/${state.session.id}`);
+    const messages = session.messages || [];
+    const last = [...messages]
+      .reverse()
+      .find((message) => message.role === "assistant" && (message.content || message.spoken));
+    if (!last) return;
+    // Only recover an answer to the question that was just asked. Showing a stale
+    // reply from an earlier turn would be worse than showing nothing, because it
+    // reads as a real answer.
+    const lastUser = [...messages].reverse().find((message) => message.role === "user");
+    if (lastUser && last.id < lastUser.id) return;
+
+    if (last.spoken && last.spoken.trim()) appendSaid(turn, last.spoken);
+    if (last.content && last.content.trim() !== (last.spoken || "").trim()) {
+      appendShown(turn, last.content);
+    }
+    state.activity.push({
+      label: "Recovered a missing reply",
+      detail: "The answer was produced and stored, but its events did not reach this page.",
+    });
+    renderRightbar();
+    scrollToBottom(true);
+    toast("Recovered the reply that did not come through.", "error");
+  } catch {
+    // Leave the turn as it is: a failed recovery must not add noise.
+  }
 }
 
 function describeApproval(data) {
