@@ -171,7 +171,12 @@ class TestSearchFiles:
     def test_invalid_regex_is_reported(self, ctx):
         result = search_files(ctx, "([unclosed")
         assert not result.ok
-        assert "pattern" in result.error.lower() or "search failed" in result.error.lower()
+        # Which wording arrives depends on whether ripgrep is installed: the rg
+        # path says "Search failed: ...", the pure-Python fallback says
+        # "Invalid regular expression: ...". Assert on the failure, not on one
+        # backend's phrasing — otherwise this passes only on a host that has rg.
+        error = result.error.lower()
+        assert "search failed" in error or "pattern" in error or "regular expression" in error
 
     def test_glob_filter(self, ctx):
         result = search_files(ctx, "hello", glob="*.txt")

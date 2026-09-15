@@ -277,6 +277,21 @@ class TestConvertDocumentWithoutLibreOffice:
         (tmp_path / "note.txt").write_text("Sampling report\n", encoding="utf-8")
         return ToolContext(root=tmp_path)
 
+    @pytest.fixture(autouse=True)
+    def _discovery_is_stubbed(self, monkeypatch):
+        """Pin LibreOffice discovery, which is not what these tests are about.
+
+        `configured_soffice` looks at the host's real install locations, so
+        without this the whole class passes on a developer machine that happens
+        to have LibreOffice and fails on a bare CI runner with "LibreOffice was
+        not found" — the conversion logic under test never even runs.
+        """
+        import surtitle.tools.documents as documents
+
+        monkeypatch.setattr(
+            documents, "configured_soffice", lambda _root=None: Path("/usr/bin/soffice")
+        )
+
     @staticmethod
     def _fake_libreoffice(output_name="note.pdf", *, content=b"%PDF-1.4 fake"):
         """Patch the runner to behave like LibreOffice writing into --outdir.
