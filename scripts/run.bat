@@ -22,14 +22,17 @@ REM --- 2. source checkout with uv -------------------------------------------
 where uv >nul 2>&1
 if %ERRORLEVEL%==0 (
     echo Syncing dependencies with uv...
-    uv sync --quiet
+    REM --inexact matters: a bare "uv sync" prunes anything the lock does not
+    REM name, which silently deletes the optional voice-local extra. "uv run"
+    REM then syncs again by default, so it has to be told not to as well.
+    uv sync --inexact --quiet
     if errorlevel 1 (
         echo.
         echo error: uv sync failed. Run "uv sync" to see the full output.
         set "EXITCODE=1"
         goto :done
     )
-    uv run --quiet surtitle %*
+    uv run --no-sync --quiet surtitle %*
     set "EXITCODE=%ERRORLEVEL%"
     goto :done
 )
