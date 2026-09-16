@@ -76,6 +76,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Path.resolve()` returns an extended-length (`\\?\`) path for some inputs, and
   that prefix is a different first component, so a contained path looked like an
   escape. Long project paths hit this too.
+- The Windows archive could not run anywhere but the build machine. A Windows
+  virtual environment's `Scripts\python.exe` is a launcher that reads an absolute
+  base path from `pyvenv.cfg`, so an extracted archive failed with
+  `No Python at '...'` — and verification never noticed, because it extracted on
+  the machine that built it. Windows archives now install into the bundled
+  runtime, which is self-contained and moves with the tree.
 
 ### Migration — this rename is breaking
 
