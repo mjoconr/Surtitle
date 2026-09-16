@@ -9,8 +9,10 @@ How that is achieved:
 
 1. A **standalone Python** is downloaded from ``python-build-standalone``, the
    same distribution ``uv`` uses. It needs no installer and no registry entries.
-2. A **virtual environment** is built from it with every dependency already
-   installed, so first run does nothing but start.
+2. The application's dependencies are installed from ``uv.lock``, so the archive
+   carries exactly the versions that were tested. On POSIX they go into a virtual
+   environment beside the runtime; on Windows they go into the runtime itself,
+   because a Windows venv cannot be relocated.
 3. A **wheelhouse** is bundled too, so a user with no network can still repair or
    extend the environment offline with `pip install --no-index --find-links`.
 
@@ -195,13 +197,59 @@ def copy_python_runtime(source_root: Path, destination: Path) -> Path:
     return interpreter
 
 
+def export_lock_requirements(uv: str, destination: Path, *, voice_local: bool = False) -> Path:
+    """Write the locked dependency set out as a requirements file.
+
+    Installing from `uv.lock` is the point: resolving from pyproject.toml instead
+    would let two archives built a week apart contain different libraries, and the
+    lock is the only record of what was actually tested. `--no-emit-project` keeps
+    the application itself out, because it is installed separately and must not be
+    an editable link back to the build machine.
+    """
+    print("· exporting the locked dependencies")
+    argv = [
+        uv,
+        "export",
+        "--frozen",
+        "--no-hashes",
+        "--no-emit-project",
+        "--output-file",
+        str(destination),
+    ]
+    if voice_local:
+        argv += ["--extra", "voice-local"]
+    try:
+        run(argv, cwd=REPO_ROOT)
+    except SystemExit as exc:
+        raise SystemExit(f"could not export the locked dependencies: {exc}") from exc
+
+    if not destination.is_file() or not destination.read_text(encoding="utf-8").strip():
+        raise SystemExit(
+            "the exported requirements file is empty, so the archive would contain "
+            "no dependencies at all"
+        )
+    pinned = sum(
+        1
+        for line in destination.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    )
+    print(f"  {pinned} pinned requirement(s)")
+    return destination
+
+
 def prepare_environment(
-    uv: str, runtime_python: Path, workspace: Path, *, voice_local: bool = False
+    uv: str,
+    runtime_python: Path,
+    workspace: Path,
+    requirements: Path,
+    *,
+    voice_local: bool = False,
 ) -> Path:
     """Install the app's dependencies and return the interpreter that runs them.
 
     ``runtime_python`` is the interpreter of the bundled runtime, which the caller
-    has already copied and proved runs.
+    has already copied and proved runs. ``requirements`` is the lock export, so the
+    archive carries exactly the tested versions.
 
     On POSIX the returned interpreter lives in a virtual environment beside that
     runtime. On Windows it is the runtime itself, because a Windows venv cannot be
@@ -210,11 +258,7 @@ def prepare_environment(
     precisely what happens to an extracted archive. The bundled runtime is
     self-contained and relocates with the tree, so installing into it is both
     simpler and the only thing that works.
-
-    ``voice_local`` adds the local speech engines, which is what makes an archive
-    able to hear and speak without any network at all.
     """
-    extra = ".[voice-local]" if voice_local else "."
     if voice_local:
         print("· including the local speech engines (sherpa-onnx)")
 
@@ -241,17 +285,7 @@ def prepare_environment(
                 "--python",
                 str(interpreter),
                 "--requirements",
-                str(REPO_ROOT / "requirements-release.txt"),
-            ]
-            if (REPO_ROOT / "requirements-release.txt").exists()
-            else [
-                uv,
-                "pip",
-                "install",
-                "--python",
-                str(interpreter),
-                "--editable",
-                extra,
+                str(requirements),
             ],
             cwd=REPO_ROOT,
         )
@@ -310,30 +344,43 @@ def _relativise_interpreter_links(venv: Path) -> None:
         link.symlink_to(os.path.relpath(target, link.parent))
 
 
-def build_wheelhouse(uv: str, python: Path, destination: Path) -> None:
-    """Download wheels for offline repair, best-effort.
+def build_wheelhouse(runtime_python: Path, requirements: Path, destination: Path) -> None:
+    """Download the pinned wheels, so the archive can be repaired without network.
 
-    A failure here does not fail the build: the environment already contains
-    everything, so the wheelhouse is a convenience rather than a requirement.
+    Uses the bundled runtime's own pip. uv has no `pip download` at all — the
+    previous call to one silently did nothing on every platform — and the POSIX
+    virtual environment is not seeded with pip, so the runtime is the one
+    interpreter guaranteed to have it.
+
+    A failure does not fail the build: the environment already contains
+    everything, so this is a convenience rather than a requirement. It is
+    reported rather than swallowed, because a wheelhouse that is quietly missing
+    is worse than one that is loudly missing.
     """
     print("· downloading a wheelhouse for offline use")
     destination.mkdir(parents=True, exist_ok=True)
     try:
         run(
             [
-                uv,
+                str(runtime_python),
+                "-m",
                 "pip",
                 "download",
-                "--python",
-                str(python),
                 "--dest",
                 str(destination),
-                ".",
+                "--requirement",
+                str(requirements),
+                "--disable-pip-version-check",
+                "--no-input",
             ],
             cwd=REPO_ROOT,
         )
     except SystemExit as exc:
-        print(f"  (skipped: {exc})")
+        print(f"  wheelhouse not built: {exc}")
+        return
+    wheels = [item for item in destination.iterdir() if item.is_file()]
+    total = sum(item.stat().st_size for item in wheels)
+    print(f"  wheelhouse: {len(wheels)} file(s), {total / (1024 * 1024):.0f} MB")
 
 
 def prefetch_models(interpreter: Path, destination: Path) -> None:
@@ -638,13 +685,25 @@ def main() -> int:
     bundled_python = copy_python_runtime(runtime_root, runtime_dir)
     print(f"· bundled interpreter: {bundled_python.relative_to(BUILD_DIR)}")
 
+    # The lock export is the one record of what was tested, and both the install
+    # and the wheelhouse consume it. It is written beside the build root rather
+    # than inside it, because everything inside is shipped.
+    requirements = export_lock_requirements(
+        uv,
+        BUILD_DIR.parent / "requirements-lock.txt",
+        voice_local=args.with_voice_local,
+    )
     interpreter = prepare_environment(
-        uv, bundled_python, BUILD_DIR, voice_local=args.with_voice_local
+        uv,
+        bundled_python,
+        BUILD_DIR,
+        requirements,
+        voice_local=args.with_voice_local,
     )
     install_application(uv, interpreter)
 
     if not args.skip_wheelhouse:
-        build_wheelhouse(uv, interpreter, BUILD_DIR / "wheelhouse")
+        build_wheelhouse(bundled_python, requirements, BUILD_DIR / "wheelhouse")
 
     if args.with_local_models:
         prefetch_models(interpreter, BUILD_DIR / "models")

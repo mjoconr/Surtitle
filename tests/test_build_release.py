@@ -9,6 +9,9 @@ import the application, so the check passed for the wrong reason.
 
 from __future__ import annotations
 
+from pathlib import Path
+
+import pytest
 from scripts import build_release
 
 
@@ -68,3 +71,93 @@ class TestCandidateOrder:
         first = build_release._interpreter_candidates(tmp_path, windows=False)[0]
         assert first.parent == tmp_path / "bin"
         assert first.name.startswith("python3.")
+
+
+class TestLockExport:
+    """The archive must carry the versions that were tested, not a fresh resolve."""
+
+    def _recorder(self, tmp_path):
+        calls: list[list[str]] = []
+
+        def fake_run(argv, *, cwd=None, capture=False):
+            calls.append(list(argv))
+            Path(argv[argv.index("--output-file") + 1]).write_text("fastapi==0.115.0\n")
+            return ""
+
+        return calls, fake_run
+
+    def test_the_export_is_frozen_and_excludes_the_project(self, tmp_path, monkeypatch):
+        calls, fake_run = self._recorder(tmp_path)
+        monkeypatch.setattr(build_release, "run", fake_run)
+
+        build_release.export_lock_requirements("uv", tmp_path / "lock.txt")
+
+        argv = calls[0]
+        assert argv[:2] == ["uv", "export"]
+        # --frozen is what makes it the lock rather than a resolution, and
+        # --no-emit-project keeps the app out so it cannot become an editable
+        # link back to the build machine.
+        assert "--frozen" in argv
+        assert "--no-emit-project" in argv
+        assert "--extra" not in argv
+
+    def test_the_voice_local_extra_is_included_when_asked(self, tmp_path, monkeypatch):
+        calls, fake_run = self._recorder(tmp_path)
+        monkeypatch.setattr(build_release, "run", fake_run)
+
+        build_release.export_lock_requirements("uv", tmp_path / "lock.txt", voice_local=True)
+
+        assert "--extra" in calls[0]
+        assert "voice-local" in calls[0]
+
+    def test_an_empty_export_is_refused(self, tmp_path, monkeypatch):
+        def fake_run(argv, *, cwd=None, capture=False):
+            Path(argv[argv.index("--output-file") + 1]).write_text("")
+            return ""
+
+        monkeypatch.setattr(build_release, "run", fake_run)
+        with pytest.raises(SystemExit, match="no dependencies at all"):
+            build_release.export_lock_requirements("uv", tmp_path / "lock.txt")
+
+    def test_a_failed_export_is_reported(self, tmp_path, monkeypatch):
+        def fake_run(argv, *, cwd=None, capture=False):
+            raise SystemExit("command failed (1): uv export")
+
+        monkeypatch.setattr(build_release, "run", fake_run)
+        with pytest.raises(SystemExit, match="could not export"):
+            build_release.export_lock_requirements("uv", tmp_path / "lock.txt")
+
+
+class TestWheelhouse:
+    def test_wheels_come_from_the_runtime_pip(self, tmp_path, monkeypatch):
+        """uv has no `pip download`, and a POSIX venv has no pip, so use the runtime."""
+        calls: list[list[str]] = []
+
+        def fake_run(argv, *, cwd=None, capture=False):
+            calls.append(list(argv))
+            return ""
+
+        monkeypatch.setattr(build_release, "run", fake_run)
+        runtime = tmp_path / "python" / "python.exe"
+        requirements = tmp_path / "lock.txt"
+        destination = tmp_path / "wheelhouse"
+
+        build_release.build_wheelhouse(runtime, requirements, destination)
+
+        argv = calls[0]
+        assert argv[:3] == [str(runtime), "-m", "pip"]
+        assert "download" in argv
+        assert str(requirements) in argv
+        assert str(destination) in argv
+
+    def test_a_failed_download_does_not_fail_the_build(self, tmp_path, monkeypatch):
+        """The environment is already complete, so this stays a convenience."""
+
+        def fake_run(argv, *, cwd=None, capture=False):
+            raise SystemExit("command failed (2): pip download")
+
+        monkeypatch.setattr(build_release, "run", fake_run)
+        # Must not raise.
+        build_release.build_wheelhouse(
+            tmp_path / "python", tmp_path / "lock.txt", tmp_path / "wheelhouse"
+        )
