@@ -82,6 +82,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `No Python at '...'` — and verification never noticed, because it extracted on
   the machine that built it. Windows archives now install into the bundled
   runtime, which is self-contained and moves with the tree.
+- Release archives are pinned to `uv.lock`. The build looked for a
+  `requirements-release.txt` that never existed and fell back to installing the
+  project by path, so every archive was a fresh resolution — the last one carried
+  `uvicorn` 0.53.0 while the lock pins 0.52.4, a version nothing had tested. The
+  lock is now exported and installed from.
+- The bundled wheelhouse is actually built. It asked `uv` for `pip download`,
+  which is not a subcommand uv has, so on every platform the step failed and was
+  reported as skipped, leaving archives without the offline repair their
+  documentation promised. It now uses the bundled interpreter's own pip. That
+  adds roughly 44 MB to a macOS archive; `--skip-wheelhouse` still produces the
+  smaller build.
 
 ### Migration — this rename is breaking
 
