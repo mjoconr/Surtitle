@@ -39,9 +39,14 @@ on first run and no system Python is required.
 To install from source instead, or to add the offline speech engines later:
 
 ```powershell
-.\scripts\install.ps1 -Yes       # Python, dependencies, local voice, models
-.\scripts\install.ps1 -Update    # update an existing installation
+# Windows blocks PowerShell scripts by default, so pass the execution-policy bypass.
+powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1 -Yes
+.\scripts\run.bat        # the batch launcher needs no policy change
 ```
+
+`install.ps1` is idempotent. `-Update` refreshes an existing install, `-NoVoice`
+skips the offline speech engines (and their ~86 MB of models), and `-Check`
+reports what is installed without changing anything.
 
 ### macOS / Linux
 

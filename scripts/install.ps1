@@ -208,7 +208,13 @@ Write-Host 'Installation complete.' -ForegroundColor Green
 
 Start it with:
 
-    $ProjectDir\scripts\run.ps1
+    $ProjectDir\scripts\run.bat
+
+Windows blocks PowerShell scripts by default (the policy is usually Restricted),
+so the batch launcher is the one that works untouched. From PowerShell, the same
+launcher with the policy bypassed:
+
+    powershell -ExecutionPolicy Bypass -File $ProjectDir\scripts\run.ps1
 
 Then, in the app:
   - Settings -> API keys: add a DeepSeek key (required) and a Deepgram key if you
@@ -218,10 +224,10 @@ Then, in the app:
 
 Useful commands:
 
-    $ProjectDir\scripts\run.ps1 models list      # what is installed
-    $ProjectDir\scripts\run.ps1 models download  # fetch or repair models
-    $ProjectDir\scripts\run.ps1 doctor           # live check of keys and engines
-    $ProjectDir\scripts\install.ps1 -Update      # update this installation
+    $ProjectDir\scripts\run.bat models list      # what is installed
+    $ProjectDir\scripts\run.bat models download  # fetch or repair models
+    $ProjectDir\scripts\run.bat doctor           # live check of keys and engines
+    powershell -ExecutionPolicy Bypass -File $ProjectDir\scripts\install.ps1 -Update
 
 Your data lives in: $dataDir
 "@ | Write-Host
