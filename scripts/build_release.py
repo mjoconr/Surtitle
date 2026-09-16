@@ -196,16 +196,19 @@ def copy_python_runtime(source_root: Path, destination: Path) -> Path:
 
 
 def prepare_environment(
-    uv: str, runtime: Path, workspace: Path, *, voice_local: bool = False
+    uv: str, runtime_python: Path, workspace: Path, *, voice_local: bool = False
 ) -> Path:
     """Install the app's dependencies and return the interpreter that runs them.
 
-    On POSIX that interpreter lives in a virtual environment beside the bundled
-    runtime. On Windows it is the bundled runtime itself, because a Windows venv
-    cannot be moved: ``Scripts\\python.exe`` is a launcher that reads an absolute
-    ``home`` out of ``pyvenv.cfg`` and refuses to start once that path is gone —
-    which is precisely what happens to an extracted archive. The bundled runtime
-    is self-contained and relocates with the tree, so installing into it is both
+    ``runtime_python`` is the interpreter of the bundled runtime, which the caller
+    has already copied and proved runs.
+
+    On POSIX the returned interpreter lives in a virtual environment beside that
+    runtime. On Windows it is the runtime itself, because a Windows venv cannot be
+    moved: ``Scripts\\python.exe`` is a launcher that reads an absolute ``home``
+    out of ``pyvenv.cfg`` and refuses to start once that path is gone — which is
+    precisely what happens to an extracted archive. The bundled runtime is
+    self-contained and relocates with the tree, so installing into it is both
     simpler and the only thing that works.
 
     ``voice_local`` adds the local speech engines, which is what makes an archive
@@ -217,9 +220,7 @@ def prepare_environment(
 
     if os.name == "nt":
         print("· installing into the bundled runtime (a Windows venv cannot be moved)")
-        interpreter = _interpreter_in(runtime)
-        if interpreter is None:
-            raise SystemExit(f"no interpreter in the bundled runtime at {runtime}")
+        interpreter = runtime_python
     else:
         print("· creating the runtime virtual environment")
         # --relocatable matters: without it the venv's `bin/python` is an absolute
@@ -227,7 +228,7 @@ def prepare_environment(
         # on the machine that built it (and Python 3.12+ refuses to extract the
         # absolute link at all).
         target = workspace / "venv"
-        run([uv, "venv", "--relocatable", "--python", str(runtime), str(target)])
+        run([uv, "venv", "--relocatable", "--python", str(runtime_python), str(target)])
         _relativise_interpreter_links(target)
         interpreter = _venv_python(target)
 
