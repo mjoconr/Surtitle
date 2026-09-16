@@ -12,8 +12,13 @@ set "SCRIPT_DIR=%~dp0"
 cd /d "%SCRIPT_DIR%"
 
 REM --- 1. bundled release runtime -------------------------------------------
-if exist "%SCRIPT_DIR%venv\Scripts\python.exe" (
-    "%SCRIPT_DIR%venv\Scripts\python.exe" -m surtitle %*
+REM A Windows archive installs into the bundled runtime rather than a virtual
+REM environment, because a Windows venv records an absolute base path and so
+REM cannot be moved once the archive is extracted.
+set "BUNDLED=%SCRIPT_DIR%venv\Scripts\python.exe"
+if not exist "%BUNDLED%" set "BUNDLED=%SCRIPT_DIR%python\python.exe"
+if exist "%BUNDLED%" (
+    "%BUNDLED%" -m surtitle %*
     set "EXITCODE=%ERRORLEVEL%"
     goto :done
 )

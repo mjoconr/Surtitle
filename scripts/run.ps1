@@ -43,7 +43,13 @@ try {
     }
 
     # --- 1. bundled release runtime ---------------------------------------
+    # A Windows archive installs into the bundled runtime rather than a virtual
+    # environment, because a Windows venv records an absolute base path and so
+    # cannot be moved once the archive is extracted. A POSIX archive ships venv/.
     $bundled = Join-Path $ScriptDir 'venv\Scripts\python.exe'
+    if (-not (Test-Path $bundled)) {
+        $bundled = Join-Path $ScriptDir 'python\python.exe'
+    }
     if (Test-Path $bundled) {
         & $bundled -m surtitle @Arguments
         exit $LASTEXITCODE

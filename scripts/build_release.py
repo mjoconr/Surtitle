@@ -31,6 +31,7 @@ The GitHub Actions workflow does exactly that.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import platform
@@ -167,6 +168,12 @@ def copy_python_runtime(source_root: Path, destination: Path) -> Path:
     print(f"· copying Python runtime from {source_root}")
     shutil.copytree(source_root, destination, symlinks=False, dirs_exist_ok=True)
 
+    # uv marks the interpreters it manages as externally managed, and a copy keeps
+    # the marker. This copy belongs to the application and exists to be installed
+    # into, so the protection is only an obstacle here.
+    for marker in destination.rglob("EXTERNALLY-MANAGED"):
+        marker.unlink()
+
     interpreter = _interpreter_in(destination)
     if interpreter is None:
         raise SystemExit(f"no interpreter found in the copied runtime at {destination}")
@@ -188,26 +195,41 @@ def copy_python_runtime(source_root: Path, destination: Path) -> Path:
     return interpreter
 
 
-def build_venv(uv: str, python: Path, target: Path, *, voice_local: bool = False) -> None:
-    """Create the runtime virtual environment with all dependencies installed.
+def prepare_environment(
+    uv: str, runtime: Path, workspace: Path, *, voice_local: bool = False
+) -> Path:
+    """Install the app's dependencies and return the interpreter that runs them.
 
-    Installs from the project's lockfile so an archive is reproducible, falling
-    back to resolving from pyproject.toml if locking is unavailable offline.
+    On POSIX that interpreter lives in a virtual environment beside the bundled
+    runtime. On Windows it is the bundled runtime itself, because a Windows venv
+    cannot be moved: ``Scripts\\python.exe`` is a launcher that reads an absolute
+    ``home`` out of ``pyvenv.cfg`` and refuses to start once that path is gone —
+    which is precisely what happens to an extracted archive. The bundled runtime
+    is self-contained and relocates with the tree, so installing into it is both
+    simpler and the only thing that works.
+
     ``voice_local`` adds the local speech engines, which is what makes an archive
     able to hear and speak without any network at all.
     """
-    print("· creating the runtime virtual environment")
-    # --relocatable matters: without it the venv's `bin/python` is an absolute
-    # symlink back into the build directory, so the extracted archive only runs
-    # on the machine that built it (and Python 3.12+ refuses to extract the
-    # absolute link at all).
-    run([uv, "venv", "--relocatable", "--python", str(python), str(target)])
-    _relativise_interpreter_links(target)
-    venv_python = _venv_python(target)
-
     extra = ".[voice-local]" if voice_local else "."
     if voice_local:
-        print("· including the local voice engines (sherpa-onnx)")
+        print("· including the local speech engines (sherpa-onnx)")
+
+    if os.name == "nt":
+        print("· installing into the bundled runtime (a Windows venv cannot be moved)")
+        interpreter = _interpreter_in(runtime)
+        if interpreter is None:
+            raise SystemExit(f"no interpreter in the bundled runtime at {runtime}")
+    else:
+        print("· creating the runtime virtual environment")
+        # --relocatable matters: without it the venv's `bin/python` is an absolute
+        # symlink back into the build directory, so the extracted archive only runs
+        # on the machine that built it (and Python 3.12+ refuses to extract the
+        # absolute link at all).
+        target = workspace / "venv"
+        run([uv, "venv", "--relocatable", "--python", str(runtime), str(target)])
+        _relativise_interpreter_links(target)
+        interpreter = _venv_python(target)
 
     try:
         run(
@@ -216,7 +238,7 @@ def build_venv(uv: str, python: Path, target: Path, *, voice_local: bool = False
                 "pip",
                 "install",
                 "--python",
-                str(venv_python),
+                str(interpreter),
                 "--requirements",
                 str(REPO_ROOT / "requirements-release.txt"),
             ]
@@ -226,7 +248,7 @@ def build_venv(uv: str, python: Path, target: Path, *, voice_local: bool = False
                 "pip",
                 "install",
                 "--python",
-                str(venv_python),
+                str(interpreter),
                 "--editable",
                 extra,
             ],
@@ -236,9 +258,10 @@ def build_venv(uv: str, python: Path, target: Path, *, voice_local: bool = False
         raise SystemExit(
             f"could not install dependencies into the runtime environment: {exc}"
         ) from exc
+    return interpreter
 
 
-def install_application(uv: str, venv: Path) -> None:
+def install_application(uv: str, interpreter: Path) -> None:
     """Install Surtitle itself into the runtime environment, non-editable.
 
     A release archive must contain real files, not a link back to a build
@@ -251,7 +274,7 @@ def install_application(uv: str, venv: Path) -> None:
             "pip",
             "install",
             "--python",
-            str(_venv_python(venv)),
+            str(interpreter),
             "--no-deps",
             ".",
         ],
@@ -312,7 +335,7 @@ def build_wheelhouse(uv: str, python: Path, destination: Path) -> None:
         print(f"  (skipped: {exc})")
 
 
-def prefetch_models(venv: Path, destination: Path) -> None:
+def prefetch_models(interpreter: Path, destination: Path) -> None:
     """Download the local speech models into the archive tree.
 
     Run against the *archive's* interpreter, so the download uses the same model
@@ -321,7 +344,6 @@ def prefetch_models(venv: Path, destination: Path) -> None:
     that refuses to build.
     """
     print("· downloading local speech models into the archive")
-    interpreter = _venv_python(venv)
     destination.mkdir(parents=True, exist_ok=True)
     environment = dict(os.environ)
     environment["SURTITLE_MODELS_DIR"] = str(destination)
@@ -446,28 +468,47 @@ def verify_archive(archive_path: Path, *, expect_voice_local: bool = False) -> N
         roots = [entry for entry in target.iterdir() if entry.is_dir()]
         root = roots[0] if len(roots) == 1 and not (target / "VERSION").exists() else target
 
-        # Only the venv interpreter can see the installed application, so it is
-        # the only one that makes these checks mean anything. Falling back to the
-        # bundled runtime would run them against an interpreter that cannot
-        # import the app at all — which is exactly how a Windows archive came to
-        # be "verified" with the wrong executable.
-        venv_root = root / "venv"
-        if not venv_root.is_dir():
+        # Pick the interpreter the archive is meant to run with: a virtual
+        # environment when there is one, otherwise the bundled runtime. Windows
+        # archives install into the runtime, because a Windows venv cannot be
+        # moved — see prepare_environment.
+        environment = root / "venv"
+        if not environment.is_dir():
             # Some layouts nest everything under a single top-level directory.
-            for candidate_root in (root, *[p for p in root.iterdir() if p.is_dir()]):
-                if (candidate_root / "venv").is_dir():
-                    venv_root = candidate_root / "venv"
-                    break
+            environment = next(
+                (
+                    candidate / "venv"
+                    for candidate in (root, *[p for p in root.iterdir() if p.is_dir()])
+                    if (candidate / "venv").is_dir()
+                ),
+                root / "python",
+            )
 
-        interpreter = _interpreter_in(venv_root)
+        interpreter = _interpreter_in(environment)
         if interpreter is None:
-            found = "no venv/ directory" if not venv_root.is_dir() else f"{venv_root} is empty"
-            raise SystemExit(f"archive has no usable venv interpreter: {found}")
+            raise SystemExit(f"archive has no usable interpreter in {environment}")
 
-        # Verification runs on the machine that built the archive, so a venv that
-        # still points back into the build directory resolves here and dangles
-        # for everyone else — which is exactly how a broken archive ships. Assert
-        # the interpreter lives inside the extracted tree instead.
+        # On Windows a venv's Scripts\python.exe is only a launcher for the base
+        # installation named in pyvenv.cfg, so a `home` outside the archive means
+        # the extracted copy cannot start anywhere else. POSIX is unaffected: its
+        # interpreter is a symlink the check above already covers, and CPython
+        # finds the base prefix through it rather than through `home`.
+        config = environment / "pyvenv.cfg"
+        if os.name == "nt" and config.is_file():
+            for line in config.read_text(encoding="utf-8", errors="replace").splitlines():
+                name, _, value = line.partition("=")
+                if name.strip() == "home" and value.strip():
+                    base = Path(value.strip()).resolve()
+                    if target.resolve() not in base.parents:
+                        raise SystemExit(
+                            f"archive is not relocatable: {config} names a base "
+                            f"installation at {base}, which is outside the archive"
+                        )
+
+        # Verification runs on the machine that built the archive, so a link that
+        # still points back into the build directory resolves here and dangles for
+        # everyone else — which is exactly how a broken archive ships. Assert the
+        # interpreter lives inside the extracted tree instead.
         resolved = Path(interpreter).resolve()
         if target.resolve() not in resolved.parents:
             raise SystemExit(
@@ -543,6 +584,14 @@ def verify_archive(archive_path: Path, *, expect_voice_local: bool = False) -> N
 
 
 def main() -> int:
+    # A Windows console defaults to a legacy code page that cannot encode the tick
+    # marks printed while verifying, so a *successful* build ended in
+    # UnicodeEncodeError. Ask for UTF-8 and tolerate anything still unmappable:
+    # the output should never be the reason a build fails.
+    for stream in (sys.stdout, sys.stderr):
+        with contextlib.suppress(Exception):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
     parser = argparse.ArgumentParser(description="Build a self-contained release archive.")
     parser.add_argument(
         "--keep-build",
@@ -588,15 +637,16 @@ def main() -> int:
     bundled_python = copy_python_runtime(runtime_root, runtime_dir)
     print(f"· bundled interpreter: {bundled_python.relative_to(BUILD_DIR)}")
 
-    venv_dir = BUILD_DIR / "venv"
-    build_venv(uv, bundled_python, venv_dir, voice_local=args.with_voice_local)
-    install_application(uv, venv_dir)
+    interpreter = prepare_environment(
+        uv, bundled_python, BUILD_DIR, voice_local=args.with_voice_local
+    )
+    install_application(uv, interpreter)
 
     if not args.skip_wheelhouse:
-        build_wheelhouse(uv, _venv_python(venv_dir), BUILD_DIR / "wheelhouse")
+        build_wheelhouse(uv, interpreter, BUILD_DIR / "wheelhouse")
 
     if args.with_local_models:
-        prefetch_models(venv_dir, BUILD_DIR / "models")
+        prefetch_models(interpreter, BUILD_DIR / "models")
 
     copy_sources(BUILD_DIR)
     write_launchers(BUILD_DIR, version)
