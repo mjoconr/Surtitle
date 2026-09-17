@@ -65,75 +65,13 @@ jobs:
       # cross-built archive would ship the wrong binaries.
       - name: Build the self-contained archive
         run: uv run --frozen python scripts/build_release.py
-      - name: Smoke test the archive the way a user would
-        shell: bash
-        run: |
-          set -euo pipefail
-          python - <<'PY'
-          import pathlib, tarfile, tempfile, zipfile
-
-          archives = sorted(pathlib.Path("dist").glob("*.zip")) + sorted(
-              pathlib.Path("dist").glob("*.tar.gz")
-          )
-          assert archives, "no archive found"
-          archive = archives[0]
-
-          target = pathlib.Path(tempfile.mkdtemp()) / "extracted"
-          target.mkdir(parents=True)
-          if archive.suffix == ".zip":
-              with zipfile.ZipFile(archive) as bundle:
-                  bundle.extractall(target)
-          else:
-              with tarfile.open(archive) as bundle:
-                  bundle.extractall(target)
-
-          # Unwrap the single top-level directory when the archive has one.
-          roots = [p for p in target.iterdir() if p.is_dir()]
-          root = roots[0] if len(roots) == 1 and not (target / "run.sh").exists() else target
-          print("archive root:", root)
-
-          # The bundled environment must import the app without touching the
-          # network or any system Python.
-          import subprocess, sys
-          if sys.platform == "win32":
-              python = root / "venv" / "Scripts" / "python.exe"
-          else:
-              python = root / "venv" / "bin" / "python"
-          assert python.exists(), f"bundled interpreter missing at {python}"
-
-          # 1. The app must import from the bundled runtime alone.
-          probe = subprocess.run(
-              [str(python), "-c", "import surtitle, surtitle.server; print(surtitle.__version__)"],
-              capture_output=True, text=True,
-          )
-          print(probe.stdout.strip() or probe.stderr.strip())
-          assert probe.returncode == 0, "bundled runtime could not import the app"
-
-          # 2. The documented entry point must work. This caught a real bug where
-          #    `python -m surtitle` had no __main__ and the launchers failed.
-          probe = subprocess.run(
-              [str(python), "-m", "surtitle", "--version"],
-              capture_output=True, text=True,
-          )
-          print(probe.stdout.strip() or probe.stderr.strip())
-          assert probe.returncode == 0, "`python -m surtitle` does not run"
-          assert "surtitle" in probe.stdout.lower(), "unexpected --version output"
-
-          # 3. The web assets must be installed, or the UI would 404.
-          probe = subprocess.run(
-              [str(python), "-c",
-               "import pathlib, surtitle as a; "
-               "w = pathlib.Path(a.__file__).parent / 'web'; "
-               "assert (w / 'index.html').is_file(), 'index.html missing'; "
-               "assert (w / 'js' / 'app.js').is_file(), 'app.js missing'; "
-               "print('web assets present')"],
-              capture_output=True, text=True,
-          )
-          print(probe.stdout.strip() or probe.stderr.strip())
-          assert probe.returncode == 0, "web assets were not packaged"
-
-          print("bundled runtime is functional")
-          PY
+      - name: Re-verify the finished archives
+        # scripts/build_release.py already extracted and smoke-tested the archive
+        # it just built. This re-runs the *same* verifier over dist/, so the release
+        # gate is the check a user could apply and the two deliberate layouts
+        # live in exactly one place: a second copy of these rules is what asserted
+        # a venv/ that a Windows archive never ships, failing every Windows build.
+        run: uv run --frozen python scripts/build_release.py --verify-only
       - name: Upload the archive
         uses: actions/upload-artifact@v4
         with:

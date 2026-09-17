@@ -479,6 +479,50 @@ def archive(destination: Path, version: str) -> Path:
     return path
 
 
+def archive_platform(root: Path, *, fallback: str | None = None) -> str:
+    """Which platform an extracted archive targets.
+
+    Read from ``BUILD-INFO.json`` rather than from the machine doing the
+    verifying, so a Windows archive can be checked anywhere and the check is
+    about the archive rather than about whoever is looking at it.
+    """
+    manifest = root / "BUILD-INFO.json"
+    if manifest.is_file():
+        with contextlib.suppress(OSError, ValueError):
+            recorded = str(json.loads(manifest.read_text(encoding="utf-8")).get("platform") or "")
+            if recorded.strip():
+                return recorded.strip()
+    return fallback if fallback is not None else sys.platform
+
+
+def assert_archive_layout(root: Path, platform_name: str) -> None:
+    """Assert the extracted tree is the layout its launchers expect.
+
+    The two platforms differ deliberately: a Windows virtual environment records
+    an absolute base path in ``pyvenv.cfg`` and cannot be relocated, so its
+    dependencies are installed into the bundled runtime instead. The release
+    workflow used to assert one layout for both and failed every Windows build;
+    keeping the rule here means the build and every workflow share it.
+    """
+    launcher = "run.bat" if platform_name == "win32" else "run.sh"
+    if not (root / launcher).is_file():
+        raise SystemExit(f"archive has no {launcher} at its root: {root}")
+
+    if platform_name == "win32":
+        if (root / "venv").is_dir():
+            raise SystemExit(
+                "a Windows archive must not contain venv/: a Windows virtual "
+                "environment names an absolute base path in pyvenv.cfg and stops "
+                "working once the archive is extracted anywhere else"
+            )
+        interpreter = root / "python" / "python.exe"
+    else:
+        interpreter = root / "venv" / "bin" / "python"
+
+    if not interpreter.is_file():
+        raise SystemExit(f"archive has no interpreter at {interpreter}")
+
+
 def verify_archive(archive_path: Path, *, expect_voice_local: bool = False) -> None:
     """Extract the archive and prove the bundled runtime actually runs.
 
@@ -515,6 +559,12 @@ def verify_archive(archive_path: Path, *, expect_voice_local: bool = False) -> N
 
         roots = [entry for entry in target.iterdir() if entry.is_dir()]
         root = roots[0] if len(roots) == 1 and not (target / "VERSION").exists() else target
+
+        # The layout is part of what the user receives, so assert it before the
+        # smoke test: a missing launcher, or a Windows archive carrying a venv
+        # that cannot be relocated, is broken even if the interpreter happens to
+        # run on the machine that built it.
+        assert_archive_layout(root, archive_platform(root))
 
         # Pick the interpreter the archive is meant to run with: a virtual
         # environment when there is one, otherwise the bundled runtime. Windows
@@ -657,6 +707,15 @@ def main() -> int:
         help="Skip extracting and smoke-testing the finished archive.",
     )
     parser.add_argument(
+        "--verify-only",
+        nargs="*",
+        default=None,
+        metavar="ARCHIVE",
+        help="Verify existing archives instead of building; defaults to everything in "
+        "dist/. This is the same verifier the build runs, so a release workflow can "
+        "re-check an artifact without a second, drifting copy of the rules.",
+    )
+    parser.add_argument(
         "--with-voice-local",
         action="store_true",
         help="Bundle the local speech engines (sherpa-onnx, ~30 MB).",
@@ -668,6 +727,20 @@ def main() -> int:
         "Implies --with-voice-local.",
     )
     args = parser.parse_args()
+
+    if args.verify_only is not None:
+        # Runs before any build work, and before uv is looked for, so an
+        # existing download can be checked on a machine with no toolchain.
+        archives = [Path(item) for item in args.verify_only]
+        if not archives:
+            archives = sorted(DIST_DIR.glob("*.zip")) + sorted(DIST_DIR.glob("*.tar.gz"))
+        if not archives:
+            raise SystemExit(f"no archives to verify in {DIST_DIR}")
+        for path in archives:
+            if not path.is_file():
+                raise SystemExit(f"no such archive: {path}")
+            verify_archive(path)
+        return 0
 
     if args.with_local_models:
         args.with_voice_local = True

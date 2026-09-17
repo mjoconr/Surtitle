@@ -132,33 +132,13 @@ jobs:
           enable-cache: true
       - name: Build the archive
         run: uv run --frozen python scripts/build_release.py
-      - name: Verify the archive is complete
-        shell: bash
-        run: |
-          set -euo pipefail
-          ls -la dist/
-          # The build script already extracts and smoke-tests the archive; this
-          # asserts the shipped pieces are present too, so a layout regression is
-          # caught even if the smoke test is skipped.
-          python - <<'PY'
-          import pathlib, tarfile, zipfile
-
-          dist = pathlib.Path("dist")
-          archives = list(dist.glob("*.zip")) + list(dist.glob("*.tar.gz"))
-          assert archives, "no archive was produced"
-          found = []
-          for archive in archives:
-              if archive.suffix == ".zip":
-                  with zipfile.ZipFile(archive) as bundle:
-                      found.extend(bundle.namelist())
-              else:
-                  with tarfile.open(archive) as bundle:
-                      found.extend(bundle.getnames())
-          needed = ["venv", "BUILD-INFO.json", "VERSION", "run.bat", "run.sh", "run.ps1"]
-          missing = [n for n in needed if not any(n in entry for entry in found)]
-          assert not missing, f"archive is missing: {missing}"
-          print(f"archive looks complete: {len(found)} entries")
-          PY
+      - name: Verify the archive layout
+        # The build step already verified the archive; this re-applies the same
+        # verifier to the exact artifact that will be uploaded, so a packaging
+        # regression cannot pass just because the build's own check was skipped.
+        # Deliberately a single command: the runner's default shell differs by
+        # platform, and this must not depend on which one it is.
+        run: uv run --frozen python scripts/build_release.py --verify-only
       - name: Upload the archive
         uses: actions/upload-artifact@v4
         with:

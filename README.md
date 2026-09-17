@@ -29,7 +29,7 @@ sentence while the model is still generating. You hear the conclusion, not the l
 
 ### Windows
 
-1. Download `surtitle-<version>-win32-amd64.zip` from [Releases](../../releases).
+1. Download `surtitle-<version>-win32-AMD64.zip` from [Releases](../../releases).
 2. Extract anywhere — your Desktop is fine. **No installer, no admin rights.**
 3. Double-click **`run.bat`**. Your browser opens the app.
 

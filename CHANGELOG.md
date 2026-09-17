@@ -140,6 +140,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   documentation promised. It now uses the bundled interpreter's own pip. That
   adds roughly 44 MB to a macOS archive; `--skip-wheelhouse` still produces the
   smaller build.
+- A Windows release can be cut. The release workflow's smoke test asserted
+  `venv\Scripts\python.exe`, which a Windows archive deliberately does not have —
+  dependencies go into the bundled runtime, because a Windows venv cannot be
+  relocated — so every `v*` tag would have failed after a full build. Archive
+  verification now lives in one place, `scripts/build_release.py`, which decides
+  the expected layout from the archive's own `BUILD-INFO.json`, and the new
+  `--verify-only` re-runs that same verifier over `dist/` or over a download the
+  user names. CI's completeness check had been passing for the wrong reason: it
+  matched the substring `venv` inside the bundled runtime's `Lib\venv`.
 
 ### Migration — this rename is breaking
 

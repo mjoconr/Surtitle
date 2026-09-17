@@ -78,9 +78,9 @@ voice-local = [
 surtitle = "surtitle.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/OWNER/Surtitle"
-Repository = "https://github.com/OWNER/Surtitle"
-Issues = "https://github.com/OWNER/Surtitle/issues"
+Homepage = "https://github.com/mjoconr/Surtitle"
+Repository = "https://github.com/mjoconr/Surtitle"
+Issues = "https://github.com/mjoconr/Surtitle/issues"
 
 [dependency-groups]
 dev = [

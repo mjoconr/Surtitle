@@ -5,7 +5,7 @@ administrator rights, no system Python, and no internet connection required to s
 
 ## Using a release build
 
-1. Download `surtitle-<version>-win32-amd64.zip` from [Releases](../../releases).
+1. Download `surtitle-<version>-win32-AMD64.zip` from [Releases](../../releases).
 2. Right-click → **Extract All** (or use 7-Zip). Extract to anywhere writable — your
    Desktop or Documents is fine. *Do not* run it from inside the zip preview; Windows
    will extract to a temporary folder and the bundled runtime will not be found.
@@ -70,8 +70,9 @@ it is not a remote-control endpoint either.
 |---|---|
 | `run.bat` | Launcher for Command Prompt / double-click |
 | `run.ps1` | Launcher for PowerShell |
-| `python/` | Standalone CPython — needs no installer and no registry entries |
-| `venv/` | All dependencies, already installed |
+| `run.sh` | Launcher for macOS and Linux (shipped, but not the Windows entry point) |
+| `python/` | Standalone CPython — needs no installer and no registry entries. A Windows archive installs the dependencies into this runtime as well. |
+| `venv/` | **macOS and Linux only** — the dependencies, already installed. A Windows archive deliberately has no `venv/`: a Windows virtual environment records an absolute base path and cannot be moved once the archive is extracted, so its interpreter would not start. |
 | `wheelhouse/` | Offline copies of every wheel, for repair without network |
 | `src/` | The application source |
 | `BUILD-INFO.json`, `VERSION` | What was built and when |
@@ -258,6 +259,7 @@ Output lands in `dist\`. Useful flags:
 | `--keep-build` | Reuse `build\release` instead of starting fresh |
 | `--with-voice-local` | Bundle the local speech engines (~30 MB); models still download on first use |
 | `--with-local-models` | Bundle the models too (~90 MB), for a fully offline archive |
+| `--verify-only` | Don't build: re-check the archive(s) already in `dist\` (or the paths you name). The same verifier the build runs, so it is also how you check a download after extracting it |
 
 The default archive contains neither local-voice piece, which keeps the documented
 "no network needed to start" property true for the shipped download. The two flags
