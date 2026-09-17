@@ -29,7 +29,7 @@
 
     Step 3's split matters for updates. The code lives in this folder; the models
     live under %LOCALAPPDATA%\Surtitle\models. Updating or replacing the code
-    therefore never re-downloads ~86 MB of models, and deleting the folder never
+    therefore never re-downloads the speech models, and deleting the folder never
     destroys them.
 
     The script is idempotent: running it twice is a fast no-op. -Update
@@ -237,8 +237,8 @@ if ($Check) {
 if ((-not $NoVoice) -and (-not $NoModels)) {
     Write-Step 'Local speech models'
     Write-Info "cache: $modelsDir (this survives updates and is removed only by you)"
-    # The application prints sizes and asks before downloading ~86 MB. Answering
-    # yes here is what makes the installer non-interactive.
+    # The application prints sizes and asks before downloading the speech models.
+    # Answering yes here is what makes the installer non-interactive.
     $modelArgs = @('models', 'download')
     if ($Yes -or -not $Host.Name.Contains('Console')) { $modelArgs += '--yes' }
     $code = Invoke-App $modelArgs

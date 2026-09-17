@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from surtitle.local_api import fetch_status, request_shutdown
+from surtitle.local_api import fetch_status, request_shutdown, request_voice_install
 from surtitle.platform_utils import human_bytes, is_windows, open_browser
 from surtitle.stats import PRICES_CHECKED, format_duration
 
@@ -57,7 +57,7 @@ class MenuEntry:
     separator: bool = False
 
 
-ACTIONS = ("open", "status", "usage", "stop")
+ACTIONS = ("open", "status", "usage", "voice", "stop")
 
 # How often the server is asked how it is doing. Every poll is a loopback
 # request that reads a few row counts, so this is cheap; two seconds keeps the
@@ -159,8 +159,33 @@ def menu_entries(snapshot: dict[str, Any] | None) -> list[MenuEntry]:
         MenuEntry(label="Status…", action="status", enabled=live),
         MenuEntry(label="Usage…", action="usage", enabled=live),
         MenuEntry(separator=True),
+        MenuEntry(**_voice_entry(snapshot if live else None)),
         MenuEntry(label="Stop Surtitle", action="stop", enabled=live),
     ]
+
+
+def _voice_entry(snapshot: dict[str, Any] | None) -> dict[str, Any]:
+    """The local-voice row: install it, watch it install, or say it is there.
+
+    The label is the status, so the menu answers "is offline speech available?"
+    without a dialog. Installing is disabled while it runs — clicking it twice
+    would only produce a 409 — and reports progress in the label instead.
+    """
+    if snapshot is None:
+        return {"label": "Install local voice…", "action": "voice", "enabled": False}
+
+    voice = snapshot.get("local_voice") or {}
+    install = voice.get("install") or {}
+    if install.get("running"):
+        percent = float(install.get("percent") or 0.0)
+        return {
+            "label": f"Installing local voice… {percent:.0f}%",
+            "action": "voice",
+            "enabled": False,
+        }
+    if voice.get("ready"):
+        return {"label": "Local voice is installed", "action": "voice", "enabled": False}
+    return {"label": "Install local voice…", "action": "voice", "enabled": True}
 
 
 def format_status(snapshot: dict[str, Any]) -> str:
@@ -318,6 +343,8 @@ class SurtitleTray:
             self._show(format_status, "Surtitle — status")
         elif action == "usage":
             self._show(format_usage, "Surtitle — usage")
+        elif action == "voice":
+            self._install_local_voice()
         elif action == "stop":
             self._request_stop()
 
@@ -339,6 +366,52 @@ class SurtitleTray:
             "console window instead.",
             "Surtitle — stop failed",
         )
+
+    def _install_local_voice(self) -> None:
+        """Ask the server to add the offline engines and download their models.
+
+        The server owns the work, not the tray: there are two trays (the one
+        ``surtitle run`` starts and the standalone one), and a download that
+        belongs to whichever icon happened to be clicked would be lost with it.
+        """
+        voice = (self.snapshot or {}).get("local_voice") or {}
+        title = "Surtitle — local voice"
+        if self.snapshot is None:
+            self._message("Surtitle is not answering on this port.", title)
+            return
+        if voice.get("ready"):
+            self._message("Local speech is already installed.", title)
+            return
+        if not self._confirm(
+            "Download and install the local speech engines?\n\n"
+            f"This fetches the sherpa-onnx runtime {_download_clause(voice)}, and needs "
+            "an internet connection. It runs in the background, so the app can be used "
+            "while it finishes.",
+            title,
+        ):
+            return
+
+        answer = request_voice_install(self.url)
+        if answer is None:
+            self._message("Surtitle did not accept the request.", title)
+            return
+        if not answer.get("started", True):
+            self._message("An install is already running.", title)
+            return
+        self._message(
+            "Installing the local speech engines in the background. The menu shows "
+            "how it is going; restart Surtitle when it finishes to use them.",
+            title,
+        )
+
+    def _confirm(self, text: str, title: str) -> bool:
+        """A yes/no box, and 'no' whenever the icon cannot ask."""
+        if self._icon is None:
+            return False
+        confirm = getattr(self._icon, "confirm", None)
+        if confirm is None:
+            return False
+        return bool(confirm(text, title=title))
 
     def _message(self, text: str, title: str) -> None:
         if self._icon is not None:
@@ -379,6 +452,18 @@ class SurtitleTray:
         if icon is not None:
             icon.stop()
         self._stop.set()
+
+
+def _download_clause(voice: dict[str, Any]) -> str:
+    """Name the size of the download, when the server knows it.
+
+    The registry's models run to hundreds of megabytes, so quoting a stale round
+    number in a "download?" prompt is worse than saying nothing.
+    """
+    size = int(voice.get("missing_bytes") or 0)
+    if size <= 0:
+        return "and the speech models"
+    return f"and about {human_bytes(size)} of speech models"
 
 
 def icon_file() -> Path:

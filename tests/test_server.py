@@ -581,3 +581,57 @@ class TestDraftVerification:
             # An empty draft must not be treated as the key to test.
             assert response.status_code in (200, 400, 502)
         await app.state.app_state.aclose()
+
+
+class TestLocalVoiceInstall:
+    """Installing offline speech from the app, and who may ask for it."""
+
+    async def test_status_carries_the_local_voice_state(self, client):
+        body = (await client.get("/api/status")).json()
+        voice = body["local_voice"]
+        assert {"runtime", "models", "ready", "detail", "install"} <= set(voice)
+        assert voice["install"]["running"] is False
+        assert voice["ready"] is False, "the test home has neither engines nor models"
+
+    async def test_the_endpoint_reports_the_same_state(self, client):
+        response = await client.get("/api/voice/install")
+        assert response.status_code == 200
+        assert {"runtime", "models", "ready", "detail", "install"} <= set(response.json())
+
+    async def test_a_local_request_starts_the_install(self, settings, monkeypatch):
+        app = create_app_for(settings)
+        started: list[object] = []
+        monkeypatch.setattr(
+            app.state.app_state.voice_install, "start", lambda s: started.append(s) or True
+        )
+        transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 51000))
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+            response = await http.post("/api/voice/install")
+        assert response.status_code == 202
+        assert response.json()["started"] is True
+        assert started, "the job was never asked to start"
+        await app.state.app_state.aclose()
+
+    async def test_a_remote_request_cannot_install_anything(self, settings, monkeypatch):
+        """A server exposed to a network must not download to this machine on command."""
+        app = create_app_for(settings)
+        started: list[object] = []
+        monkeypatch.setattr(
+            app.state.app_state.voice_install, "start", lambda s: started.append(s) or True
+        )
+        transport = httpx.ASGITransport(app=app, client=("10.211.55.9", 40123))
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+            response = await http.post("/api/voice/install")
+        assert response.status_code == 403
+        assert started == []
+        await app.state.app_state.aclose()
+
+    async def test_a_second_request_while_running_is_a_conflict(self, settings, monkeypatch):
+        app = create_app_for(settings)
+        monkeypatch.setattr(app.state.app_state.voice_install, "start", lambda s: False)
+        transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 51000))
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+            response = await http.post("/api/voice/install")
+        assert response.status_code == 409
+        assert response.json()["started"] is False
+        await app.state.app_state.aclose()

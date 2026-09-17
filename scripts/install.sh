@@ -27,7 +27,7 @@
 #
 # Step 3's split matters for updates. The code lives in the checkout; the models
 # live under ~/Library/Application Support/Surtitle/models. Replacing or
-# updating the code therefore never re-downloads ~86 MB of models, and removing
+# updating the code therefore never re-downloads the speech models, and removing
 # the checkout never destroys them.
 #
 # The script is idempotent: running it twice is a fast no-op, not a second

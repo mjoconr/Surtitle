@@ -55,7 +55,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1 -Yes
 ```
 
 `install.ps1` is idempotent. `-Update` refreshes an existing install, `-NoVoice`
-skips the offline speech engines (and their ~86 MB of models), `-Startup` /
+skips the offline speech engines (and their multi-hundred-megabyte models), `-Startup` /
 `-NoStartup` answer the sign-in question without a prompt, and `-Check` reports
 what is installed without changing anything.
 

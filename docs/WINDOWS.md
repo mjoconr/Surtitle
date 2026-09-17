@@ -28,6 +28,7 @@ double-click it to open the app in your browser; right-click it for:
 | **Open Surtitle** | Opens the app in your default browser |
 | **Status…** | Address, uptime, model, which voice engines are in use, whether each key is set, how many conversations are live, and what is in the database |
 | **Usage…** | Turns answered, tool calls, tokens in and out, cache hits, and an estimated cost for this run |
+| **Install local voice…** | Downloads the offline speech engines and their models (several hundred MB) after asking. While it runs the row shows progress; once it is done it reads "Local voice is installed" |
 | **Stop Surtitle** | Graceful shutdown — the same as Ctrl+C in the console, not a kill |
 
 The two lines at the top of the menu are the live state, not commands: how many

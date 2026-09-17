@@ -60,6 +60,8 @@ from surtitle.store.settings_store import (
 from surtitle.tools import environment
 from surtitle.tools.fs_tools import ToolContext, list_dir
 from surtitle.tools.path_guard import PathEscapeError, resolve_in_root
+from surtitle.voice.install import InstallJob
+from surtitle.voice.install import state as local_voice_state
 
 __all__ = ["SessionManager", "create_app"]
 
@@ -144,6 +146,10 @@ class AppState:
         # uvicorn Server object; when it is unset the endpoint refuses, so a
         # create_app_for() test app can never signal a process it does not own.
         self.on_shutdown = on_shutdown
+        # Installing the local speech engines and their models is a long download,
+        # so it runs in a background thread and both the tray and the Settings
+        # screen read this one job rather than starting their own.
+        self.voice_install = InstallJob()
         # Re-apply stored preferences and credentials onto the live settings.
         self.settings_store.effective()
 
@@ -159,6 +165,24 @@ def _error(status: int, message: str, *, field: str | None = None) -> JSONRespon
     if field:
         payload["field"] = field
     return JSONResponse(payload, status_code=status)
+
+
+def _local_voice_payload(settings: Settings, job: InstallJob) -> dict[str, Any]:
+    """Local-speech state, plus any install in flight.
+
+    Read on every tray poll: it stats model files and asks whether
+    ``sherpa_onnx`` imports, and loads neither.
+    """
+    snapshot = local_voice_state(settings)
+    return {
+        "runtime": snapshot.runtime,
+        "models": snapshot.models,
+        "ready": snapshot.ready,
+        "detail": snapshot.detail,
+        "missing_models": snapshot.missing_models,
+        "missing_bytes": snapshot.missing_bytes,
+        "install": job.snapshot(),
+    }
 
 
 def _project_or_404(state: AppState, project_id: str):
@@ -225,6 +249,7 @@ def build_api(state: AppState) -> APIRouter:
             "deepseek_configured": bool(settings.deepseek_key()),
             "deepgram_configured": bool(settings.deepgram_key()),
             "sessions": state.sessions.count,
+            "local_voice": _local_voice_payload(settings, state.voice_install),
             "usage": usage,
             "storage": {
                 **state.store.counts(),
@@ -267,6 +292,32 @@ def build_api(state: AppState) -> APIRouter:
         from surtitle.voice import models
 
         return {"models": models.describe(state.settings)}
+
+    @api.get("/voice/install")
+    async def voice_install_status() -> dict[str, Any]:
+        """What local speech still needs, and how an install is going."""
+        return _local_voice_payload(state.settings, state.voice_install)
+
+    @api.post("/voice/install")
+    async def voice_install_start(request: Request) -> JSONResponse:
+        """Install the local speech engines and their models, in the background.
+
+        Loopback only, for the same reason as ``/api/shutdown``: a server bound to
+        a LAN address is already readable by anyone on it, and this endpoint must
+        not be what turns that into "someone can pull ~100 MB onto your disk and
+        restart your voice engines".
+
+        Answers 202 as soon as the work has started; the caller polls
+        ``GET /api/voice/install`` (or ``/api/status``) for progress. A second
+        request while one is running is 409, which is a state rather than a fault.
+        """
+        client = request.client.host if request.client else ""
+        if client not in {"127.0.0.1", "::1", "localhost"}:
+            return _error(403, "installing local voice is only allowed from this machine")
+        if not state.voice_install.start(state.settings):
+            return JSONResponse({"started": False, "reason": "already running"}, status_code=409)
+        log.info("local voice install requested by %s", client)
+        return JSONResponse({"started": True}, status_code=202)
 
     # --- settings --------------------------------------------------------
     @api.get("/settings")

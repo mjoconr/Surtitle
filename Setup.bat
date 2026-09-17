@@ -9,7 +9,7 @@ REM
 REM Arguments are forwarded to scripts\install.ps1, so the switches still work:
 REM
 REM     Setup.bat -NoVoice      hosted voice only (smaller, faster)
-REM     Setup.bat -NoModels     install the engines but skip the ~86 MB download
+REM     Setup.bat -NoModels     install the engines but skip the speech-model download
 REM     Setup.bat -Update       update an existing installation
 REM     Setup.bat -Check        report what is installed; change nothing
 REM

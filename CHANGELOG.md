@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Install the offline speech engines from the tray.** The right-click menu has
+  an **Install local voice…** item whenever offline speech is incomplete. It
+  asks before a large download, then hands the work to the server
+  (`POST /api/voice/install`, loopback only) so it continues whichever icon
+  started it. While it runs the menu row becomes progress, and it reads "Local
+  voice is installed" once there is nothing left to do. `surtitle voice install`
+  and `surtitle voice status` do the same from a terminal, and exit non-zero when
+  offline speech is not ready.
 - **One double-clickable setup file per platform.** `Setup.bat` on Windows and
   `Setup.command` on macOS install everything a source checkout needs: uv and
   Python, the dependencies, optionally the offline speech engines and their
@@ -27,6 +35,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The download size quoted before fetching speech models was stale by more than
+  four times: the registry's models are about 395 MB, not the ~86 MB the
+  installers and prompts claimed. The app now reports the real figure from the
+  model registry, and the scripts and docs no longer name a number at all.
 - A launcher started with **no arguments now starts the app** instead of printing
   help and exiting. `run.bat`, `run.ps1` and `run.sh` forwarded an empty argument
   list to the CLI, so the double-click the documentation recommends left a window

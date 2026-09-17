@@ -83,9 +83,14 @@ SM_CXSMICON = 49
 SM_CYSMICON = 50
 
 MB_OK = 0x00000000
+MB_YESNO = 0x00000004
+MB_ICONQUESTION = 0x00000020
 MB_ICONINFORMATION = 0x00000040
 MB_SETFOREGROUND = 0x00010000
 MB_TOPMOST = 0x00040000
+
+# What MessageBoxW returns for the Yes button.
+IDYES = 6
 
 ERROR_CLASS_ALREADY_EXISTS = 1410
 IDI_APPLICATION = 32512
@@ -397,6 +402,22 @@ class TrayIcon:
             title or self._title,
             MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND | MB_TOPMOST,
         )
+
+    def confirm(self, text: str, *, title: str | None = None) -> bool:
+        """Ask a yes/no question owned by the icon. True when the user says yes.
+
+        Reserved for the choices that cost the user something — a ~100 MB
+        download, say. Same ownership and topmost flags as :meth:`message`, for
+        the same reason: an unowned box raised from a background thread can open
+        behind the browser with nothing to click.
+        """
+        answer = _user32.MessageBoxW(
+            self._hwnd or None,
+            text,
+            title or self._title,
+            MB_YESNO | MB_ICONQUESTION | MB_SETFOREGROUND | MB_TOPMOST,
+        )
+        return answer == IDYES
 
     # --- thread ----------------------------------------------------------
     def _pump(self) -> None:

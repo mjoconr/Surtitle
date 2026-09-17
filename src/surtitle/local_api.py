@@ -35,6 +35,7 @@ __all__ = [
     "instance_path",
     "read_instance",
     "request_shutdown",
+    "request_voice_install",
     "write_instance",
 ]
 
@@ -173,6 +174,28 @@ def request_shutdown(url: str, *, timeout: float = _STOP_TIMEOUT) -> bool:
     except (httpx.HTTPError, ValueError, OSError):
         return False
     return response.status_code == 200
+
+
+def request_voice_install(url: str, *, timeout: float = _PROBE_TIMEOUT) -> dict[str, Any] | None:
+    """Ask the server at ``url`` to install the local engines and their models.
+
+    The server starts the work in the background, so this returns as soon as it
+    has accepted the request rather than when the download has finished. ``None``
+    means nothing answered; a 409 (already running) is a normal answer, not an
+    error, and is passed through with ``started`` false.
+    """
+    try:
+        with httpx.Client(base_url=url, timeout=timeout) as client:
+            response = client.post("/api/voice/install")
+    except (httpx.HTTPError, ValueError, OSError):
+        return None
+    if response.status_code not in (200, 202, 409):
+        return None
+    try:
+        payload = response.json()
+    except ValueError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
 
 
 def find_instance(

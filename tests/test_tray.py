@@ -357,3 +357,148 @@ def test_every_offered_action_is_handled():
     source = inspect.getsource(SurtitleTray._select)
     for action in ACTIONS:
         assert f'"{action}"' in source, f"the {action!r} menu item has no handler"
+
+
+class TestLocalVoiceMenu:
+    """The menu answers "is offline speech available?" without opening a dialog."""
+
+    def test_offers_install_when_offline_speech_is_missing(self, snapshot):
+        snapshot["local_voice"] = {"ready": False, "runtime": False, "models": True}
+        entry = next(e for e in menu_entries(snapshot) if e.action == "voice")
+        assert entry.enabled is True
+        assert "Install" in entry.label
+
+    def test_progress_is_in_the_label_and_a_second_click_is_refused(self, snapshot):
+        snapshot["local_voice"] = {"ready": False, "install": {"running": True, "percent": 42.4}}
+        entry = next(e for e in menu_entries(snapshot) if e.action == "voice")
+        assert entry.enabled is False
+        assert "42%" in entry.label
+
+    def test_says_so_when_it_is_already_installed(self, snapshot):
+        snapshot["local_voice"] = {"ready": True, "install": {"running": False}}
+        entry = next(e for e in menu_entries(snapshot) if e.action == "voice")
+        assert entry.enabled is False
+        assert "installed" in entry.label.lower()
+
+    def test_it_is_not_actionable_when_the_server_is_gone(self):
+        entry = next(e for e in menu_entries(None) if e.action == "voice")
+        assert entry.enabled is False
+
+
+class TestLocalVoiceAction:
+    def _tray(self, voice) -> SurtitleTray:
+        tray = SurtitleTray("http://127.0.0.1:8765")
+        tray._snapshot = {"local_voice": voice}
+        return tray
+
+    def test_it_asks_before_downloading(self, monkeypatch):
+        tray = self._tray({"ready": False})
+        asked: list[str] = []
+        monkeypatch.setattr(tray, "_confirm", lambda text, title: asked.append(text) or True)
+        monkeypatch.setattr(tray, "_message", lambda text, title: None)
+        posted: list[str] = []
+        monkeypatch.setattr(
+            "surtitle.tray.request_voice_install",
+            lambda url, timeout=None: posted.append(url) or {"started": True},
+        )
+
+        tray._select("voice")
+
+        assert asked and "Download" in asked[0]
+        assert posted == ["http://127.0.0.1:8765"]
+
+    def test_a_cancelled_question_downloads_nothing(self, monkeypatch):
+        tray = self._tray({"ready": False})
+        monkeypatch.setattr(tray, "_confirm", lambda text, title: False)
+        posted: list[str] = []
+        monkeypatch.setattr(
+            "surtitle.tray.request_voice_install",
+            lambda url, timeout=None: posted.append(url) or {"started": True},
+        )
+
+        tray._select("voice")
+
+        assert posted == []
+
+    def test_an_installed_voice_is_not_reinstalled(self, monkeypatch):
+        tray = self._tray({"ready": True})
+        posted: list[str] = []
+        monkeypatch.setattr(
+            "surtitle.tray.request_voice_install",
+            lambda url, timeout=None: posted.append(url) or {},
+        )
+        shown: list[str] = []
+        monkeypatch.setattr(tray, "_message", lambda text, title: shown.append(text))
+
+        tray._select("voice")
+
+        assert posted == []
+        assert shown and "already" in shown[0]
+
+    def test_an_install_already_running_is_reported(self, monkeypatch):
+        tray = self._tray({"ready": False})
+        monkeypatch.setattr(tray, "_confirm", lambda text, title: True)
+        monkeypatch.setattr(
+            "surtitle.tray.request_voice_install", lambda url, timeout=None: {"started": False}
+        )
+        shown: list[str] = []
+        monkeypatch.setattr(tray, "_message", lambda text, title: shown.append(text))
+
+        tray._select("voice")
+
+        assert shown and "already running" in shown[0]
+
+    def test_a_server_that_stops_answering_is_reported(self, monkeypatch):
+        tray = SurtitleTray("http://127.0.0.1:8765")
+        tray._snapshot = None
+        shown: list[str] = []
+        monkeypatch.setattr(tray, "_message", lambda text, title: shown.append(text))
+
+        tray._select("voice")
+
+        assert shown and "not answering" in shown[0]
+
+    def test_a_refused_request_is_reported(self, monkeypatch):
+        tray = self._tray({"ready": False})
+        monkeypatch.setattr(tray, "_confirm", lambda text, title: True)
+        monkeypatch.setattr("surtitle.tray.request_voice_install", lambda url, timeout=None: None)
+        shown: list[str] = []
+        monkeypatch.setattr(tray, "_message", lambda text, title: shown.append(text))
+
+        tray._select("voice")
+
+        assert shown and "did not accept" in shown[0]
+
+    def test_the_icon_is_asked_for_a_yes_or_no(self):
+        """No icon means no confirmation, and no confirmation means no download."""
+        tray = SurtitleTray("http://127.0.0.1:1")
+        assert tray._confirm("text", "title") is False
+
+    def test_the_confirmation_quotes_the_real_download_size(self, monkeypatch):
+        """The models are hundreds of MB; a remembered round number would mislead."""
+        tray = self._tray({"ready": False, "missing_bytes": 394_600_000})
+        asked: list[str] = []
+        monkeypatch.setattr(tray, "_confirm", lambda text, title: asked.append(text) or True)
+        monkeypatch.setattr(tray, "_message", lambda text, title: None)
+        monkeypatch.setattr(
+            "surtitle.tray.request_voice_install",
+            lambda url, timeout=None: {"started": True},
+        )
+
+        tray._select("voice")
+
+        assert asked and "MB" in asked[0]
+
+    def test_it_invents_no_size_when_the_server_did_not_say(self, monkeypatch):
+        tray = self._tray({"ready": False})
+        asked: list[str] = []
+        monkeypatch.setattr(tray, "_confirm", lambda text, title: asked.append(text) or True)
+        monkeypatch.setattr(tray, "_message", lambda text, title: None)
+        monkeypatch.setattr(
+            "surtitle.tray.request_voice_install",
+            lambda url, timeout=None: {"started": True},
+        )
+
+        tray._select("voice")
+
+        assert asked and "MB" not in asked[0]

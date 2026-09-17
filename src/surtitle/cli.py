@@ -565,6 +565,100 @@ def models_path() -> None:
     sys.stdout.write(str(models.models_dir(store.effective())) + "\n")
 
 
+# --- local voice engines -------------------------------------------------
+
+voice_app = typer.Typer(
+    name="voice",
+    help="Install and inspect the offline speech engines (no API key needed).",
+    no_args_is_help=True,
+)
+app.add_typer(voice_app, name="voice")
+
+
+def _progress_line(update) -> str:
+    """One line of install progress, for the status spinner."""
+    if update.stage == "download" and update.total:
+        percent = 100 * update.received / update.total
+        return f"{update.asset}: {percent:5.1f}% ({human_bytes(update.received)})"
+    return f"{update.asset}: {update.message or update.stage}"
+
+
+@voice_app.command("install")
+def voice_install(
+    yes: bool = typer.Option(False, "--yes", "-y", help="Do not ask for confirmation."),
+) -> None:
+    """Install the offline speech engines and download their models.
+
+    The same work the tray's "Install local voice…" item asks the server to do,
+    available in a terminal and from a script. It is also the reason a user who
+    installed with `--no-voice` can change their mind without re-running the
+    whole installer.
+    """
+    from surtitle.voice import install as voice
+    from surtitle.voice import models
+
+    store = _open_store()
+    assert store is not None
+    settings = store.effective()
+
+    before = voice.state(settings)
+    plan = voice.runtime_plan()
+    console.print(f"Local speech: last checked — {before.detail}")
+    console.print(f"Engines: [bold]{plan.label}[/bold]")
+    # The real figure, not a remembered one: the registry's models run to
+    # hundreds of megabytes, and a stale round number would be a small lie before
+    # a long download.
+    if before.missing_bytes:
+        size = f"about {human_bytes(before.missing_bytes)}"
+    else:
+        size = "nothing to download"
+    console.print(f"Models:  {size} into {readable_path(models.models_dir(settings))}")
+
+    if not yes and not typer.confirm("Continue?", default=True):
+        raise typer.Exit(code=1)
+
+    with console.status("Installing the local speech engines…") as status:
+        last = {"line": ""}
+
+        def on_progress(update) -> None:
+            line = _progress_line(update)
+            if line != last["line"]:
+                last["line"] = line
+                status.update(line)
+
+        result = voice.install(settings, progress=on_progress)
+
+    style = "[green]Done.[/green]" if result.ok else "[red]Failed.[/red]"
+    console.print(f"{style} {result.message}")
+    if not result.ok:
+        raise typer.Exit(code=1)
+
+
+@voice_app.command("status")
+def voice_status() -> None:
+    """Report whether offline speech is available, and what is missing.
+
+    Exits non-zero when it is not ready, so a script can branch on it.
+    """
+    from surtitle.voice import install as voice
+
+    store = _open_store()
+    assert store is not None
+    snapshot = voice.state(store.effective())
+
+    table = Table(box=None, show_header=False)
+    engines = "[green]installed[/green]" if snapshot.runtime else "[red]missing[/red]"
+    models_state = "[green]installed[/green]" if snapshot.models else "[yellow]missing[/yellow]"
+    table.add_row("Engines", engines)
+    table.add_row("Models", models_state)
+    console.print(table)
+    console.print(f"[dim]{snapshot.detail}[/dim]")
+
+    if not snapshot.ready:
+        console.print("Run [bold]surtitle voice install[/bold] to add offline speech.")
+        raise typer.Exit(code=1)
+
+
 @app.command()
 def settings_show() -> None:
     """Print the effective settings and credential status (no secret values)."""
