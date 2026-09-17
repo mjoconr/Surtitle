@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-09-17
+
 ### Changed
 
 - **The project is now Surtitle.** The previous working name has been removed
@@ -183,3 +185,6 @@ Then:
   Leaving them in place is harmless — they are simply rebuilt on demand.
 - Speech models are **not** carried over by the `.env` change alone. If you skip
   the data-directory move, run `surtitle models download` to fetch them again.
+
+[Unreleased]: https://github.com/mjoconr/Surtitle/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/mjoconr/Surtitle/releases/tag/v0.1.0
