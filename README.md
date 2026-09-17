@@ -42,7 +42,11 @@ it for live status, an estimate of what this run has cost in tokens and money, a
 files a new icon under the `^` arrow; drag it onto the taskbar to keep it in view.
 See [`docs/WINDOWS.md`](docs/WINDOWS.md#the-taskbar-icon).
 
-To install from source instead, or to add the offline speech engines later:
+To install from source instead, or to add the offline speech engines later,
+**double-click `Setup.bat`** at the top of the checkout. It needs no terminal and
+no command: it installs Python and the dependencies, offers the offline speech
+engines and their models, adds a Start Menu entry, and asks whether Surtitle
+should start when you sign in. If you would rather type it:
 
 ```powershell
 # Windows blocks PowerShell scripts by default, so pass the execution-policy bypass.
@@ -51,10 +55,16 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1 -Yes
 ```
 
 `install.ps1` is idempotent. `-Update` refreshes an existing install, `-NoVoice`
-skips the offline speech engines (and their ~86 MB of models), and `-Check`
-reports what is installed without changing anything.
+skips the offline speech engines (and their ~86 MB of models), `-Startup` /
+`-NoStartup` answer the sign-in question without a prompt, and `-Check` reports
+what is installed without changing anything.
 
 ### macOS / Linux
+
+For a git clone, **double-click `Setup.command`** at the top of the checkout. It
+opens a Terminal window for you and does the whole job: Python and dependencies,
+optionally the offline speech engines and their models, Surtitle in
+`~/Applications`, and the sign-in question. Or type it:
 
 ```bash
 git clone <this repo> && cd Surtitle
@@ -64,7 +74,8 @@ git clone <this repo> && cd Surtitle
 
 `install.sh` uses [uv](https://docs.astral.sh/uv/) for Python and dependencies —
 installing uv if you do not have it — and is safe to re-run. `--no-voice` skips the
-local speech engines, and `--update` refreshes an existing install. A released archive
+local speech engines, `--startup` / `--no-startup` answer the sign-in question
+without a prompt, and `--update` refreshes an existing install. A released archive
 is just as easy: extract and run `./scripts/run.sh`.
 
 If you would rather not install anything up front, `./scripts/run.sh` alone still

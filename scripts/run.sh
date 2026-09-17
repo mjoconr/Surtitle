@@ -15,6 +15,13 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+# No arguments means "start the app". The .app bundle this installer creates runs
+# this script with none, and forwarding an empty list printed the CLI's help and
+# exited instead of starting anything.
+if [ "$#" -eq 0 ]; then
+  set -- run
+fi
+
 # --------------------------------------------------------------------------- #
 # Colours, but only when attached to a terminal.
 # --------------------------------------------------------------------------- #

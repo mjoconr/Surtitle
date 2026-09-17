@@ -26,6 +26,11 @@ $ErrorActionPreference = 'Stop'
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 Push-Location $ScriptDir
 
+# No arguments means "start the app". A double-click, a Start Menu entry and a
+# sign-in shortcut all pass none, and forwarding an empty list printed the CLI's
+# help and exited - a window that flashed and vanished without starting anything.
+if (-not $Arguments -or $Arguments.Count -eq 0) { $Arguments = @('run') }
+
 function Fail([string] $Message) {
     Write-Host ''
     Write-Host $Message -ForegroundColor Red

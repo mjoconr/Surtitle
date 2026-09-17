@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **One double-clickable setup file per platform.** `Setup.bat` on Windows and
+  `Setup.command` on macOS install everything a source checkout needs: uv and
+  Python, the dependencies, optionally the offline speech engines and their
+  models, a launcher entry, and the sign-in question. Neither needs a terminal, a
+  typed command, or administrator rights — the Windows one passes
+  `-ExecutionPolicy Bypass` for its own invocation rather than asking anyone to
+  change a machine-wide setting.
+- **A launcher entry and an optional sign-in entry**, both per-user. On Windows
+  the installer adds a Start Menu shortcut (already there) and now asks whether
+  Surtitle should start when you sign in, creating or removing a Start-folder
+  shortcut; the sign-in launch starts minimized with `--no-browser`. On macOS it
+  writes `Surtitle.app` into `~/Applications` with the application icon, and a
+  per-user LaunchAgent for sign-in. `-Startup`/`-NoStartup` and
+  `--startup`/`--no-startup` answer without a prompt; `-Yes`/`--yes` means "take
+  the defaults", which is not to add anything to sign-in silently.
+
+### Fixed
+
+- A launcher started with **no arguments now starts the app** instead of printing
+  help and exiting. `run.bat`, `run.ps1` and `run.sh` forwarded an empty argument
+  list to the CLI, so the double-click the documentation recommends left a window
+  that flashed and vanished. Passing a command is unchanged: `run.bat doctor`,
+  `run.bat models list`, `run.bat run --port 9000` all behave exactly as before.
+
 ## [0.1.0] - 2026-09-17
 
 ### Changed

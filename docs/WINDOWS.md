@@ -88,6 +88,12 @@ Delete that folder as well for a complete removal.
 
 ## Running from source
 
+The simple way: **double-click `Setup.bat`** at the top of the checkout. It needs
+no terminal, installs everything, and is described under
+[Installing and updating](#installing-and-updating) below.
+
+To do it by hand instead:
+
 ```powershell
 git clone <this repo>; cd Surtitle
 py -3.12 -m venv .venv          # or any Python 3.11+
@@ -103,7 +109,10 @@ powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
 ```
 
 `run.ps1` and `run.bat` both prefer, in order: a bundled runtime, `uv` from a source
-checkout, then an existing `.venv`.
+checkout, then an existing `.venv`. With no arguments they start the app — that is
+what a double-click, the Start Menu entry and the sign-in shortcut all rely on.
+Passing a command still works exactly as before: `run.bat doctor`,
+`run.bat models list`, `run.bat run --port 9000`.
 
 Both look for `uv` on `PATH` *and* in `%USERPROFILE%\.local\bin`, where uv's own
 installer puts it. That matters immediately after installing uv: the installer
@@ -119,6 +128,22 @@ powershell -ExecutionPolicy Bypass -File .\scripts\run.ps1
 Or use `run.bat`, which has no execution-policy restriction.
 
 ## Installing and updating
+
+`Setup.bat` is the double-clickable face of `scripts/install.ps1`. It forwards its
+arguments to the installer and holds the window open afterwards so the result can
+be read:
+
+```
+Setup.bat                 install everything, including offline voice
+Setup.bat -NoVoice        hosted voice only (smaller and faster)
+Setup.bat -Update         update an existing installation
+Setup.bat -Check          report what is installed; change nothing
+```
+
+A double-click starts with an execution policy of `Restricted`, which would refuse
+`install.ps1` — and leaves nowhere to type the bypass — so `Setup.bat` passes
+`-ExecutionPolicy Bypass` for that one invocation rather than asking you to change
+a machine-wide setting.
 
 `scripts/install.ps1` does the whole job — Python, dependencies, and optionally the
 local speech engines and their models — with no administrator rights:
@@ -142,6 +167,15 @@ Surtitle entry to the Start Menu for the current user, pointing at `run.bat` and
 carrying the app's own icon, so it can be pinned to the taskbar or the Start Menu
 without going through the extracted folder. `-NoShortcut` skips that step, and
 removing it is deleting one `.lnk` — nothing outside your profile is touched.
+
+It then **asks whether Surtitle should start when you sign in**, and adds or
+removes a shortcut in your Startup folder accordingly. Nothing is added behind your
+back: `-Yes` (and a run with no console to answer on) means no, `-Startup` says
+yes, `-NoStartup` says no and removes an existing entry. The sign-in shortcut
+starts the server minimized with `--no-browser`, so signing in does not throw a
+browser window over whatever you were doing; the notification icon and the Start
+Menu entry open the UI when you want it. Removing it is deleting one `.lnk` from
+`shell:startup`.
 
 **Why updating is cheap.** The code and its virtual environment live in the
 checkout; the speech models live in `%LOCALAPPDATA%\Surtitle\models`. Updating

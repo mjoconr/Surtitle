@@ -170,3 +170,94 @@ class TestPosixLauncherBehaviour:
 
         assert done.returncode == 0, done.stderr
         assert "STUB uv run --no-sync --quiet surtitle --version" in done.stdout
+
+
+ROOT = Path(__file__).resolve().parent.parent
+SETUP_BAT = ROOT / "Setup.bat"
+SETUP_COMMAND = ROOT / "Setup.command"
+
+
+class TestNoArgumentDefault:
+    """A bare launch starts the app; it must not print help and vanish.
+
+    Every entry point a user reaches without typing — a double-click, the Start
+    Menu entry, the macOS app, a sign-in shortcut — passes no arguments at all,
+    and forwarding an empty list made the CLI print its help and exit.
+    """
+
+    def test_the_batch_launcher_defaults_to_run(self, bat):
+        assert "DEFAULT_COMMAND=run" in bat
+        assert "%DEFAULT_COMMAND%" in bat
+
+    def test_the_powershell_launcher_defaults_to_run(self, ps1):
+        assert "@('run')" in ps1
+
+    def test_the_posix_launcher_defaults_to_run(self, sh):
+        assert "set -- run" in sh
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="run.sh is for macOS and Linux")
+    @pytest.mark.skipif(shutil.which("bash") is None, reason="no bash available")
+    def test_a_bare_invocation_runs_the_server(self, tmp_path):
+        """Behavioural: no arguments, and the app is what gets started."""
+        checkout = tmp_path / "checkout"
+        (checkout / "scripts").mkdir(parents=True)
+        shutil.copy(RUN_SH, checkout / "scripts" / "run.sh")
+
+        venv_python = checkout / ".venv" / "bin" / "python"
+        venv_python.parent.mkdir(parents=True)
+        venv_python.write_text('#!/bin/sh\necho "STUB python $*"\n', encoding="utf-8")
+        venv_python.chmod(0o755)
+
+        done = subprocess.run(
+            ["bash", str(checkout / "scripts" / "run.sh")],
+            # No uv on PATH and no HOME to find one in, so only the .venv can run.
+            env={"HOME": str(tmp_path / "nohome"), "PATH": "/usr/bin:/bin"},
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+
+        assert done.returncode == 0, done.stderr
+        assert "STUB python -m surtitle run" in done.stdout
+        assert "Usage:" not in done.stdout
+
+
+class TestSetupEntryPoints:
+    """Setup is a separate, double-clickable file; the launchers are not it.
+
+    Reported from a real Windows run: the documented "double-click run.bat" on a
+    source checkout printed instructions and vanished, because nothing was
+    installed yet. Setup is the thing that installs, and it must not require a
+    typed command or a PowerShell policy switch.
+    """
+
+    def test_windows_has_a_double_clickable_setup(self):
+        text = SETUP_BAT.read_text(encoding="utf-8")
+        assert r"scripts\install.ps1" in text
+        # A fresh Windows refuses scripts under the default policy, and a
+        # double-click gives the user nowhere to type the bypass.
+        assert "-ExecutionPolicy Bypass" in text
+        # A double-clicked window closes the instant the script ends.
+        assert "pause" in text
+
+    def test_macos_has_a_double_clickable_setup(self):
+        text = SETUP_COMMAND.read_text(encoding="utf-8")
+        assert "scripts/install.sh" in text
+        assert "read -r" in text, "the window must wait so the result can be read"
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="the exec bit is POSIX")
+    def test_the_macos_setup_is_executable(self):
+        assert SETUP_COMMAND.stat().st_mode & 0o111, "Finder cannot run a .command without it"
+
+    def test_the_windows_installer_offers_a_menu_entry_and_sign_in(self):
+        text = (SCRIPTS / "install.ps1").read_text(encoding="utf-8")
+        assert "Start Menu" in text
+        assert "[Environment]::GetFolderPath('Startup')" in text
+        assert "$Startup" in text and "$NoStartup" in text
+
+    def test_the_macos_installer_offers_an_app_and_sign_in(self):
+        text = (SCRIPTS / "install.sh").read_text(encoding="utf-8")
+        assert "Applications/Surtitle.app" in text
+        assert "Library/LaunchAgents" in text
+        assert "--startup" in text and "--no-startup" in text

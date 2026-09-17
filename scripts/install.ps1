@@ -3,7 +3,8 @@
     Surtitle installer for Windows.
 
 .DESCRIPTION
-    One command that leaves a working installation:
+    Usually reached by double-clicking Setup.bat at the top of the checkout,
+    which needs no terminal and no command. Run it directly if you prefer:
 
         .\scripts\install.ps1                # install everything, including local voice
         .\scripts\install.ps1 -Update        # bring an existing install up to date
@@ -21,6 +22,10 @@
       4. Adds a Surtitle entry to the Start Menu for this user, pointing at the
          launcher. Per-user, so it needs no administrator rights and touches
          nothing outside the profile; -NoShortcut skips it.
+      5. Asks whether Surtitle should start when this user signs in, and adds or
+         removes a shortcut in the Startup folder accordingly. Ask once, never
+         silently: -Startup and -NoStartup answer it for an automated run, and
+         -Yes takes the default of not adding anything to sign-in.
 
     Step 3's split matters for updates. The code lives in this folder; the models
     live under %LOCALAPPDATA%\Surtitle\models. Updating or replacing the code
@@ -31,11 +36,14 @@
     additionally refreshes the environment.
 
 .EXAMPLE
-    powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1 -Yes
+    .\Setup.bat
+
+.EXAMPLE
+    powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1 -Yes -Startup
 
 .NOTES
-    If PowerShell refuses to run this script, use the line above: the module
-    scope is not needed, but the execution policy is.
+    If PowerShell refuses to run this script, use Setup.bat, or the line above:
+    the module scope is not needed, but the execution policy is.
 #>
 [CmdletBinding()]
 param(
@@ -50,7 +58,11 @@ param(
     # Answer yes to the model-download confirmation.
     [switch] $Yes,
     # Do not add a Surtitle entry to the Start Menu.
-    [switch] $NoShortcut
+    [switch] $NoShortcut,
+    # Start Surtitle when this user signs in. Omitted: ask when interactive.
+    [switch] $Startup,
+    # Never start Surtitle at sign-in, and remove an entry if one exists.
+    [switch] $NoStartup
 )
 
 $ErrorActionPreference = 'Stop'
@@ -69,6 +81,41 @@ function Fail([string] $Message) {
     Write-Host ''
     Write-Host "error: $Message" -ForegroundColor Red
     exit 1
+}
+
+function Test-CanPrompt {
+    # A double-clicked Setup.bat has a console to answer on; a piped or CI run
+    # does not, and blocking on Read-Host there would hang an unattended install.
+    try { return -not [Console]::IsInputRedirected } catch { return $false }
+}
+
+function Ask-YesNo([string] $Question, [bool] $Default = $false) {
+    $suffix = if ($Default) { '[Y/n]' } else { '[y/N]' }
+    try { $answer = Read-Host "    $Question $suffix" } catch { return $Default }
+    if ([string]::IsNullOrWhiteSpace($answer)) { return $Default }
+    return $answer.Trim().ToLowerInvariant().StartsWith('y')
+}
+
+function New-SurtitleShortcut {
+    param(
+        [Parameter(Mandatory)][string] $Path,
+        [Parameter(Mandatory)][string] $Target,
+        [string[]] $TargetArguments,
+        # 7 = minimized. A sign-in launch should not open a console over whatever
+        # the user is doing; the icon and the Start Menu entry are how it is
+        # reached afterwards.
+        [int] $WindowStyle = 1
+    )
+    $shell = New-Object -ComObject WScript.Shell
+    $shortcut = $shell.CreateShortcut($Path)
+    $shortcut.TargetPath = $Target
+    if ($TargetArguments) { $shortcut.Arguments = ($TargetArguments -join ' ') }
+    $shortcut.WorkingDirectory = $ProjectDir
+    $shortcut.Description = 'Surtitle - voice-first agentic workbench'
+    $iconFile = Join-Path $ProjectDir 'src\surtitle\web\surtitle.ico'
+    if (Test-Path $iconFile) { $shortcut.IconLocation = "$iconFile,0" }
+    if ($WindowStyle -ne 1) { $shortcut.WindowStyle = $WindowStyle }
+    $shortcut.Save()
 }
 
 # --------------------------------------------------------------------------- #
@@ -202,29 +249,23 @@ if ((-not $NoVoice) -and (-not $NoModels)) {
 }
 
 # --------------------------------------------------------------------------- #
-# Start Menu shortcut
+# Start Menu and sign-in shortcuts
 # --------------------------------------------------------------------------- #
-# Per-user and outside Program Files, like everything else here: it is created
-# without elevation and removed by deleting one .lnk.
+# Per-user and outside Program Files, like everything else here: created without
+# elevation and removed by deleting one .lnk.
+$launcher = Join-Path $ProjectDir 'scripts\run.bat'
+
 if (-not $NoShortcut) {
     Write-Step 'Start Menu shortcut'
     $startMenu = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs'
     $shortcutPath = Join-Path $startMenu 'Surtitle.lnk'
-    $launcher = Join-Path $ProjectDir 'scripts\run.bat'
-    $iconFile = Join-Path $ProjectDir 'src\surtitle\web\surtitle.ico'
     try {
         if (-not (Test-Path $startMenu)) {
             New-Item -ItemType Directory -Path $startMenu -Force | Out-Null
         }
-        $shell = New-Object -ComObject WScript.Shell
-        $shortcut = $shell.CreateShortcut($shortcutPath)
-        $shortcut.TargetPath = $launcher
-        $shortcut.WorkingDirectory = $ProjectDir
-        $shortcut.Description = 'Surtitle - voice-first agentic workbench'
         # The application's own mark, so the entry is recognisable by sight
         # rather than being another generic script icon.
-        if (Test-Path $iconFile) { $shortcut.IconLocation = "$iconFile,0" }
-        $shortcut.Save()
+        New-SurtitleShortcut -Path $shortcutPath -Target $launcher
         Write-Info "created $shortcutPath"
         Write-Info 'pin it to the taskbar from there if you want it always to hand'
     } catch {
@@ -232,6 +273,39 @@ if (-not $NoShortcut) {
         # broken, so this is a warning and never a failure.
         Write-Warn "could not create the Start Menu shortcut: $($_.Exception.Message)"
     }
+}
+
+Write-Step 'Start when you sign in'
+$startupLink = Join-Path ([Environment]::GetFolderPath('Startup')) 'Surtitle.lnk'
+# -Startup and -NoStartup are the answers for an automated run. -Yes means "take
+# the defaults" and adding something to sign-in is not a default worth taking
+# silently, so it answers no.
+$enableStartup = $false
+if ($Startup) {
+    $enableStartup = $true
+} elseif ($NoStartup) {
+    $enableStartup = $false
+} elseif ((-not $Yes) -and (Test-CanPrompt)) {
+    $enableStartup = Ask-YesNo 'Start Surtitle when you sign in?' $false
+}
+try {
+    if ($enableStartup) {
+        # --no-browser: a browser window opening itself at every sign-in is
+        # intrusive. The app is ready behind the notification icon, and the
+        # Start Menu entry (or the icon) opens the UI when it is wanted.
+        New-SurtitleShortcut -Path $startupLink -Target $launcher `
+            -TargetArguments @('run', '--no-browser') -WindowStyle 7
+        Write-Info "Surtitle will start when you sign in: $startupLink"
+        Write-Info 'delete that shortcut to turn it off'
+    } elseif (Test-Path $startupLink) {
+        Remove-Item $startupLink -Force
+        Write-Info "removed the sign-in shortcut: $startupLink"
+    } else {
+        Write-Info 'Surtitle will not start automatically; start it from the Start Menu'
+    }
+} catch {
+    # Sign-in is a convenience; failing to arrange it is not a broken install.
+    Write-Warn "could not change the sign-in setting: $($_.Exception.Message)"
 }
 
 # --------------------------------------------------------------------------- #
@@ -248,9 +322,23 @@ Start it with:
 
     $ProjectDir\scripts\run.bat
 
+Double-click it, or use the Surtitle entry this installer added to the Start
+Menu. Passing it a command still works exactly as before:
+
+    run.bat doctor          check keys and engines
+    run.bat models list     what is installed
+
+To run this installer again without a terminal - to add the offline voice
+engines later, for example - double-click Setup.bat in $ProjectDir. It accepts
+the same switches:
+
+    Setup.bat -NoVoice      hosted voice only
+    Setup.bat -Update       update this installation
+    Setup.bat -Startup      start Surtitle when you sign in (or -NoStartup)
+
 Windows blocks PowerShell scripts by default (the policy is usually Restricted),
-so the batch launcher is the one that works untouched. From PowerShell, the same
-launcher with the policy bypassed:
+which is why the batch launchers are the ones that work untouched. From
+PowerShell, the same launcher with the policy bypassed:
 
     powershell -ExecutionPolicy Bypass -File $ProjectDir\scripts\run.ps1
 

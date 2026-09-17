@@ -11,6 +11,14 @@ setlocal EnableExtensions
 set "SCRIPT_DIR=%~dp0"
 cd /d "%SCRIPT_DIR%"
 
+REM --- no arguments means "start the app" ------------------------------------
+REM Double-clicking this file is the documented first run, and that passes no
+REM arguments at all. Forwarding an empty argument list to the CLI printed its
+REM help and exited, so the window flashed and vanished without starting
+REM anything. `run` is what a bare launch has always meant.
+set "DEFAULT_COMMAND="
+if "%~1"=="" set "DEFAULT_COMMAND=run"
+
 REM --- 1. bundled release runtime -------------------------------------------
 REM A Windows archive installs into the bundled runtime rather than a virtual
 REM environment, because a Windows venv records an absolute base path and so
@@ -18,7 +26,7 @@ REM cannot be moved once the archive is extracted.
 set "BUNDLED=%SCRIPT_DIR%venv\Scripts\python.exe"
 if not exist "%BUNDLED%" set "BUNDLED=%SCRIPT_DIR%python\python.exe"
 if exist "%BUNDLED%" (
-    "%BUNDLED%" -m surtitle %*
+    "%BUNDLED%" -m surtitle %DEFAULT_COMMAND% %*
     set "EXITCODE=%ERRORLEVEL%"
     goto :done
 )
@@ -67,14 +75,14 @@ if defined UV (
         set "EXITCODE=1"
         goto :done
     )
-    "%UV%" run --no-sync --quiet surtitle %*
+    "%UV%" run --no-sync --quiet surtitle %DEFAULT_COMMAND% %*
     set "EXITCODE=%ERRORLEVEL%"
     goto :done
 )
 
 REM --- 3. existing development virtual environment --------------------------
 if exist "%DEV_VENV%" (
-    "%DEV_VENV%" -m surtitle %*
+    "%DEV_VENV%" -m surtitle %DEFAULT_COMMAND% %*
     set "EXITCODE=%ERRORLEVEL%"
     goto :done
 )
