@@ -39,6 +39,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- A **taskbar notification icon on Windows**, with a menu that reports live
+  status, shows what the run has cost, and stops the server gracefully. It is on
+  by default for `surtitle run` (`--no-tray` turns it off, `--tray` forces it),
+  and `surtitle tray` attaches one to a server started any other way. The icon is
+  built directly on `Shell_NotifyIcon` through `ctypes`, so it adds no dependency
+  to the release archive.
+
+  `Status…` reports the address, uptime, model, voice engines, which credentials
+  are set, and what is stored; `Usage…` reports turns, tool calls, tokens in and
+  out, cache hits, and an estimated cost. The estimate prices the peak and
+  off-peak rates separately and applies the cache-hit discount, and shows no
+  money figure at all for a model with no published rate.
+- `GET /api/status`, the payload behind both the icon and the new
+  `surtitle status` command (`--json` for scripting).
+- `POST /api/shutdown`, which stops the server gracefully and refuses any request
+  that does not come from this machine.
+- `SURTITLE_PRICE_INPUT`, `SURTITLE_PRICE_CACHED_INPUT` and
+  `SURTITLE_PRICE_OUTPUT` to override the published per-million-token rates
+  without waiting for a release.
+- An application icon — a waveform on the brand blue — used for the tray, the
+  browser favicon and the Start Menu entry, regenerable with
+  `uv run python scripts/make_icon.py`.
+- `scripts/install.ps1` adds a Surtitle entry to the Start Menu for the current
+  user (`-NoShortcut` skips it). It is a per-user shortcut, so it still needs no
+  administrator rights.
 - Local, offline speech recognition and synthesis, with models that never leave
   the machine. Each direction — recognition and synthesis — independently
   chooses a hosted or local engine. See [`docs/VOICE.md`](docs/VOICE.md).
@@ -50,6 +75,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `tests.*` imports.
 
 ### Fixed
+
+- `run.bat`, `run.ps1` and `run.sh` now find a `uv` that is installed but not on
+  the current `PATH`. uv's installer updates the *user* `PATH`, which does not
+  affect the shell that ran it, so the documented "install uv, then run the
+  launcher" sequence failed in the same window — with `run.bat` then advising you
+  to install the uv you had just installed. All three launchers now also check
+  uv's documented install location (`%USERPROFILE%\.local\bin\uv.exe`,
+  `~/.local/bin/uv`), which is what `install.ps1` had always done.
+- The launchers find an existing `.venv` at the **checkout root**. They live in
+  `scripts/` in a checkout but at the archive root in a release, and they only
+  ever looked in their own directory — so `scripts\.venv` was checked and the
+  real `.venv` was not. The manual path in the README (`python -m venv .venv`,
+  `pip install -e .`, `run.bat`) reported "no Python environment was found" with
+  a working environment sitting right there.
+- A first run from a source checkout is no longer silent. It downloads the whole
+  dependency set, and `uv sync --quiet` gave no sign of progress for several
+  minutes — indistinguishable from the hang the user had just escaped. The sync
+  is verbose until a `.venv` exists, and quiet afterwards.
+- The "no Python environment was found" message now says which of the two
+  situations you are in and what to type. It also names `install.ps1` as the
+  one-step option, and `docs/WINDOWS.md` covers the `RemoteSigned` case where a
+  downloaded script still needs `Unblock-File`.
 
 - `scripts/run.sh` and `scripts/run.ps1` no longer remove the optional
   `voice-local` extra. A plain `uv sync` prunes anything the lock does not name,

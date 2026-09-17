@@ -33,6 +33,31 @@ function Fail([string] $Message) {
     exit 1
 }
 
+function Find-Uv {
+    # uv's installer updates the user PATH but not the environment of the shell
+    # that ran it, so a uv installed a moment ago is invisible to Get-Command in
+    # the very window that installed it. Its documented location is checked too,
+    # which is what makes "install uv, then run.ps1" work as written instead of
+    # failing with advice to install the thing that was just installed.
+    $command = Get-Command uv -ErrorAction SilentlyContinue
+    if ($command) { return $command.Source }
+    $fallback = Join-Path $env:USERPROFILE '.local\bin\uv.exe'
+    if (Test-Path $fallback) { return $fallback }
+    return $null
+}
+
+function Find-DevVenv {
+    # The launcher's own directory in a release archive; its parent in a source
+    # checkout, where .venv belongs and this file lives in scripts\.
+    foreach ($candidate in @(
+            (Join-Path $ScriptDir '.venv\Scripts\python.exe'),
+            (Join-Path $ScriptDir '..\.venv\Scripts\python.exe')
+        )) {
+        if (Test-Path $candidate) { return $candidate }
+    }
+    return $null
+}
+
 try {
     # A "fat" release archive carries the speech models inside it. Pointing the app
     # at that directory keeps an extracted archive fully offline: the models are
@@ -55,23 +80,42 @@ try {
         exit $LASTEXITCODE
     }
 
+    # Where a development virtual environment would be, if there is one.
+    #
+    # Two layouts have to be covered. In a release archive this file sits at the
+    # archive root, next to the bundled venv\ and python\. In a source checkout it
+    # lives in scripts\, and the README tells you to create .venv at the checkout
+    # root - so the directory to look in is the parent. Checking only the
+    # launcher's own directory is why an existing .venv still reported that no
+    # Python environment was found.
+    $devVenv = Find-DevVenv
+
     # --- 2. source checkout with uv ---------------------------------------
-    $uv = Get-Command uv -ErrorAction SilentlyContinue
+    $uv = Find-Uv
     if ($uv) {
-        Write-Host 'Syncing dependencies with uv...' -ForegroundColor DarkGray
         # --inexact matters: a plain `uv sync` prunes anything the lock does not
         # name, which silently deletes the optional voice-local extra on every
         # run. `uv run` then syncs again by default, so it has to be told not to.
-        & $uv.Source sync --inexact --quiet
+        #
+        # Quiet on a warm checkout, loud on a cold one: a first run pulls the
+        # whole dependency set, and several silent minutes are indistinguishable
+        # from a hang.
+        if ($devVenv) {
+            Write-Host 'Syncing dependencies with uv...' -ForegroundColor DarkGray
+            & $uv sync --inexact --quiet
+        } else {
+            Write-Host 'First run: fetching Python and dependencies.' -ForegroundColor DarkGray
+            Write-Host 'This takes a few minutes, and only happens once.' -ForegroundColor DarkGray
+            & $uv sync --inexact
+        }
         if ($LASTEXITCODE -ne 0) { Fail 'uv sync failed. Run "uv sync" to see the full output.' }
-        & $uv.Source run --no-sync --quiet surtitle @Arguments
+        & $uv run --no-sync --quiet surtitle @Arguments
         exit $LASTEXITCODE
     }
 
     # --- 3. existing development virtual environment ----------------------
-    $venv = Join-Path $ScriptDir '.venv\Scripts\python.exe'
-    if (Test-Path $venv) {
-        & $venv -m surtitle @Arguments
+    if ($devVenv) {
+        & $devVenv -m surtitle @Arguments
         exit $LASTEXITCODE
     }
 
@@ -80,10 +124,19 @@ Surtitle cannot start: no Python environment was found.
 
 This looks like a source checkout with nothing installed yet.
 
-Install uv (recommended - it fetches Python and dependencies for you):
+One command does everything - Python, dependencies, and the .venv:
+
+    powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1
+
+Or install uv yourself (it fetches Python and dependencies for you):
 
     powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
-    .\scripts\run.ps1
+
+uv unpacks into %USERPROFILE%\.local\bin and only joins the PATH of windows
+opened afterwards. This launcher looks there too, so either open a new window and
+run it again, or add it to this one:
+
+    $env:PATH = "$env:USERPROFILE\.local\bin;$env:PATH"
 
 Or create a virtual environment yourself:
 

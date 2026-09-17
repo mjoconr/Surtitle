@@ -13,11 +13,12 @@ from rich.table import Table
 
 from surtitle import __version__
 from surtitle.config import (
+    Settings,
     get_settings,
     reset_settings_cache,
     setup_logging,
 )
-from surtitle.platform_utils import find_free_port, readable_path
+from surtitle.platform_utils import find_free_port, human_bytes, is_windows, readable_path
 from surtitle.store.settings_store import SettingsStore, SettingsValidationError
 
 app = typer.Typer(
@@ -103,9 +104,16 @@ def run(
     strict_port: bool = typer.Option(
         False, "--strict-port", help="Fail instead of probing for a free port."
     ),
+    tray: bool = typer.Option(
+        None,
+        "--tray/--no-tray",
+        help="Show a taskbar icon with status and a stop button (Windows; on by default).",
+    ),
 ) -> None:
     """Start the server and open the UI."""
     import uvicorn
+
+    from surtitle.server import create_app
 
     store = _open_store()
     assert store is not None
@@ -174,15 +182,172 @@ def run(
 
         _open(scheme_host)
 
-    uvicorn.run(
-        "surtitle.server:create_app",
-        factory=True,
-        host=settings.host,
-        port=settings.port,
-        reload=reload,
-        log_config=None,
-        access_log=False,
+    from surtitle.local_api import clear_instance, write_instance
+
+    # Record where we landed, so `surtitle tray` and `surtitle status` can find
+    # this server even when the port was probed. Written before serving so the
+    # note is never missing while the socket is open.
+    write_instance(settings, host=settings.host, port=settings.port, version=__version__)
+
+    if reload:
+        # The reloader owns a child process, and the tray would outlive the
+        # thing it is watching every time a file changes, so this path is left
+        # alone. `--reload` is a development flag applied to a development
+        # server; the tray is for the people the app is for.
+        console.print("[dim]--reload supervises a child process; the tray icon is off.[/dim]")
+        try:
+            uvicorn.run(
+                "surtitle.server:create_app",
+                factory=True,
+                host=settings.host,
+                port=settings.port,
+                reload=True,
+                log_config=None,
+                access_log=False,
+            )
+        finally:
+            clear_instance(settings)
+        return
+
+    want_tray = tray if tray is not None else is_windows()
+    if want_tray and not is_windows():
+        console.print("[yellow]A taskbar icon is only available on Windows.[/yellow]")
+        want_tray = False
+
+    # Uvicorn's own server object, rather than `uvicorn.run`, so the tray's Stop
+    # item can flag a graceful shutdown: it drains in-flight requests and runs
+    # the lifespan teardown that closes sessions and the database. Terminating
+    # the process would skip all of that.
+    server: uvicorn.Server | None = None
+
+    def request_stop() -> None:
+        if server is not None:
+            server.should_exit = True
+
+    app = create_app(settings, on_shutdown=request_stop)
+    server = uvicorn.Server(
+        uvicorn.Config(
+            app,
+            host=settings.host,
+            port=settings.port,
+            log_config=None,
+            access_log=False,
+        )
     )
+
+    tray_icon = None
+    if want_tray:
+        from surtitle.tray import start_tray
+
+        tray_icon = start_tray(scheme_host, version=__version__)
+        if tray_icon is None:
+            console.print(
+                "[yellow]Could not add a taskbar icon; the server is running anyway.[/yellow]"
+            )
+        else:
+            # Windows 11 files a newly registered notification icon under the
+            # overflow arrow rather than on the taskbar itself, and the app has
+            # no supported way to promote it — that is the user's setting. So the
+            # one thing worth saying is where it went, once, at startup.
+            console.print(
+                "[dim]Surtitle is in the notification area. Windows puts a new icon "
+                "under the ^ arrow — drag it onto the taskbar to keep it in view.[/dim]"
+            )
+
+    try:
+        server.run()
+    finally:
+        if tray_icon is not None:
+            tray_icon.stop()
+        clear_instance(settings)
+
+
+def _local_settings() -> Settings:
+    """Settings for the commands that only need to find a running server.
+
+    Deliberately tolerant of a broken credentials file: being unable to read a
+    key is no reason to be unable to stop or inspect the process that is already
+    running.
+    """
+    store = _open_store(fail_when_broken=False)
+    return store.effective() if store is not None else get_settings()
+
+
+@app.command()
+def tray(
+    url: str = typer.Option(None, "--url", help="Server to attach to, e.g. http://127.0.0.1:8765."),
+) -> None:
+    """Show a taskbar icon for a running Surtitle (Windows).
+
+    `surtitle run` already shows one. This command exists for the case where the
+    server was started some other way — a script, a shortcut, another user's
+    session — and a status icon is still wanted.
+    """
+    if not is_windows():
+        console.print("[red]A taskbar icon is only available on Windows.[/red]")
+        raise typer.Exit(code=2)
+
+    from surtitle.local_api import find_instance
+    from surtitle.tray import start_tray
+
+    settings = _local_settings()
+    instance = find_instance(settings, url=url)
+    if instance is None:
+        console.print(
+            "[red]No running Surtitle found.[/red] Start one with [bold]surtitle run[/bold], "
+            "or name it with [bold]--url[/bold]."
+        )
+        raise typer.Exit(code=1)
+
+    icon = start_tray(instance.url, version=instance.version or __version__, live=True)
+    if icon is None:
+        console.print("[red]Windows refused the taskbar icon.[/red]")
+        raise typer.Exit(code=1)
+
+    console.print(
+        f"Tray icon attached to [bold]{instance.url}[/bold]. "
+        "Use its menu to stop the server, or press Ctrl+C to close just the icon."
+    )
+    try:
+        while not icon.server_gone:
+            # A timed wait rather than a blocking one so Ctrl+C is acted on
+            # immediately rather than after the server next changes state.
+            icon.wait(timeout=1.0)
+    except KeyboardInterrupt:
+        console.print("\n[dim]Tray icon closed. The server is still running.[/dim]")
+    finally:
+        icon.stop()
+
+
+@app.command()
+def status(
+    url: str = typer.Option(None, "--url", help="Server to ask, e.g. http://127.0.0.1:8765."),
+    as_json: bool = typer.Option(False, "--json", help="Print the raw payload for scripting."),
+) -> None:
+    """Report what a running Surtitle is doing, or say that none is running."""
+    import json as _json
+
+    from surtitle.local_api import fetch_status, find_instance
+
+    settings = _local_settings()
+    instance = find_instance(settings, url=url)
+    if instance is None:
+        console.print("[yellow]No running Surtitle was found.[/yellow]")
+        raise typer.Exit(code=1)
+
+    payload = fetch_status(instance.url)
+    if payload is None:
+        console.print(f"[red]{instance.url} stopped answering.[/red]")
+        raise typer.Exit(code=1)
+
+    if as_json:
+        sys.stdout.write(_json.dumps(payload, indent=2, sort_keys=True) + "\n")
+        return
+
+    from surtitle.tray import format_status, format_usage
+
+    console.print(Panel(format_status(payload), title="Status", border_style="cyan"))
+    console.print(Panel(format_usage(payload), title="Usage", border_style="cyan"))
 
 
 @app.command()
@@ -244,15 +409,6 @@ models_app = typer.Typer(
 app.add_typer(models_app, name="models")
 
 
-def _human_bytes(count: int) -> str:
-    size = float(count)
-    for unit in ("B", "KB", "MB", "GB"):
-        if size < 1024 or unit == "GB":
-            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
-        size /= 1024
-    return f"{size:.1f} GB"
-
-
 def _model_table(rows: list) -> Table:
     table = Table(box=None)
     table.add_column("Model", style="cyan")
@@ -261,7 +417,7 @@ def _model_table(rows: list) -> Table:
     table.add_column("Status")
     for item in rows:
         status = "[green]installed[/green]" if item.present else "[yellow]missing[/yellow]"
-        table.add_row(item.key, item.kind, _human_bytes(item.total_bytes), status)
+        table.add_row(item.key, item.kind, human_bytes(item.total_bytes), status)
     return table
 
 
@@ -335,7 +491,7 @@ def models_download(
         return
 
     total = sum(asset.total_bytes for asset in todo)
-    console.print(f"Installing {len(todo)} model(s), {_human_bytes(total)} on disk, into {where}:")
+    console.print(f"Installing {len(todo)} model(s), {human_bytes(total)} on disk, into {where}:")
     for asset in todo:
         console.print(f"  · {asset.key} — {asset.label}")
 
@@ -351,7 +507,7 @@ def models_download(
             def on_progress(update, _status=status, _last=last, _key=key) -> None:
                 if update.stage == "download" and update.total:
                     pct = 100 * update.received / update.total
-                    line = f"{_key}: {pct:5.1f}% ({_human_bytes(update.received)})"
+                    line = f"{_key}: {pct:5.1f}% ({human_bytes(update.received)})"
                 else:
                     line = f"{_key}: {update.message or update.stage}"
                 if line != _last["line"]:

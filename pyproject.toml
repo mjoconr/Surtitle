@@ -129,3 +129,7 @@ ignore = ["B008"] # Typer uses function calls in argument defaults by design
 "src/surtitle/core/agent.py" = ["BLE001"]
 "src/surtitle/core/session.py" = ["BLE001"]
 "src/surtitle/server.py" = ["BLE001"]
+# The tray's message pump runs on a thread whose stack Windows owns: an
+# exception escaping the window procedure would take the process down instead of
+# surfacing anywhere, so every failure is caught and recorded.
+"src/surtitle/win32_tray.py" = ["BLE001"]

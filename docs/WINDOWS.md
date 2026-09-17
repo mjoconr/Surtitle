@@ -18,6 +18,52 @@ alongside each release so you can verify the download.
 
 The console window that opens is the server. Closing it stops the app.
 
+### The taskbar icon
+
+While the server runs, a Surtitle icon sits in the notification area. Left-click or
+double-click it to open the app in your browser; right-click it for:
+
+| Item | What it does |
+|---|---|
+| **Open Surtitle** | Opens the app in your default browser |
+| **Status…** | Address, uptime, model, which voice engines are in use, whether each key is set, how many conversations are live, and what is in the database |
+| **Usage…** | Turns answered, tool calls, tokens in and out, cache hits, and an estimated cost for this run |
+| **Stop Surtitle** | Graceful shutdown — the same as Ctrl+C in the console, not a kill |
+
+The two lines at the top of the menu are the live state, not commands: how many
+conversations are open, how many turns have been answered, tokens used, estimated
+spend, and uptime.
+
+`--no-tray` turns the icon off; `--tray` forces it on (it is on by default on
+Windows). If the server was started by something other than `surtitle run`, attach
+an icon to it with:
+
+```powershell
+run.bat tray                              # find the running server
+run.bat tray --url http://127.0.0.1:9000  # or name it
+```
+
+Windows files a **newly registered** notification icon under the overflow arrow
+(`^`) rather than on the taskbar itself. That is a per-icon user setting, not
+something the application can change, so on first run look under `^`, then drag
+Surtitle onto the taskbar — or turn it on in **Settings → Personalization →
+Taskbar → Other system tray icons**. The console says the same thing once at
+startup.
+
+**What the cost estimate is.** `Usage…` prices tokens against DeepSeek's
+published rates, including the peak/off-peak difference and the cache-hit
+discount, and it says which date those rates were checked. If the model has no
+published rate in this build, it shows tokens and *no* money figure rather than a
+confident `$0.00`. To correct the rates without waiting for a release, set
+`SURTITLE_PRICE_INPUT`, `SURTITLE_PRICE_CACHED_INPUT` and `SURTITLE_PRICE_OUTPUT`
+(USD per million tokens) in the environment or `.env`.
+
+**Stop needs a local connection.** The tray talks to the server over
+`127.0.0.1`, and `POST /api/shutdown` refuses anything that is not from this
+machine. Binding the app to a LAN address (`--host 0.0.0.0`) exposes the UI
+itself, which has no authentication — the stop button is not the weak link, but
+it is not a remote-control endpoint either.
+
 ### What is in the archive
 
 | Path | Purpose |
@@ -58,6 +104,11 @@ powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
 `run.ps1` and `run.bat` both prefer, in order: a bundled runtime, `uv` from a source
 checkout, then an existing `.venv`.
 
+Both look for `uv` on `PATH` *and* in `%USERPROFILE%\.local\bin`, where uv's own
+installer puts it. That matters immediately after installing uv: the installer
+updates your user `PATH`, which does not change the window you are already in, so
+running the launcher in that same window works without opening a new one.
+
 If PowerShell refuses to run the script, use:
 
 ```powershell
@@ -85,7 +136,11 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1 -Yes
 .\scripts\install.ps1 -Check
 ```
 
-The script is idempotent: running it twice is a fast no-op.
+The script is idempotent: running it twice is a fast no-op. It also adds a
+Surtitle entry to the Start Menu for the current user, pointing at `run.bat` and
+carrying the app's own icon, so it can be pinned to the taskbar or the Start Menu
+without going through the extracted folder. `-NoShortcut` skips that step, and
+removing it is deleting one `.lnk` — nothing outside your profile is touched.
 
 **Why updating is cheap.** The code and its virtual environment live in the
 checkout; the speech models live in `%LOCALAPPDATA%\Surtitle\models`. Updating
@@ -239,8 +294,47 @@ the API is in flux. If you want it, the cross-compile path above is proven to wo
 ## Troubleshooting
 
 **"no Python environment was found"**
-The archive was not fully extracted, or `run.bat` was run from inside the zip preview.
-Extract properly and check that `venv\Scripts\python.exe` exists.
+Two very different causes, and the message now tells them apart.
+
+*From a release archive:* it was not fully extracted, or `run.bat` was run from
+inside the zip preview. Extract properly and check that
+`venv\Scripts\python.exe` exists.
+
+*From a source checkout:* uv is missing, or it is installed but invisible to the
+window you are in. uv's installer adds `%USERPROFILE%\.local\bin` to your **user
+PATH**, which only affects windows opened *afterwards* — so a uv installed one
+command ago cannot be found by `where uv` in the very window that installed it.
+The launchers look in that directory as well, so either works:
+
+```powershell
+# A new window picks the PATH up:
+.\scripts\run.bat
+
+# Or add it to this one:
+$env:PATH = "$env:USERPROFILE\.local\bin;$env:PATH"
+.\scripts\run.bat
+```
+
+Installing in one step avoids the question entirely, and needs no PATH at all:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1
+```
+
+**PowerShell still refuses a script after `Set-ExecutionPolicy RemoteSigned`**
+`RemoteSigned` runs local scripts but requires a signature on ones carrying the
+mark-of-the-web, which is what a script extracted from a downloaded zip has. The
+file is not untrusted — you downloaded it — so unblock it, or bypass the policy
+for one command:
+
+```powershell
+Unblock-File .\scripts\install.ps1
+# or
+powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1
+```
+
+`run.bat` is never affected by any of this: batch files are not subject to the
+execution policy.
 
 **"Port 8765 is in use"**
 The app probes forward and reports which port it chose. To pin one:

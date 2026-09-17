@@ -28,6 +28,7 @@ from surtitle.core.agent import AgentLoop, ApprovalBroker
 from surtitle.core.events import Event, EventKind, SessionState
 from surtitle.core.speak import Chunk, ChunkKind
 from surtitle.llm.deepseek import ChatMessage, DeepSeekClient
+from surtitle.stats import RunStats, is_peak, resolve_price
 from surtitle.store.db import Store
 from surtitle.tools.environment import environment_summary
 from surtitle.tools.project_config import load_project_config
@@ -131,6 +132,9 @@ class Session:
     registry: Any = None
     mcp_manager: Any = None
     project_config: Any = None
+    # Process-wide usage counters, owned by the app state. Optional so a session
+    # built directly in a test does not have to supply one.
+    stats: RunStats | None = None
 
     # --- lifecycle -------------------------------------------------------
     def rebind(
@@ -815,15 +819,37 @@ class Session:
         """Send a control-flow event, mirroring only what the UI needs."""
         if event.kind.value.startswith("_"):
             return
+        self._count(event)
         self.events += 1
         event.seq = self.events
         await self._outbox.put(event)
 
     async def _emit_side_channel(self, event: Event) -> None:
         """Receive thinking and usage events that are not part of the turn stream."""
+        self._count(event)
         self.events += 1
         event.seq = self.events
         await self._outbox.put(event)
+
+    def _count(self, event: Event) -> None:
+        """Feed the run's usage counters.
+
+        Called from both emit paths because neither sees everything: usage
+        blocks arrive on the side channel, tool calls and turn boundaries on the
+        turn stream. Counting in the agent loop instead would put the counters
+        behind a second call site in a second module for no gain, and counting
+        in the browser would lose a turn the user never watched.
+        """
+        if self.stats is None:
+            return
+        if event.kind is EventKind.USAGE:
+            self.stats.record_usage(
+                event.data,
+                price=resolve_price(self.settings.deepseek_model, self.settings),
+                peak=is_peak(),
+            )
+        else:
+            self.stats.record_event(event.kind)
 
     def _build_history(self) -> list[ChatMessage]:
         """Rebuild model context from the stored transcript.

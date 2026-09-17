@@ -10,12 +10,22 @@ import threading
 import webbrowser
 from pathlib import Path
 
-__all__ = ["find_free_port", "is_windows", "open_browser", "port_is_free"]
+__all__ = ["find_free_port", "human_bytes", "is_windows", "open_browser", "port_is_free"]
 
 
 def is_windows() -> bool:
     """True when running on Windows."""
     return sys.platform == "win32"
+
+
+def human_bytes(count: float) -> str:
+    """Compact size rendering, e.g. ``812 B``, ``4.1 KB``, ``1.4 GB``."""
+    size = float(count)
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024 or unit == "GB":
+            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} GB"
 
 
 def port_is_free(host: str, port: int) -> bool:

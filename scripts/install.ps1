@@ -18,6 +18,9 @@
       2. Creates a virtual environment and installs Surtitle into it.
       3. Optionally installs the `voice-local` extra (sherpa-onnx) and downloads
          the speech models into the *app data* directory.
+      4. Adds a Surtitle entry to the Start Menu for this user, pointing at the
+         launcher. Per-user, so it needs no administrator rights and touches
+         nothing outside the profile; -NoShortcut skips it.
 
     Step 3's split matters for updates. The code lives in this folder; the models
     live under %LOCALAPPDATA%\Surtitle\models. Updating or replacing the code
@@ -45,7 +48,9 @@ param(
     # Report what is installed and missing; change nothing.
     [switch] $Check,
     # Answer yes to the model-download confirmation.
-    [switch] $Yes
+    [switch] $Yes,
+    # Do not add a Surtitle entry to the Start Menu.
+    [switch] $NoShortcut
 )
 
 $ErrorActionPreference = 'Stop'
@@ -197,6 +202,39 @@ if ((-not $NoVoice) -and (-not $NoModels)) {
 }
 
 # --------------------------------------------------------------------------- #
+# Start Menu shortcut
+# --------------------------------------------------------------------------- #
+# Per-user and outside Program Files, like everything else here: it is created
+# without elevation and removed by deleting one .lnk.
+if (-not $NoShortcut) {
+    Write-Step 'Start Menu shortcut'
+    $startMenu = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs'
+    $shortcutPath = Join-Path $startMenu 'Surtitle.lnk'
+    $launcher = Join-Path $ProjectDir 'scripts\run.bat'
+    $iconFile = Join-Path $ProjectDir 'src\surtitle\web\surtitle.ico'
+    try {
+        if (-not (Test-Path $startMenu)) {
+            New-Item -ItemType Directory -Path $startMenu -Force | Out-Null
+        }
+        $shell = New-Object -ComObject WScript.Shell
+        $shortcut = $shell.CreateShortcut($shortcutPath)
+        $shortcut.TargetPath = $launcher
+        $shortcut.WorkingDirectory = $ProjectDir
+        $shortcut.Description = 'Surtitle - voice-first agentic workbench'
+        # The application's own mark, so the entry is recognisable by sight
+        # rather than being another generic script icon.
+        if (Test-Path $iconFile) { $shortcut.IconLocation = "$iconFile,0" }
+        $shortcut.Save()
+        Write-Info "created $shortcutPath"
+        Write-Info 'pin it to the taskbar from there if you want it always to hand'
+    } catch {
+        # A Start Menu that cannot be written does not make the installation
+        # broken, so this is a warning and never a failure.
+        Write-Warn "could not create the Start Menu shortcut: $($_.Exception.Message)"
+    }
+}
+
+# --------------------------------------------------------------------------- #
 # Verify, then say what to do next
 # --------------------------------------------------------------------------- #
 Write-Step 'Verifying'
@@ -221,6 +259,9 @@ Then, in the app:
     want hosted voice.
   - Settings -> Voice: set Speech-to-text and Text-to-speech to "local" to use the
     downloaded models - no key, no network.
+
+While it runs, a Surtitle icon sits in the taskbar notification area. Right-click
+it for Status, Usage and Stop; the console window still works the same way.
 
 Useful commands:
 

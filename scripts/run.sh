@@ -31,6 +31,21 @@ info() { printf '%s\n' "${DIM}$*${RESET}"; }
 # --------------------------------------------------------------------------- #
 # Locate an interpreter: bundled release first, then uv, then system python.
 # --------------------------------------------------------------------------- #
+# uv's installer updates the shell profile but not the environment of the shell
+# that ran it, so a uv installed a moment ago is invisible to `command -v` in the
+# very terminal that installed it. Its documented locations are checked too,
+# which is what makes "install uv, then run.sh" work as written.
+find_uv() {
+  if command -v uv >/dev/null 2>&1; then
+    command -v uv
+    return 0
+  fi
+  for candidate in "$HOME/.local/bin/uv" "${CARGO_HOME:-$HOME/.cargo}/bin/uv"; do
+    [ -x "$candidate" ] && { printf '%s' "$candidate"; return 0; }
+  done
+  return 1
+}
+
 find_bundled_python() {
   for candidate in \
     "$SCRIPT_DIR/venv/bin/python" \
@@ -42,6 +57,25 @@ find_bundled_python() {
   done
   return 1
 }
+
+# Where a development virtual environment would be, if there is one.
+#
+# Two layouts have to be covered. In a release archive this script sits at the
+# archive root, next to venv/ and python/. In a source checkout it lives in
+# scripts/, and .venv belongs at the checkout root - so the parent directory is
+# the one to look in. Checking only the launcher's own directory is why an
+# existing .venv still reported that no Python environment was found.
+find_dev_python() {
+  for candidate in \
+    "$SCRIPT_DIR/.venv/bin/python" \
+    "$SCRIPT_DIR/../.venv/bin/python"
+  do
+    [ -x "$candidate" ] && { printf '%s' "$candidate"; return 0; }
+  done
+  return 1
+}
+
+DEV_PYTHON="$(find_dev_python || true)"
 
 if BUNDLED_PYTHON="$(find_bundled_python)"; then
   info "Using the bundled Python runtime."
@@ -63,21 +97,31 @@ if [ -z "${SURTITLE_MODELS_DIR:-}" ] && [ -d "$SCRIPT_DIR/models" ]; then
 fi
 
 # Not a release archive: bootstrap from source.
-if command -v uv >/dev/null 2>&1; then
-  info "Syncing dependencies with uv…"
+if UV="$(find_uv)"; then
   # --inexact matters: a plain `uv sync` prunes anything the lock does not name,
   # which silently deletes the optional voice-local extra on every run. `uv run`
   # then syncs again by default, so it has to be told not to as well.
-  if ! uv sync --inexact --quiet; then
+  #
+  # Quiet on a warm checkout, loud on a cold one: a first run pulls the whole
+  # dependency set, and several silent minutes are indistinguishable from a hang.
+  if [ -n "$DEV_PYTHON" ]; then
+    info "Syncing dependencies with uv…"
+    QUIET="--quiet"
+  else
+    info "First run: fetching Python and dependencies."
+    info "This takes a few minutes, and only happens once."
+    QUIET=""
+  fi
+  if ! "$UV" sync --inexact ${QUIET:+"$QUIET"}; then
     die "uv sync failed. Run 'uv sync' yourself to see the full output."
   fi
-  exec uv run --no-sync --quiet surtitle "$@"
+  exec "$UV" run --no-sync --quiet surtitle "$@"
 fi
 
-if [ -x "$SCRIPT_DIR/.venv/bin/python" ]; then
+if [ -n "$DEV_PYTHON" ]; then
   # An existing development venv is enough to run.
   info "Using the existing .venv."
-  exec "$SCRIPT_DIR/.venv/bin/python" -m surtitle "$@"
+  exec "$DEV_PYTHON" -m surtitle "$@"
 fi
 
 printf '%s\n' "${RED}Surtitle cannot start: no Python environment found.${RESET}" >&2
@@ -88,6 +132,12 @@ This looks like a source checkout with nothing installed yet.
 Either install uv (recommended — it handles Python and dependencies for you):
 
     curl -LsSf https://astral.sh/uv/install.sh | sh
+
+uv unpacks into ~/.local/bin and only joins the PATH of shells started
+afterwards. This launcher looks there too, so either open a new terminal and run
+this again, or add it to this one:
+
+    export PATH="$HOME/.local/bin:$PATH"
     ./scripts/run.sh
 
 Or create a virtual environment yourself:

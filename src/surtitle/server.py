@@ -18,12 +18,14 @@ continuous and base64 would inflate it by a third for no benefit.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 import logging
 import os
 import re
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +37,7 @@ from fastapi import (
     File,
     Form,
     HTTPException,
+    Request,
     UploadFile,
     WebSocket,
     WebSocketDisconnect,
@@ -47,6 +50,7 @@ from surtitle.config import Settings, get_settings, setup_logging
 from surtitle.core.events import ClientCommand, CommandKind, EventKind
 from surtitle.core.session import Session, SessionManager, decode_client_frame
 from surtitle.llm.deepseek import DeepSeekClient
+from surtitle.stats import RunStats
 from surtitle.store.db import Store
 from surtitle.store.settings_store import (
     PROVIDER_SPECS,
@@ -124,12 +128,22 @@ def _unique_path(directory: Path, filename: str) -> Path:
 class AppState:
     """Process-wide resources shared by the HTTP and WebSocket routes."""
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(
+        self, settings: Settings, *, on_shutdown: Callable[[], None] | None = None
+    ) -> None:
         self.settings = settings
         self.store = Store(settings.db_path)
         self.settings_store = SettingsStore(settings)
         self.deepseek = DeepSeekClient(settings)
         self.sessions = SessionManager()
+        # Usage counters for this process. Owned here rather than by a session
+        # because they outlive any one conversation and are what ``/api/status``
+        # and the tray icon report.
+        self.stats = RunStats()
+        # How ``POST /api/shutdown`` stops the server. Set by whoever owns the
+        # uvicorn Server object; when it is unset the endpoint refuses, so a
+        # create_app_for() test app can never signal a process it does not own.
+        self.on_shutdown = on_shutdown
         # Re-apply stored preferences and credentials onto the live settings.
         self.settings_store.effective()
 
@@ -177,6 +191,71 @@ def build_api(state: AppState) -> APIRouter:
             "sessions": state.sessions.count,
             "data_dir": str(settings.data_dir),
         }
+
+    @api.get("/status")
+    async def status() -> dict[str, Any]:
+        """Everything the tray icon and ``surtitle status`` need, in one call.
+
+        A superset of ``/api/health``: that endpoint answers "is this configured
+        and serving", which the UI polls, while this one also answers "what has
+        this process done", which is what a taskbar tooltip can show. It is a
+        separate route rather than more fields on ``/health`` because the two
+        have different audiences and different costs — this one reads the
+        database.
+
+        No credential value may ever appear here. Only whether one is set.
+        """
+        settings = state.settings
+        usage = state.stats.snapshot(model=settings.deepseek_model)
+        return {
+            "app": "Surtitle",
+            "version": __version__,
+            "pid": os.getpid(),
+            "host": settings.host,
+            "port": settings.port,
+            "url": f"http://{settings.host}:{settings.port}",
+            "started_at": usage["started_at"],
+            "data_dir": str(settings.data_dir),
+            "model": settings.deepseek_model,
+            "voice_enabled": settings.voice_enabled,
+            "voice_backends": {
+                "stt": settings.stt_backend,
+                "tts": settings.tts_backend,
+            },
+            "deepseek_configured": bool(settings.deepseek_key()),
+            "deepgram_configured": bool(settings.deepgram_key()),
+            "sessions": state.sessions.count,
+            "usage": usage,
+            "storage": {
+                **state.store.counts(),
+                "db_bytes": state.store.size_bytes(),
+            },
+        }
+
+    @api.post("/shutdown")
+    async def shutdown(request: Request) -> JSONResponse:
+        """Stop the server, at the request of the tray icon.
+
+        Loopback only. The default binding is ``127.0.0.1`` and the UI has no
+        authentication at all, so a server deliberately exposed to a network is
+        already anyone's to drive; this endpoint must not be the thing that
+        turns "someone can read your conversations" into "someone can stop your
+        agent mid-turn". A request from anywhere but this machine is refused
+        even though the app would otherwise have served it.
+
+        Returns 503 when nothing is wired to stop: tests build the app without a
+        uvicorn server behind it, and answering "stopped" there would be a lie.
+        """
+        client = request.client.host if request.client else ""
+        if client not in {"127.0.0.1", "::1", "localhost"}:
+            return _error(403, "shutdown is only allowed from this machine")
+        if state.on_shutdown is None:
+            return _error(503, "this server was not started with a stop handler")
+        log.info("shutdown requested by %s", client)
+        # Deferred by one loop turn so this response is flushed before the
+        # server begins closing: the caller has to learn that it worked.
+        asyncio.get_running_loop().call_later(0.05, state.on_shutdown)
+        return JSONResponse({"stopping": True})
 
     @api.get("/models")
     async def local_models() -> dict[str, Any]:
@@ -730,6 +809,7 @@ def build_ws(state: AppState) -> APIRouter:
                 settings=state.settings_store.effective(),
                 store=state.store,
                 deepseek=state.deepseek,
+                stats=state.stats,
                 send=lambda payload: _safe_send(websocket, payload),
                 send_audio=lambda audio: _safe_send_bytes(websocket, bytes([_OP_AUDIO_IN]) + audio),
             )
@@ -897,13 +977,23 @@ async def _safe_send_bytes(websocket: WebSocket, data: bytes) -> None:
         await websocket.send_bytes(data)
 
 
-def create_app() -> FastAPI:
-    """Application factory. Uvicorn is pointed at this by name."""
-    settings = get_settings()
+def create_app(
+    settings: Settings | None = None,
+    *,
+    on_shutdown: Callable[[], None] | None = None,
+) -> FastAPI:
+    """Application factory. Uvicorn is pointed at this by name.
+
+    Called with no arguments by ``uvicorn --reload``, which resolves it from a
+    string; the command line calls it directly so the app it builds is the one
+    whose settings were already adjusted (port, voice) and so ``on_shutdown``
+    can stop the very server object that is running it.
+    """
+    settings = settings or get_settings()
     setup_logging(settings)
     settings.ensure_data_dir()
 
-    state = AppState(settings)
+    state = AppState(settings, on_shutdown=on_shutdown)
 
     @contextlib.asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -940,10 +1030,14 @@ def create_app() -> FastAPI:
     return app
 
 
-def create_app_for(settings: Settings) -> FastAPI:
+def create_app_for(
+    settings: Settings,
+    *,
+    on_shutdown: Callable[[], None] | None = None,
+) -> FastAPI:
     """Factory used by tests, which need a scoped data directory."""
     app = FastAPI(title="Surtitle", version=__version__, docs_url=None, redoc_url=None)
-    state = AppState(settings)
+    state = AppState(settings, on_shutdown=on_shutdown)
     app.state.app_state = state
     app.include_router(build_api(state))
     app.include_router(build_ws(state))

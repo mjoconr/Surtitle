@@ -523,3 +523,32 @@ def _drain(session) -> list:
     while not session._outbox.empty():
         events.append(session._outbox.get_nowait())
     return events
+
+
+class TestIcon:
+    """The mark shipped to the browser, the taskbar and the Start Menu.
+
+    The tray icon is loaded from this file by the shell, so a missing or
+    malformed icon is not a cosmetic problem: it is an icon that silently does
+    not appear. The sizes have to be inside it, not generated on the fly.
+    """
+
+    def test_the_browser_is_told_which_icon_to_use(self, html):
+        assert 'rel="icon"' in html
+        assert "/static/surtitle.ico" in html
+
+    def test_the_icon_is_shipped_next_to_the_assets_it_is_served_with(self):
+        assert (WEB / "surtitle.ico").is_file(), "the tray and the favicon need this file"
+
+    def test_the_icon_contains_every_size_windows_asks_for(self):
+        import struct
+
+        raw = (WEB / "surtitle.ico").read_bytes()
+        reserved, kind, count = struct.unpack("<HHH", raw[:6])
+        assert (reserved, kind) == (0, 1), "not an icon file"
+        sizes = set()
+        for index in range(count):
+            entry = 6 + index * 16
+            width, height = raw[entry], raw[entry + 1]
+            sizes.add((width or 256, height or 256))
+        assert {(16, 16), (32, 32), (48, 48), (256, 256)} <= sizes

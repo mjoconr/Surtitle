@@ -43,6 +43,50 @@ realtime channel from the same app removes a whole class of problems: no second
 process to supervise, no port pair to keep in sync, and no `multiprocessing` fork
 (which is a real hazard on macOS when audio libraries are involved).
 
+### Status, and the Windows tray icon
+
+`GET /api/status` is the one place that answers "what is this process doing".
+`/api/health` remains the cheap route the UI polls for configuration state;
+`/api/status` adds the run counters and reads the database, so the two are kept
+apart rather than growing one endpoint with two audiences and two costs.
+
+The counters live in `stats.RunStats`, owned by `AppState`, and are written from
+the two emit paths in `Session` — the turn stream and the side channel. Those two
+are the only places that see everything: usage blocks arrive on the side channel
+while tool calls and turn boundaries arrive on the turn stream, so counting in
+one of them would silently miss half the run. Cost is accumulated per completion
+against the rate in force at that moment, because DeepSeek publishes peak and
+off-peak rates that differ by a factor of two; a run priced entirely at one of
+them would be wrong by 100% half the time. A model with no rate card makes the
+whole run report `priced: false`, and the UI then shows tokens with no money
+figure, because a confident `$0.00` is a worse answer than none.
+
+The tray icon (`tray.py`, `win32_tray.py`) is a *client* of that endpoint rather
+than a second reader of the process's state. It polls over loopback on its own
+thread, which costs one HTTP round trip every two seconds and buys two things:
+the standalone `surtitle tray` command and the icon started by `surtitle run`
+cannot disagree, and the icon never touches the event loop the agent is using.
+
+There is no dependency behind it. `win32_tray.py` calls `Shell_NotifyIcon`
+through `ctypes` — a registered window class, a hidden window, a message loop on
+a dedicated thread, a popup menu built fresh on every right-click, and a timer
+that repaints the tooltip. That is a few hundred lines, and it is the difference
+between an archive that works offline with nothing installed and one that carries
+a GUI toolkit for a status icon. Every Win32 entry point is given explicit
+`argtypes`/`restype` (ctypes otherwise assumes 32-bit `int` and truncates
+handles) and the window procedure is held on the icon object for the window's
+lifetime (Windows keeps the bare function pointer).
+
+Stopping is `POST /api/shutdown`, refused unless the connection comes from this
+machine. The route does not signal the process: the command line owns the
+`uvicorn.Server` object and hands the app a callback that sets `should_exit`, so
+a tray-initiated stop drains in-flight requests and runs the lifespan teardown
+that closes sessions and the database — the same path as Ctrl+C. The running
+server also writes a small `server.json` into the data directory so a separately
+started tray can find a probed port and confirm the process is alive; the file is
+a hint, and every read is confirmed against the server before anything is offered
+in a menu.
+
 ### Why audio never touches Python
 
 Microphone capture and speaker playback both live in the browser:

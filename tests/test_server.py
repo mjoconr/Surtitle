@@ -7,6 +7,7 @@ root. The rest covers the CRUD the UI depends on.
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 import httpx
@@ -56,6 +57,74 @@ class TestHealth:
     async def test_health_reports_which_engines_are_selected(self, client):
         body = (await client.get("/api/health")).json()
         assert body["voice_backends"] == {"stt": "deepgram", "tts": "deepgram"}
+
+
+class TestStatus:
+    """The endpoint behind the tray icon and ``surtitle status``."""
+
+    async def test_reports_the_run(self, client):
+        response = await client.get("/api/status")
+        assert response.status_code == 200
+        body = response.json()
+        assert {"version", "pid", "url", "model", "sessions", "usage", "storage"} <= set(body)
+        assert body["usage"]["uptime_seconds"] >= 0
+        assert body["pid"] > 0
+
+    async def test_reports_what_is_stored(self, client, tmp_path):
+        project = await client.post("/api/projects", json={"name": "P", "root": str(tmp_path)})
+        project_id = project.json()["id"]
+        await client.post(f"/api/projects/{project_id}/sessions", json={"title": "T"})
+        body = (await client.get("/api/status")).json()
+        assert body["storage"]["projects"] == 1
+        assert body["storage"]["conversations"] == 1
+        assert body["storage"]["db_bytes"] > 0
+
+    async def test_never_leaks_a_key(self, client):
+        body = (await client.get("/api/status")).text
+        assert "sk-test-deepseek" not in body
+        assert "dg-test-deepgram" not in body
+
+
+class TestShutdown:
+    """Stopping the server, and who is allowed to ask for it."""
+
+    async def test_refuses_when_nothing_can_stop_it(self, client):
+        """A test app has no uvicorn server behind it, so it must not pretend."""
+        response = await client.post("/api/shutdown")
+        assert response.status_code == 503
+
+    async def test_a_local_request_stops_the_server(self, settings):
+        stopped: list[bool] = []
+        app = create_app_for(settings, on_shutdown=lambda: stopped.append(True))
+        transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 51000))
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+            response = await http.post("/api/shutdown")
+            assert response.status_code == 200
+            assert response.json()["stopping"] is True
+            # Deferred by a loop turn so this response is flushed first: the
+            # caller has to be told it worked before the server closes.
+            await asyncio.sleep(0.15)
+        assert stopped == [True]
+        await app.state.app_state.aclose()
+
+    async def test_a_remote_request_is_refused(self, settings):
+        """Exposing the port to a network must not hand it a stop button."""
+        app = create_app_for(settings, on_shutdown=lambda: None)
+        transport = httpx.ASGITransport(app=app, client=("10.211.55.9", 40123))
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+            response = await http.post("/api/shutdown")
+        assert response.status_code == 403
+        await app.state.app_state.aclose()
+
+    async def test_a_remote_request_cannot_stop_even_with_a_handler_wired(self, settings):
+        stopped: list[bool] = []
+        app = create_app_for(settings, on_shutdown=lambda: stopped.append(True))
+        transport = httpx.ASGITransport(app=app, client=("192.168.1.20", 40123))
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+            await http.post("/api/shutdown")
+        await asyncio.sleep(0.1)
+        assert stopped == []
+        await app.state.app_state.aclose()
 
 
 class TestLocalModels:

@@ -36,6 +36,12 @@ sentence while the model is still generating. You hear the conclusion, not the l
 The archive bundles its own Python and every dependency, so nothing is downloaded
 on first run and no system Python is required.
 
+While it runs, a Surtitle icon sits in the Windows notification area: right-click
+it for live status, an estimate of what this run has cost in tokens and money, and
+**Stop Surtitle**, which shuts the server down the same way Ctrl+C does. Windows
+files a new icon under the `^` arrow; drag it onto the taskbar to keep it in view.
+See [`docs/WINDOWS.md`](docs/WINDOWS.md#the-taskbar-icon).
+
 To install from source instead, or to add the offline speech engines later:
 
 ```powershell

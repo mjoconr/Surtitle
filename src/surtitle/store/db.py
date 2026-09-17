@@ -346,6 +346,40 @@ class Store:
         with self._lock:
             self._conn.close()
 
+    def counts(self) -> dict[str, int]:
+        """Cheap row counts, for the status surface.
+
+        One statement rather than four: the tray asks for this on a timer, and
+        four round trips to SQLite per poll is four chances to wait behind a
+        write.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT (SELECT COUNT(*) FROM projects) AS projects,"
+                " (SELECT COUNT(*) FROM sessions WHERE archived_at IS NULL) AS conversations,"
+                " (SELECT COUNT(*) FROM sessions WHERE archived_at IS NOT NULL) AS archived,"
+                " (SELECT COUNT(*) FROM messages) AS messages,"
+                " (SELECT COUNT(*) FROM tool_calls) AS tool_calls"
+            ).fetchone()
+        # Named one by one rather than zipped against the column list: this dict
+        # is a wire format the tray reads, so a column added to the statement
+        # must not silently become a field.
+        return {
+            "projects": int(row["projects"]),
+            "conversations": int(row["conversations"]),
+            "archived": int(row["archived"]),
+            "messages": int(row["messages"]),
+            "tool_calls": int(row["tool_calls"]),
+        }
+
+    def size_bytes(self) -> int:
+        """Total size of the database and its WAL sidecars, in bytes."""
+        total = 0
+        for suffix in ("", "-wal", "-shm"):
+            with contextlib.suppress(OSError):
+                total += Path(f"{self.path}{suffix}").stat().st_size
+        return total
+
     def __enter__(self) -> Store:
         return self
 

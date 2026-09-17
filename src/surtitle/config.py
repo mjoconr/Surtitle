@@ -199,6 +199,18 @@ class Settings(BaseSettings):
     # --- storage ---------------------------------------------------------
     data_dir: Path = Field(default_factory=default_data_dir, alias="SURTITLE_HOME")
 
+    # --- usage accounting ------------------------------------------------
+    # Flat USD-per-million-token rates that override the table in
+    # :mod:`surtitle.stats`. Deliberately environment-only: they exist so a
+    # vendor price change or a private rate can be reflected without a release,
+    # not as something a user tunes. Any column left unset keeps the published
+    # rate for the configured model.
+    price_input_per_mtok: float | None = Field(default=None, alias="SURTITLE_PRICE_INPUT")
+    price_cached_input_per_mtok: float | None = Field(
+        default=None, alias="SURTITLE_PRICE_CACHED_INPUT"
+    )
+    price_output_per_mtok: float | None = Field(default=None, alias="SURTITLE_PRICE_OUTPUT")
+
     @field_validator("log_level")
     @classmethod
     def _check_log_level(cls, value: str) -> str:

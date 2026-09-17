@@ -188,6 +188,45 @@ class TestConversation:
         assert messages[0].content == "remember this"
         assert messages[1].spoken and "Stored reply." in messages[1].spoken
 
+    def test_the_run_counters_follow_a_real_turn(self, setup):
+        """The tray icon's numbers come from here, so they must be wired up.
+
+        The counters are fed from the two emit paths in the session — the turn
+        stream and the side channel — and a test that only called the counter
+        directly would not notice either path being missed.
+        """
+        client, app, project, session = setup
+        app.state.app_state.deepseek = ScriptedClient(
+            [
+                [
+                    StreamEvent(kind="text", text="<say>Counted.</say>"),
+                    StreamEvent(
+                        kind="usage",
+                        usage=Usage(prompt_tokens=1200, completion_tokens=300, cached_tokens=800),
+                    ),
+                    StreamEvent(kind="done"),
+                ]
+            ]
+        )
+
+        with client.websocket_connect("/ws") as socket:
+            socket.send_text(hello(project.id, session.id))
+            receive_until(socket, {"ready"}, limit=5)
+            socket.send_text(json.dumps({"kind": "text", "data": {"text": "hello"}}))
+            receive_until(socket, {"done"}, limit=80)
+
+        usage = app.state.app_state.stats.snapshot()
+        assert usage["turns"] == 1
+        assert usage["model_calls"] == 1
+        assert usage["prompt_tokens"] == 1200
+        assert usage["completion_tokens"] == 300
+        assert usage["cached_tokens"] == 800
+        assert usage["total_tokens"] == 1500
+        # The model is priced, so a cost must have been accumulated rather than
+        # the run being flagged as unpriced.
+        assert usage["priced"] is True
+        assert usage["cost_usd"] > 0
+
     def test_first_message_titles_the_session(self, setup):
         client, app, project, session = setup
         app.state.app_state.deepseek = ScriptedClient([text_script("<say>ok</say>")])
