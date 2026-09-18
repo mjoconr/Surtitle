@@ -385,6 +385,19 @@ class TestRepoDetect:
 
 
 class TestCommitGit:
+    @pytest.fixture(autouse=True)
+    def _tools_present(self, monkeypatch):
+        """These tests inject the runner; the host's own tools must not matter.
+
+        Without this they pass on a machine that happens to have svn installed and
+        fail in CI, where the refusal to commit with a missing tool is the answer
+        they get instead — which is correct behaviour, tested elsewhere, and not
+        what these are about.
+        """
+        monkeypatch.setattr(
+            provision, "executable", lambda settings=None, name="git": Path(f"/fake/{name}")
+        )
+
     def _runner(self, transcript, *, staged=("a.py",), commit_code=0, push_code=0):
         def run(argv, cwd):
             transcript.append(list(argv))
@@ -482,6 +495,19 @@ class TestCommitGit:
 
 
 class TestCommitSvn:
+    @pytest.fixture(autouse=True)
+    def _tools_present(self, monkeypatch):
+        """These tests inject the runner; the host's own tools must not matter.
+
+        Without this they pass on a machine that happens to have svn installed and
+        fail in CI, where the refusal to commit with a missing tool is the answer
+        they get instead — which is correct behaviour, tested elsewhere, and not
+        what these are about.
+        """
+        monkeypatch.setattr(
+            provision, "executable", lambda settings=None, name="git": Path(f"/fake/{name}")
+        )
+
     def _runner(self, transcript, *, status="?       new.txt\n", commit_code=0):
         def run(argv, cwd):
             transcript.append(list(argv))
