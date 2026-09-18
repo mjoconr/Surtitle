@@ -131,6 +131,24 @@ powershell -ExecutionPolicy Bypass -File .\scripts\run.ps1
 
 Or use `run.bat`, which has no execution-policy restriction.
 
+## How you got it decides how it installs and updates
+
+| You have | Install | Update |
+|---|---|---|
+| **Release archive** — `surtitle-<version>-win32-AMD64.zip` | Nothing to install. The runtime and every dependency are bundled: extract it and double-click `run.bat`. | Right-click the notification icon → **Get the latest release…**, then extract the new zip. Settings, database and speech models live in `%LOCALAPPDATA%\Surtitle` and are kept. |
+| **git clone** | Double-click `Setup.bat` once. | Right-click the icon → **Update to the latest release…** or **Update to current main…**. `Setup.bat` is not needed again. |
+| **Source ZIP** — GitHub → **Code → Download ZIP** | Double-click `Setup.bat` once. | There is no git history to pull, so the tray offers **Get the latest release…**. To follow updates in place instead, `git clone` the repository. |
+
+`Setup.bat` is for a source checkout. Run `scripts\install.ps1` inside a release
+archive by mistake and it says so and exits without touching anything — otherwise
+it would build a second environment beside the bundled runtime, and the launcher
+prefers `venv\`, so it would quietly change which interpreter runs.
+
+**If git is not installed**, a clone cannot pull. The tray offers the download
+page and `surtitle update --check` says *"git is not installed"* — it does not
+claim the installation is not a checkout, which would send you after the wrong
+problem. Install git and the two update rows come back.
+
 ## Installing and updating
 
 `Setup.bat` is the double-clickable face of `scripts/install.ps1`. It forwards its

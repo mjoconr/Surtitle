@@ -261,3 +261,50 @@ class TestSetupEntryPoints:
         assert "Applications/Surtitle.app" in text
         assert "Library/LaunchAgents" in text
         assert "--startup" in text and "--no-startup" in text
+
+
+class TestArchiveGuard:
+    """Setup is for a source checkout; a release archive is already installed.
+
+    install.ps1/install.sh ship inside the archive (scripts/ is copied into it),
+    so a user poking around can find and run one. Left unguarded it builds a
+    second environment beside the bundled runtime - and the launcher prefers
+    venv/, so it would quietly change which interpreter runs.
+    """
+
+    def test_the_windows_installer_refuses_inside_an_archive(self):
+        text = (SCRIPTS / "install.ps1").read_text(encoding="utf-8")
+        assert "BUILD-INFO.json" in text
+        assert "already installed" in text
+
+    def test_the_macos_installer_refuses_inside_an_archive(self):
+        text = (SCRIPTS / "install.sh").read_text(encoding="utf-8")
+        assert "BUILD-INFO.json" in text
+        assert "already installed" in text
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="run.sh is for macOS and Linux")
+    @pytest.mark.skipif(shutil.which("bash") is None, reason="no bash available")
+    def test_running_the_installer_in_an_archive_does_nothing(self, tmp_path):
+        archive = tmp_path / "archive"
+        (archive / "scripts").mkdir(parents=True)
+        shutil.copy(SCRIPTS / "install.sh", archive / "scripts" / "install.sh")
+        (archive / "BUILD-INFO.json").write_text('{"platform": "darwin"}', encoding="utf-8")
+        python = archive / "python" / "bin" / "python3"
+        python.parent.mkdir(parents=True)
+        python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        python.chmod(0o755)
+
+        done = subprocess.run(
+            ["bash", str(archive / "scripts" / "install.sh")],
+            # No uv on PATH and no HOME to find one in, so if the guard did not
+            # fire first the installer would die trying to install uv.
+            env={"HOME": str(tmp_path / "nohome"), "PATH": "/usr/bin:/bin"},
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+
+        assert done.returncode == 0, done.stderr
+        assert "already installed" in done.stdout
+        assert "Installing uv" not in done.stdout

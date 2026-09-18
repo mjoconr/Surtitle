@@ -45,6 +45,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **An installation is no longer told the wrong reason it cannot update.** A
+  release archive, an unpacked source ZIP and a git clone with git missing all
+  used to report "not installed from a git checkout". They are now three separate
+  answers: a clone pulls, a clone without git is told git is not installed, and
+  something with no history at all is pointed at the download page. `surtitle
+  update --check` says which applies.
+- **The installers refuse to run inside a release archive.** `scripts/install.ps1`
+  and `scripts/install.sh` ship inside the archive, and running one there built a
+  second environment beside the bundled runtime — and since the launcher prefers
+  `venv\`, it quietly changed which interpreter ran. They now say the archive is
+  already installed and exit without touching anything.
 - The download size quoted before fetching speech models was stale by more than
   four times: the registry's models are about 395 MB, not the ~86 MB the
   installers and prompts claimed. The app now reports the real figure from the

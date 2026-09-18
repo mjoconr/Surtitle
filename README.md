@@ -59,6 +59,13 @@ skips the offline speech engines (and their multi-hundred-megabyte models), `-St
 `-NoStartup` answer the sign-in question without a prompt, and `-Check` reports
 what is installed without changing anything.
 
+There is nothing to install for a **release archive** — it bundles its runtime, so
+extract it and run `run.bat`. `Setup.bat` is for a source checkout and refuses to
+run inside an archive. How you got Surtitle also decides how it updates: a git
+clone updates itself from the tray (**Update to the latest release…** or **Update
+to current main…**), while an archive or an unpacked source ZIP is pointed at the
+download page, having no git history to pull.
+
 ### macOS / Linux
 
 For a git clone, **double-click `Setup.command`** at the top of the checkout. It

@@ -100,9 +100,21 @@ def git_checkout() -> Path | None:
 
 
 def kind() -> str:
-    """``"git"`` when this installation can update itself, else ``"archive"``."""
-    if git_checkout() is None or shutil.which("git") is None:
+    """How this installation can be updated.
+
+    Three answers, because the fix differs:
+
+    * ``"git"`` — a clone with git available; it can pull.
+    * ``"no-git"`` — a clone, but git is not installed to pull with. Telling the
+      user "this was not installed from a git checkout" here would be false and
+      send them looking for the wrong problem.
+    * ``"archive"`` — a release archive, or a source ZIP, with no history to pull.
+      There is nothing to fetch into; the download page is the honest answer.
+    """
+    if git_checkout() is None:
         return "archive"
+    if shutil.which("git") is None:
+        return "no-git"
     return "git"
 
 
@@ -196,22 +208,33 @@ def check(
     from surtitle import __version__
 
     run = runner or subprocess.run
-    root = git_checkout() if shutil.which("git") else None
+    root = git_checkout()
     latest = latest_release(fetcher=fetcher)
     release_available = bool(latest) and _is_newer(latest, __version__)
+    available_note = (
+        f"{latest} is available to download"
+        if release_available
+        else f"Surtitle {__version__} is the newest release"
+    )
 
     if root is None:
-        detail = (
-            f"{latest} is available to download"
-            if release_available
-            else f"Surtitle {__version__} is the newest release"
-        )
         return UpdateStatus(
             kind="archive",
             version=__version__,
             latest_release=latest,
             release_available=release_available,
-            detail=detail,
+            detail=available_note,
+        )
+
+    if shutil.which("git") is None:
+        # A clone without git. Do not try to pull, and do not say "not a
+        # checkout" — the fix is to install git or download the release.
+        return UpdateStatus(
+            kind="no-git",
+            version=__version__,
+            latest_release=latest,
+            release_available=release_available,
+            detail=f"git is not installed to pull with; {available_note}",
         )
 
     branch = _text(_git(["rev-parse", "--abbrev-ref", "HEAD"], root, run))
@@ -278,11 +301,21 @@ def apply(
 
     run = runner or subprocess.run
     root = git_checkout()
-    if root is None or not shutil.which("git"):
+    if root is None:
         return UpdateResult(
             False,
-            "This installation cannot update itself — it was not installed from a "
-            f"git checkout. Download the newest release from {RELEASES_PAGE}",
+            "This installation cannot update itself — it has no git history to "
+            f"pull into (a release archive or an unpacked source ZIP). Download the "
+            f"newest release from {RELEASES_PAGE}, or clone the repository if you "
+            "want to follow updates in place.",
+            [],
+        )
+    if shutil.which("git") is None:
+        return UpdateResult(
+            False,
+            "This is a git checkout, but git is not installed, so nothing can be "
+            f"pulled. Install git (https://git-scm.com/downloads), or download the "
+            f"newest release from {RELEASES_PAGE}.",
             [],
         )
 

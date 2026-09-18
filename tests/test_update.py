@@ -169,3 +169,51 @@ class TestApply:
 
         assert result.ok is False
         assert "reach GitHub" in result.message
+
+
+class TestKind:
+    """Three answers, because the fix differs for each."""
+
+    def test_a_clone_with_git_can_update_itself(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(updater, "git_checkout", lambda: tmp_path)
+        monkeypatch.setattr(updater, "shutil", _Which(git="/usr/bin/git"))
+        assert updater.kind() == "git"
+
+    def test_a_clone_without_git_is_not_called_an_archive(self, monkeypatch, tmp_path):
+        """Saying "not a checkout" would send the user after the wrong problem."""
+        monkeypatch.setattr(updater, "git_checkout", lambda: tmp_path)
+        monkeypatch.setattr(updater, "shutil", _Which())
+        assert updater.kind() == "no-git"
+
+    def test_no_history_at_all_is_an_archive(self, monkeypatch):
+        monkeypatch.setattr(updater, "git_checkout", lambda: None)
+        assert updater.kind() == "archive"
+
+    def test_a_checkout_without_git_says_which_problem_it_is(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(updater, "git_checkout", lambda: tmp_path)
+        monkeypatch.setattr(updater, "shutil", _Which())
+        status = updater.check(fetcher=lambda: {"tag_name": "v9.9.9"})
+        assert status.kind == "no-git"
+        assert "git is not installed" in status.detail
+        assert "9.9.9" in status.detail, "it should still say a release is available"
+
+
+class TestApplyWithoutGit:
+    def test_a_checkout_without_git_is_told_to_install_git(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(updater, "git_checkout", lambda: tmp_path)
+        monkeypatch.setattr(updater, "shutil", _Which())
+
+        result = updater.apply("main")
+
+        assert result.ok is False
+        assert "git is not installed" in result.message
+        assert updater.RELEASES_PAGE in result.message
+
+    def test_a_non_checkout_is_told_it_has_no_history_to_pull(self, monkeypatch):
+        monkeypatch.setattr(updater, "git_checkout", lambda: None)
+
+        result = updater.apply("release")
+
+        assert result.ok is False
+        assert "no git history" in result.message
+        assert updater.RELEASES_PAGE in result.message

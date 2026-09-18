@@ -128,6 +128,22 @@ printf '\n%s\n' "${BOLD}Surtitle installer — $PLATFORM${RESET}"
 info "project: $PROJECT_DIR"
 info "data:    $DATA_DIR"
 
+# A release archive already carries a complete runtime. Running this inside one
+# would build a second environment beside it — and the launcher prefers venv/,
+# so it would quietly change which interpreter runs. There is nothing to install.
+if [ -f "$PROJECT_DIR/BUILD-INFO.json" ] &&
+  { [ -x "$PROJECT_DIR/python/bin/python3" ] || [ -x "$PROJECT_DIR/venv/bin/python" ]; }; then
+  printf '\n%s\n' "${YELLOW}This is a Surtitle release archive, and it is already installed.${RESET}"
+  cat <<EOF
+
+Start it with ./scripts/run.sh.
+
+To update it, download the newest release and replace this folder. Your settings,
+database and speech models live in the app data directory and are kept.
+EOF
+  exit 0
+fi
+
 # --------------------------------------------------------------------------- #
 # uv: the only prerequisite, and it also supplies Python
 # --------------------------------------------------------------------------- #

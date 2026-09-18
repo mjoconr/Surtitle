@@ -137,6 +137,24 @@ Write-Host 'Surtitle installer - Windows' -ForegroundColor White
 Write-Info "project: $ProjectDir"
 Write-Info "data:    $dataDir"
 
+# A release archive already carries a complete runtime. Running this inside one
+# would build a second environment beside it - and the launcher prefers venv\,
+# so it would quietly change which interpreter runs. There is nothing to install.
+$isArchive = (Test-Path (Join-Path $ProjectDir 'BUILD-INFO.json')) -and (
+    (Test-Path (Join-Path $ProjectDir 'python\python.exe')) -or
+    (Test-Path (Join-Path $ProjectDir 'venv\Scripts\python.exe'))
+)
+if ($isArchive) {
+    Write-Host ''
+    Write-Host 'This is a Surtitle release archive, and it is already installed.' -ForegroundColor Yellow
+    Write-Host ''
+    Write-Host 'Start it by double-clicking run.bat.'
+    Write-Host 'To update it, right-click the notification-area icon, choose "Get the'
+    Write-Host 'latest release", and replace this folder. Your settings, database and'
+    Write-Host 'speech models live in the app data directory and are kept.'
+    exit 0
+}
+
 # --------------------------------------------------------------------------- #
 # uv
 # --------------------------------------------------------------------------- #
