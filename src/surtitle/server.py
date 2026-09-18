@@ -60,6 +60,9 @@ from surtitle.store.settings_store import (
 from surtitle.tools import environment
 from surtitle.tools.fs_tools import ToolContext, list_dir
 from surtitle.tools.path_guard import PathEscapeError, resolve_in_root
+from surtitle.update import TARGETS as update_targets
+from surtitle.update import UpdateJob
+from surtitle.update import kind as update_kind
 from surtitle.voice.install import InstallJob
 from surtitle.voice.install import state as local_voice_state
 
@@ -150,6 +153,9 @@ class AppState:
         # so it runs in a background thread and both the tray and the Settings
         # screen read this one job rather than starting their own.
         self.voice_install = InstallJob()
+        # Pulling an update is the same shape of work: slow, network-bound, and
+        # owned by the server so it survives whichever icon asked for it.
+        self.update = UpdateJob()
         # Re-apply stored preferences and credentials onto the live settings.
         self.settings_store.effective()
 
@@ -183,6 +189,15 @@ def _local_voice_payload(settings: Settings, job: InstallJob) -> dict[str, Any]:
         "missing_bytes": snapshot.missing_bytes,
         "install": job.snapshot(),
     }
+
+
+def _update_payload(job: UpdateJob) -> dict[str, Any]:
+    """How this installation can update, and how one in flight is going.
+
+    Deliberately no network call: this rides on every tray poll. Deciding whether
+    a newer release exists is a separate, on-demand request.
+    """
+    return {"kind": update_kind(), "version": __version__, "job": job.snapshot()}
 
 
 def _project_or_404(state: AppState, project_id: str):
@@ -250,6 +265,7 @@ def build_api(state: AppState) -> APIRouter:
             "deepgram_configured": bool(settings.deepgram_key()),
             "sessions": state.sessions.count,
             "local_voice": _local_voice_payload(settings, state.voice_install),
+            "update": _update_payload(state.update),
             "usage": usage,
             "storage": {
                 **state.store.counts(),
@@ -318,6 +334,37 @@ def build_api(state: AppState) -> APIRouter:
             return JSONResponse({"started": False, "reason": "already running"}, status_code=409)
         log.info("local voice install requested by %s", client)
         return JSONResponse({"started": True}, status_code=202)
+
+    @api.get("/update")
+    async def update_status() -> dict[str, Any]:
+        """What an update would do. Network-bound, so it is asked for on demand.
+
+        Separate from ``/api/status`` on purpose: that endpoint is polled every
+        couple of seconds by the tray, and this one talks to GitHub and to git.
+        """
+        from surtitle import update
+
+        status = await asyncio.to_thread(update.check)
+        return {"status": status.as_dict(), "job": state.update.snapshot()}
+
+    @api.post("/update")
+    async def update_start(request: Request, body: dict[str, Any] = Body(...)) -> JSONResponse:
+        """Pull ``main``, or check out the newest release tag, in the checkout.
+
+        Loopback only, and for a stronger reason than the other local endpoints:
+        this runs git in the user's working tree, so a remote caller must not be
+        able to choose which code the machine runs next.
+        """
+        client = request.client.host if request.client else ""
+        if client not in {"127.0.0.1", "::1", "localhost"}:
+            return _error(403, "updating is only allowed from this machine")
+        target = str(body.get("target") or "release").strip().lower()
+        if target not in update_targets:
+            return _error(400, f"unknown update target {target!r}", field="target")
+        if not state.update.start(target):
+            return JSONResponse({"started": False, "reason": "already running"}, status_code=409)
+        log.info("update to %s requested by %s", target, client)
+        return JSONResponse({"started": True, "target": target}, status_code=202)
 
     # --- settings --------------------------------------------------------
     @api.get("/settings")

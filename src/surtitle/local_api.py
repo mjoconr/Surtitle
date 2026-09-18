@@ -35,6 +35,7 @@ __all__ = [
     "instance_path",
     "read_instance",
     "request_shutdown",
+    "request_update",
     "request_voice_install",
     "write_instance",
 ]
@@ -187,6 +188,28 @@ def request_voice_install(url: str, *, timeout: float = _PROBE_TIMEOUT) -> dict[
     try:
         with httpx.Client(base_url=url, timeout=timeout) as client:
             response = client.post("/api/voice/install")
+    except (httpx.HTTPError, ValueError, OSError):
+        return None
+    if response.status_code not in (200, 202, 409):
+        return None
+    try:
+        payload = response.json()
+    except ValueError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def request_update(
+    url: str, target: str = "release", *, timeout: float = _PROBE_TIMEOUT
+) -> dict[str, Any] | None:
+    """Ask the server at ``url`` to pull ``target`` (``"release"`` or ``"main"``).
+
+    Like the voice install, the server starts the work in the background, so this
+    returns as soon as the request is accepted. ``None`` means nothing answered.
+    """
+    try:
+        with httpx.Client(base_url=url, timeout=timeout) as client:
+            response = client.post("/api/update", json={"target": target})
     except (httpx.HTTPError, ValueError, OSError):
         return None
     if response.status_code not in (200, 202, 409):

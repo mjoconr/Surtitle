@@ -25,13 +25,13 @@ import importlib.util
 import shutil
 import subprocess
 import sys
-import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from surtitle.config import Settings
+from surtitle.jobs import BackgroundJob
 
 __all__ = [
     "InstallJob",
@@ -239,7 +239,7 @@ def install(
     return InstallResult(True, "local speech is installed; restart Surtitle to use it", steps)
 
 
-class InstallJob:
+class InstallJob(BackgroundJob):
     """One background install, with a state the tray and the UI can read.
 
     Deliberately not a task in the server's event loop: the work is a blocking
@@ -248,68 +248,15 @@ class InstallJob:
     """
 
     def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._thread: threading.Thread | None = None
-        self._running = False
-        self._ok: bool | None = None
-        self._message = "not started"
-        self._percent = 0.0
+        super().__init__(name="voice-install")
 
-    @property
-    def running(self) -> bool:
-        with self._lock:
-            return self._running
-
-    def snapshot(self) -> dict[str, Any]:
-        with self._lock:
-            return {
-                "running": self._running,
-                "ok": self._ok,
-                "message": self._message,
-                "percent": round(self._percent, 1),
-            }
-
-    def start(self, settings: Settings) -> bool:
-        """Start an install. False when one is already running."""
-        with self._lock:
-            if self._running:
-                return False
-            self._running = True
-            self._ok = None
-            self._message = "starting…"
-            self._percent = 0.0
-
-        thread = threading.Thread(
-            target=self._run, args=(settings,), name="surtitle-voice-install", daemon=True
-        )
-        self._thread = thread
-        thread.start()
-        return True
-
-    def wait(self, timeout: float | None = None) -> bool:
-        """Block until a running install finishes. True when it is not running."""
-        thread = self._thread
-        if thread is not None:
-            thread.join(timeout)
-        return not self.running
-
-    def _run(self, settings: Settings) -> None:
-        try:
-            result = install(settings, progress=self._progress)
-        except Exception as exc:  # a failure is reported, never raised into a request
-            result = InstallResult(False, f"the install failed: {exc}")
-        with self._lock:
-            self._running = False
-            self._ok = result.ok
-            self._message = result.message
-            if result.ok:
-                self._percent = 100.0
+    def _work(self, settings: Settings) -> tuple[bool, str]:
+        result = install(settings, progress=self._progress)
+        return result.ok, result.message
 
     def _progress(self, update: Any) -> None:
-        with self._lock:
-            if update.stage == "download" and update.total:
-                self._percent = 100.0 * update.received / update.total
-                self._message = f"downloading {update.asset} ({self._percent:.0f}%)"
-            else:
-                self._percent = 0.0
-                self._message = f"{update.asset}: {update.message or update.stage}"
+        if update.stage == "download" and update.total:
+            percent = 100.0 * update.received / update.total
+            self.set_progress(percent, f"downloading {update.asset} ({percent:.0f}%)")
+        else:
+            self.set_progress(0.0, f"{update.asset}: {update.message or update.stage}")

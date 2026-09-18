@@ -23,9 +23,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from surtitle.local_api import fetch_status, request_shutdown, request_voice_install
+from surtitle.local_api import (
+    fetch_status,
+    request_shutdown,
+    request_update,
+    request_voice_install,
+)
 from surtitle.platform_utils import human_bytes, is_windows, open_browser
 from surtitle.stats import PRICES_CHECKED, format_duration
+from surtitle.update import RELEASES_PAGE
 
 __all__ = [
     "ACTIONS",
@@ -57,7 +63,16 @@ class MenuEntry:
     separator: bool = False
 
 
-ACTIONS = ("open", "status", "usage", "voice", "stop")
+ACTIONS = (
+    "open",
+    "status",
+    "usage",
+    "voice",
+    "update_release",
+    "update_main",
+    "update_page",
+    "stop",
+)
 
 # How often the server is asked how it is doing. Every poll is a loopback
 # request that reads a few row counts, so this is cheap; two seconds keeps the
@@ -160,8 +175,33 @@ def menu_entries(snapshot: dict[str, Any] | None) -> list[MenuEntry]:
         MenuEntry(label="Usage…", action="usage", enabled=live),
         MenuEntry(separator=True),
         MenuEntry(**_voice_entry(snapshot if live else None)),
+        *_update_entries(snapshot if live else None),
+        MenuEntry(separator=True),
         MenuEntry(label="Stop Surtitle", action="stop", enabled=live),
     ]
+
+
+def _update_entries(snapshot: dict[str, Any] | None) -> list[MenuEntry]:
+    """The update rows, which differ with how Surtitle was installed.
+
+    A git checkout can move itself, and there are two sensible destinations: the
+    newest tagged release for most people, the development branch for someone
+    following it. A release archive cannot replace its own running files, so it
+    is offered the download page instead — saying so is better than a menu item
+    that fails.
+    """
+    if snapshot is None:
+        return [MenuEntry(label="Update Surtitle…", action="update_release", enabled=False)]
+
+    update = snapshot.get("update") or {}
+    if (update.get("job") or {}).get("running"):
+        return [MenuEntry(label="Updating…", action="update_release", enabled=False)]
+    if update.get("kind") == "git":
+        return [
+            MenuEntry(label="Update to the latest release…", action="update_release"),
+            MenuEntry(label="Update to current main…", action="update_main"),
+        ]
+    return [MenuEntry(label="Get the latest release…", action="update_page")]
 
 
 def _voice_entry(snapshot: dict[str, Any] | None) -> dict[str, Any]:
@@ -345,6 +385,12 @@ class SurtitleTray:
             self._show(format_usage, "Surtitle — usage")
         elif action == "voice":
             self._install_local_voice()
+        elif action == "update_release":
+            self._update("release")
+        elif action == "update_main":
+            self._update("main")
+        elif action == "update_page":
+            open_browser(RELEASES_PAGE)
         elif action == "stop":
             self._request_stop()
 
@@ -401,6 +447,39 @@ class SurtitleTray:
         self._message(
             "Installing the local speech engines in the background. The menu shows "
             "how it is going; restart Surtitle when it finishes to use them.",
+            title,
+        )
+
+    def _update(self, target: str) -> None:
+        """Ask the server to pull a release tag or the development branch.
+
+        The destination is named in the question, because "update" on its own is
+        ambiguous when the answer can be either the last release or main.
+        """
+        title = "Surtitle — update"
+        destination = (
+            "the current development branch (main)" if target == "main" else "the latest release"
+        )
+        if not self._confirm(
+            f"Update Surtitle to {destination}?\n\n"
+            "This pulls the new code into this checkout and re-installs the "
+            "dependencies. Surtitle keeps running the version it started with until "
+            "you restart it, and local changes stop the update rather than being "
+            "overwritten.",
+            title,
+        ):
+            return
+
+        answer = request_update(self.url, target)
+        if answer is None:
+            self._message("Surtitle did not accept the request.", title)
+            return
+        if not answer.get("started", True):
+            self._message("An update is already running.", title)
+            return
+        self._message(
+            "Updating in the background. The menu shows how it is going; restart "
+            "Surtitle when it finishes.",
             title,
         )
 

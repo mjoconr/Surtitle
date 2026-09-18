@@ -660,6 +660,51 @@ def voice_status() -> None:
 
 
 @app.command()
+def update(
+    target: str = typer.Option(
+        "release", "--target", "-t", help="What to move to: 'release' or 'main'."
+    ),
+    check_only: bool = typer.Option(False, "--check", help="Report what an update would do."),
+) -> None:
+    """Update Surtitle from GitHub (a git checkout only).
+
+    `--target release` checks out the newest tagged release; `--target main`
+    fast-forwards the development branch. The update never discards local work —
+    it refuses rather than merging over it — and a release archive is told where
+    to download the new version instead, because it cannot replace itself while
+    it is running.
+    """
+    from surtitle import update as updater
+
+    if target not in updater.TARGETS:
+        console.print(f"[red]--target must be one of: {', '.join(updater.TARGETS)}[/red]")
+        raise typer.Exit(code=2)
+
+    status = updater.check()
+    table = Table(box=None, show_header=False)
+    table.add_row("Installed", status.version)
+    table.add_row("Install", "git checkout" if status.kind == "git" else "release archive")
+    if status.latest_release:
+        table.add_row("Newest release", status.latest_release)
+    if status.kind == "git":
+        table.add_row("Branch", status.branch or "-")
+    console.print(table)
+    console.print(f"[dim]{status.detail}[/dim]")
+
+    if check_only:
+        return
+    if status.kind != "git":
+        console.print(f"Download the newest release from {updater.RELEASES_PAGE}")
+        raise typer.Exit(code=1)
+
+    result = updater.apply(target)
+    style = "[green]Done.[/green]" if result.ok else "[red]Failed.[/red]"
+    console.print(f"{style} {result.message}")
+    if not result.ok:
+        raise typer.Exit(code=1)
+
+
+@app.command()
 def settings_show() -> None:
     """Print the effective settings and credential status (no secret values)."""
     store = _open_store()

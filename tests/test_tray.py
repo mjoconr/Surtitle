@@ -118,10 +118,13 @@ class TestTooltip:
 
 
 class TestMenu:
-    def test_offers_every_action_when_the_server_answers(self, snapshot):
+    def test_offers_the_core_actions_when_the_server_answers(self, snapshot):
         entries = menu_entries(snapshot)
         offered = {entry.action for entry in entries if entry.action}
-        assert offered == set(ACTIONS)
+        # The update rows depend on how Surtitle was installed (a git checkout
+        # versus a release archive), so they are asserted on their own below.
+        assert {"open", "status", "usage", "voice", "stop"} <= offered
+        assert offered <= set(ACTIONS)
 
     def test_nothing_is_actionable_when_the_server_is_gone(self):
         entries = menu_entries(None)
@@ -502,3 +505,98 @@ class TestLocalVoiceAction:
         tray._select("voice")
 
         assert asked and "MB" not in asked[0]
+
+
+class TestUpdateMenu:
+    """Updating differs by install kind, so the rows do too."""
+
+    def test_a_git_checkout_is_offered_release_and_main(self, snapshot):
+        snapshot["update"] = {"kind": "git", "job": {"running": False}}
+        offered = {e.action for e in menu_entries(snapshot) if e.action}
+        assert {"update_release", "update_main"} <= offered
+        assert "update_page" not in offered
+
+    def test_a_release_archive_is_offered_the_download_page(self, snapshot):
+        """It cannot replace its own running files, so it must not pretend to."""
+        snapshot["update"] = {"kind": "archive", "job": {"running": False}}
+        offered = {e.action for e in menu_entries(snapshot) if e.action}
+        assert "update_page" in offered
+        assert "update_main" not in offered
+
+    def test_an_update_in_flight_is_not_clickable_twice(self, snapshot):
+        snapshot["update"] = {"kind": "git", "job": {"running": True}}
+        entry = next(e for e in menu_entries(snapshot) if e.action == "update_release")
+        assert entry.enabled is False
+        assert "Updat" in entry.label
+
+    def test_the_update_row_is_not_actionable_when_the_server_is_gone(self):
+        entry = next(e for e in menu_entries(None) if e.action == "update_release")
+        assert entry.enabled is False
+
+
+class TestUpdateAction:
+    def _tray(self) -> SurtitleTray:
+        return SurtitleTray("http://127.0.0.1:8765")
+
+    def _record(self, monkeypatch, tray, answer=None):
+        asked: list[str] = []
+        posted: list[str] = []
+        monkeypatch.setattr(tray, "_confirm", lambda text, title: asked.append(text) or True)
+        monkeypatch.setattr(tray, "_message", lambda text, title: None)
+        monkeypatch.setattr(
+            "surtitle.tray.request_update",
+            lambda url, target="release", timeout=None: (
+                posted.append(target) or (answer or {"started": True})
+            ),
+        )
+        return asked, posted
+
+    def test_the_question_names_the_destination(self, monkeypatch):
+        tray = self._tray()
+        asked, posted = self._record(monkeypatch, tray)
+
+        tray._select("update_main")
+
+        assert asked and "main" in asked[0]
+        assert posted == ["main"]
+
+    def test_the_release_target_asks_for_a_release(self, monkeypatch):
+        tray = self._tray()
+        asked, posted = self._record(monkeypatch, tray)
+
+        tray._select("update_release")
+
+        assert asked and "release" in asked[0]
+        assert posted == ["release"]
+
+    def test_cancelling_updates_nothing(self, monkeypatch):
+        tray = self._tray()
+        _, posted = self._record(monkeypatch, tray)
+        monkeypatch.setattr(tray, "_confirm", lambda text, title: False)
+
+        tray._select("update_release")
+
+        assert posted == []
+
+    def test_an_already_running_update_is_reported(self, monkeypatch):
+        tray = self._tray()
+        monkeypatch.setattr(tray, "_confirm", lambda text, title: True)
+        shown: list[str] = []
+        monkeypatch.setattr(tray, "_message", lambda text, title: shown.append(text))
+        monkeypatch.setattr(
+            "surtitle.tray.request_update",
+            lambda url, target="release", timeout=None: {"started": False},
+        )
+
+        tray._select("update_release")
+
+        assert shown and "already running" in shown[0]
+
+    def test_the_download_page_opens_for_an_archive(self, monkeypatch):
+        tray = self._tray()
+        opened: list[str] = []
+        monkeypatch.setattr("surtitle.tray.open_browser", lambda url: opened.append(url))
+
+        tray._select("update_page")
+
+        assert opened and "releases" in opened[0]

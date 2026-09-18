@@ -635,3 +635,89 @@ class TestLocalVoiceInstall:
         assert response.status_code == 409
         assert response.json()["started"] is False
         await app.state.app_state.aclose()
+
+
+class TestUpdate:
+    """Pulling new code from GitHub, and who is allowed to ask for it."""
+
+    async def test_status_carries_the_update_block(self, client):
+        body = (await client.get("/api/status")).json()
+        update = body["update"]
+        assert {"kind", "version", "job"} <= set(update)
+        assert update["kind"] in {"git", "archive"}
+        assert update["job"]["running"] is False
+
+    async def test_a_local_request_starts_the_update(self, settings, monkeypatch):
+        app = create_app_for(settings)
+        started: list[str] = []
+        monkeypatch.setattr(
+            app.state.app_state.update, "start", lambda target: started.append(target) or True
+        )
+        transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 51000))
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+            response = await http.post("/api/update", json={"target": "main"})
+        assert response.status_code == 202
+        assert response.json() == {"started": True, "target": "main"}
+        assert started == ["main"]
+        await app.state.app_state.aclose()
+
+    async def test_the_default_target_is_the_release(self, settings, monkeypatch):
+        app = create_app_for(settings)
+        started: list[str] = []
+        monkeypatch.setattr(
+            app.state.app_state.update, "start", lambda target: started.append(target) or True
+        )
+        transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 51000))
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+            response = await http.post("/api/update", json={})
+        assert response.status_code == 202
+        assert started == ["release"]
+        await app.state.app_state.aclose()
+
+    async def test_an_unknown_target_is_refused(self, settings):
+        app = create_app_for(settings)
+        transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 51000))
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+            response = await http.post("/api/update", json={"target": "nightly"})
+        assert response.status_code == 400
+        await app.state.app_state.aclose()
+
+    async def test_a_remote_request_cannot_change_the_code(self, settings, monkeypatch):
+        """Changing which code runs is not a network-reachable action."""
+        app = create_app_for(settings)
+        started: list[str] = []
+        monkeypatch.setattr(
+            app.state.app_state.update, "start", lambda target: started.append(target) or True
+        )
+        transport = httpx.ASGITransport(app=app, client=("10.211.55.9", 40123))
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+            response = await http.post("/api/update", json={"target": "main"})
+        assert response.status_code == 403
+        assert started == []
+        await app.state.app_state.aclose()
+
+    async def test_a_second_request_while_running_is_a_conflict(self, settings, monkeypatch):
+        app = create_app_for(settings)
+        monkeypatch.setattr(app.state.app_state.update, "start", lambda target: False)
+        transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 51000))
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+            response = await http.post("/api/update", json={"target": "main"})
+        assert response.status_code == 409
+        await app.state.app_state.aclose()
+
+    async def test_the_check_endpoint_reports_without_updating(self, client, monkeypatch):
+        from surtitle import update as updater
+
+        monkeypatch.setattr(
+            updater,
+            "check",
+            lambda **kw: updater.UpdateStatus(
+                kind="git", version="0.1.0", detail="up to date on main"
+            ),
+        )
+        response = await client.get("/api/update")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["status"]["kind"] == "git"
+        assert body["status"]["detail"] == "up to date on main"
+        assert "job" in body

@@ -133,3 +133,7 @@ ignore = ["B008"] # Typer uses function calls in argument defaults by design
 # exception escaping the window procedure would take the process down instead of
 # surfacing anywhere, so every failure is caught and recorded.
 "src/surtitle/win32_tray.py" = ["BLE001"]
+# A background job turns its failure into the state the tray and the UI read,
+# because the request that started it has already been answered and has nobody
+# left to raise into.
+"src/surtitle/jobs.py" = ["BLE001"]

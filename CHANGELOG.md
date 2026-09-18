@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Update from the tray.** A git checkout gets two rows — **Update to the latest
+  release…** and **Update to current main…** — each confirmed before anything
+  moves, then run by the server (`POST /api/update`, loopback only) so the menu
+  can report progress. The update is a fast-forward or a tag checkout, never a
+  rebase: local work stops it rather than being overwritten, and `uv sync
+  --inexact` refreshes the dependencies afterwards. The running process keeps the
+  code it started with, so the result says to restart. A release archive cannot
+  replace its own running files, so it is offered **Get the latest release…**,
+  which opens the download page instead of failing. `surtitle update
+  [--target release|main]` with `--check` does the same from a terminal.
 - **Install the offline speech engines from the tray.** The right-click menu has
   an **Install local voice…** item whenever offline speech is incomplete. It
   asks before a large download, then hands the work to the server
