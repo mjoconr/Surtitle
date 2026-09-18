@@ -795,3 +795,61 @@ class TestFolderDialog:
         body = (await client.get("/api/health")).json()
         assert "folder_dialog" in body
         assert isinstance(body["folder_dialog"], bool)
+
+
+class TestShellIntegration:
+    """Launcher and sign-in entries, managed from the app."""
+
+    async def test_status_carries_the_shell_state(self, client):
+        body = (await client.get("/api/status")).json()
+        assert {"supported", "menu", "startup"} <= set(body["shell"])
+
+    async def test_the_endpoint_reports_state(self, client):
+        response = await client.get("/api/shell")
+        assert response.status_code == 200
+        assert {"supported", "menu", "startup"} <= set(response.json())
+
+    async def test_a_local_request_applies_the_change(self, settings, monkeypatch):
+        app = create_app_for(settings)
+        from surtitle import shell_integration
+
+        calls: list[dict] = []
+        monkeypatch.setattr(
+            shell_integration, "apply", lambda **kw: calls.append(kw) or (True, "updated")
+        )
+        transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 51000))
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+            response = await http.post("/api/shell", json={"startup": True})
+        assert response.status_code == 200
+        assert response.json()["ok"] is True
+        assert calls == [{"menu": None, "startup": True}]
+        await app.state.app_state.aclose()
+
+    async def test_a_remote_request_cannot_write_shortcuts(self, settings, monkeypatch):
+        app = create_app_for(settings)
+        from surtitle import shell_integration
+
+        calls: list[dict] = []
+        monkeypatch.setattr(
+            shell_integration, "apply", lambda **kw: calls.append(kw) or (True, "updated")
+        )
+        transport = httpx.ASGITransport(app=app, client=("10.211.55.9", 40123))
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+            response = await http.post("/api/shell", json={"startup": True})
+        assert response.status_code == 403
+        assert calls == []
+        await app.state.app_state.aclose()
+
+    async def test_a_failure_is_reported_as_an_error(self, settings, monkeypatch):
+        app = create_app_for(settings)
+        from surtitle import shell_integration
+
+        monkeypatch.setattr(
+            shell_integration, "apply", lambda **kw: (False, "the Start Menu is not writable")
+        )
+        transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 51000))
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+            response = await http.post("/api/shell", json={"menu": True})
+        assert response.status_code == 400
+        assert "not writable" in response.json()["error"]
+        await app.state.app_state.aclose()

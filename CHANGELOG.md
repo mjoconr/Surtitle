@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The launcher entry and start-at-sign-in are reachable from the tray.** Both
+  were previously available only by re-running Setup, which is how someone who
+  extracted the archive ended up with no Start Menu entry and no way to start at
+  sign-in without going looking for a script. The right-click menu now offers
+  **Add Start Menu entry** (which also repairs a stale entry, such as the iconless
+  shortcut an earlier release created) and **Start at sign-in** / **Don't start at
+  sign-in**. The work stays in the installers, run in a new shortcuts-only mode
+  that touches nothing else — important, because the app is running out of the
+  environment a full install would rebuild.
 - **A downloaded release can update itself.** The tray's **Update to the latest
   release…** now works for a zip install instead of opening a browser. It
   downloads the build for this platform, verifies it against the release's
@@ -24,6 +33,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **An unattended installer run no longer deletes a sign-in entry it was never
+  asked about.** With no `-Startup`/`-NoStartup` (or `--startup`/`--no-startup`)
+  and nobody to answer the prompt, it used to take the answer as "no" and remove
+  an existing entry. It now leaves the setting exactly as it found it — which is
+  also what lets the tray add a Start Menu entry without disturbing sign-in.
 - **A release archive's shortcut and app keep their icon.** Both installers
   resolved the icon from `src/surtitle/web`, which a release archive deliberately
   excludes — the copy inside the installed package is the one that travels — so

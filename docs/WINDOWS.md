@@ -29,9 +29,11 @@ double-click it to open the app in your browser; right-click it for:
 | **Status…** | Address, uptime, model, which voice engines are in use, whether each key is set, how many conversations are live, and what is in the database |
 | **Usage…** | Turns answered, tool calls, tokens in and out, cache hits, and an estimated cost for this run |
 | **Install local voice…** | Downloads the offline speech engines and their models (several hundred MB) after asking. While it runs the row shows progress; once it is done it reads "Local voice is installed" |
-| **Update to the latest release…** | Pulls the newest tagged release into the checkout, re-installs the dependencies, and asks you to restart. Only from a git checkout is this row offered |
-| **Update to current main…** | Follows the development branch instead. The update is a fast-forward, so local changes stop it rather than being overwritten |
-| **Get the latest release…** | What a release archive is offered instead: it cannot replace its own running files, so this opens the download page |
+| **Update to the latest release…** | A git checkout pulls the newest tagged release and re-installs the dependencies; an extracted archive downloads the new build, checks it against its published checksum, installs it, and restarts. Your settings, database and models are kept either way |
+| **Update to current main…** | Only from a git checkout: follow the development branch instead. A fast-forward, so local changes stop it rather than being overwritten |
+| **Get the latest release…** | What an unpacked *source* ZIP is offered: it has no git history to pull and no build to replace, so this opens the download page |
+| **Add Start Menu entry** | Creates the Start Menu entry (with the application icon) for an install that does not have one yet, and repairs an old one |
+| **Start at sign-in** / **Don't start at sign-in** | Turns the sign-in entry on or off. `Setup.bat -Startup` / `-NoStartup` do the same without the tray |
 | **Stop Surtitle** | Graceful shutdown — the same as Ctrl+C in the console, not a kill |
 
 The two lines at the top of the menu are the live state, not commands: how many

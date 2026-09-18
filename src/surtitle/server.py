@@ -45,7 +45,7 @@ from fastapi import (
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from surtitle import __version__, dialogs
+from surtitle import __version__, dialogs, shell_integration
 from surtitle.config import Settings, get_settings, setup_logging
 from surtitle.core.events import ClientCommand, CommandKind, EventKind
 from surtitle.core.session import Session, SessionManager, decode_client_frame
@@ -277,6 +277,7 @@ def build_api(state: AppState) -> APIRouter:
             "deepgram_configured": bool(settings.deepgram_key()),
             "sessions": state.sessions.count,
             "local_voice": _local_voice_payload(settings, state.voice_install),
+            "shell": shell_integration.state(),
             "update": _update_payload(state.update),
             "usage": usage,
             "storage": {
@@ -377,6 +378,34 @@ def build_api(state: AppState) -> APIRouter:
             return JSONResponse({"started": False, "reason": "already running"}, status_code=409)
         log.info("update to %s requested by %s", target, client)
         return JSONResponse({"started": True, "target": target}, status_code=202)
+
+    @api.get("/shell")
+    async def shell_state() -> dict[str, Any]:
+        """Whether the launcher entry and the sign-in entry are in place."""
+        return shell_integration.state()
+
+    @api.post("/shell")
+    async def shell_update(request: Request, body: dict[str, Any] = Body(...)) -> JSONResponse:
+        """Create the launcher entry, or turn start-at-sign-in on or off.
+
+        Loopback only: writing shortcuts into someone's profile on their behalf is
+        not something a network caller may ask for. The work is an installer run,
+        so it goes to a thread — it is quick, but it is not instant.
+        """
+        client = request.client.host if request.client else ""
+        if client not in {"127.0.0.1", "::1", "localhost"}:
+            return _error(403, "changing launcher entries is only allowed from this machine")
+
+        menu = body.get("menu")
+        startup = body.get("startup")
+        ok, message = await asyncio.to_thread(
+            shell_integration.apply,
+            menu=None if menu is None else bool(menu),
+            startup=None if startup is None else bool(startup),
+        )
+        if not ok:
+            return _error(400, message)
+        return JSONResponse({"ok": True, "message": message, **shell_integration.state()})
 
     @api.post("/dialog/folder")
     async def dialog_folder(request: Request) -> JSONResponse:

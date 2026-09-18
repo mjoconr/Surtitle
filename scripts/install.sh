@@ -64,6 +64,9 @@ CHECK_ONLY=0
 ASSUME_YES=0
 # Empty means "ask", the same as it does on Windows.
 STARTUP=""
+# Set by the running app to set up only the launcher and sign-in entries: the
+# Python steps would rebuild the environment the server is using.
+SHORTCUTS_ONLY=0
 
 usage() {
   cat <<'EOF'
@@ -75,6 +78,7 @@ Usage: ./scripts/install.sh [options]
                    Run `surtitle models download` later to fetch them.
   --update         Update an existing installation and re-verify it.
   --check          Report what is installed and what is missing; change nothing.
+  --shortcuts-only Set up only the launcher entry and the sign-in entry.
   --startup        Start Surtitle when you sign in (a LaunchAgent on macOS).
   --no-startup     Do not start Surtitle at sign-in; remove an existing entry.
   -y, --yes        Do not prompt for confirmation. Sign-in defaults to off.
@@ -92,6 +96,7 @@ while [ $# -gt 0 ]; do
     --no-models) DO_MODELS=0 ;;
     --update) UPDATE=1 ;;
     --check) CHECK_ONLY=1 ;;
+    --shortcuts-only) SHORTCUTS_ONLY=1 ;;
     --startup) STARTUP=1 ;;
     --no-startup) STARTUP=0 ;;
     -y|--yes) ASSUME_YES=1 ;;
@@ -151,6 +156,13 @@ for candidate in \
 do
   [ -x "$candidate" ] && { BUNDLED_PY="$candidate"; break; }
 done
+if [ "$SHORTCUTS_ONLY" = "1" ] && [ "$CHECK_ONLY" = "1" ]; then
+  step "Checking the installation"
+  if [ -d "$APP_BUNDLE" ]; then info "launcher:        $APP_BUNDLE"; else info "launcher:        not created"; fi
+  if [ -f "$AGENT_PLIST" ]; then info "sign-in agent:   installed"; else info "sign-in agent:   not installed"; fi
+  exit 0
+fi
+
 if [ -f "$PROJECT_DIR/BUILD-INFO.json" ] && [ -n "$BUNDLED_PY" ]; then
   ARCHIVE=1
   info "release archive: the runtime is bundled, so this sets up the launcher"
@@ -184,7 +196,7 @@ Install uv from https://docs.astral.sh/uv/getting-started/installation/ and re-r
 }
 
 UV=""
-if [ "$ARCHIVE" = "0" ]; then
+if [ "$ARCHIVE" = "0" ] && [ "$SHORTCUTS_ONLY" = "0" ]; then
   if ! UV="$(find_uv)"; then
     if [ "$CHECK_ONLY" = "1" ]; then
       die "uv is not installed. Run without --check to install it."
@@ -201,7 +213,7 @@ fi
 VENV="$PROJECT_DIR/.venv"
 VENV_PY="$VENV/bin/python"
 
-if [ "$CHECK_ONLY" = "0" ] && [ "$ARCHIVE" = "0" ]; then
+if [ "$CHECK_ONLY" = "0" ] && [ "$ARCHIVE" = "0" ] && [ "$SHORTCUTS_ONLY" = "0" ]; then
   step "Preparing the Python environment"
   if [ ! -x "$VENV_PY" ]; then
     "$UV" venv --allow-existing "$VENV" --quiet
@@ -256,7 +268,7 @@ if [ "$CHECK_ONLY" = "1" ]; then
   exit 0
 fi
 
-if [ "$ARCHIVE" = "0" ] && [ "$WITH_VOICE" = "1" ] && [ "$DO_MODELS" = "1" ]; then
+if [ "$ARCHIVE" = "0" ] && [ "$SHORTCUTS_ONLY" = "0" ] && [ "$WITH_VOICE" = "1" ] && [ "$DO_MODELS" = "1" ]; then
   step "Local speech models"
   info "cache: $MODELS_DIR (this survives updates and is removed only by you)"
   MODEL_ARGS=(models download)
@@ -389,17 +401,25 @@ if [ "$PLATFORM" = "macOS" ]; then
   # -y means "take the defaults", and adding something to sign-in is not a
   # default worth taking silently, so it answers no. No terminal to ask on means
   # the same.
+  change_startup=1
+  startup=0
   if [ "$STARTUP" = "1" ]; then
     startup=1
-  elif [ "$STARTUP" = "0" ] || [ "$ASSUME_YES" = "1" ] || [ ! -t 0 ]; then
+  elif [ "$STARTUP" = "0" ]; then
     startup=0
+  elif [ "$ASSUME_YES" = "1" ] || [ ! -t 0 ]; then
+    # Unattended with no answer: leave it alone. Defaulting to "no" deleted a
+    # sign-in entry the caller had never been asked about.
+    change_startup=0
   elif ask_yes_no "Start Surtitle when you sign in?" n; then
     startup=1
   else
     startup=0
   fi
 
-  if [ "$startup" = "1" ]; then
+  if [ "$change_startup" = "0" ]; then
+    info "sign-in setting left unchanged"
+  elif [ "$startup" = "1" ]; then
     write_agent
     load_agent
     info "Surtitle will start when you sign in ($AGENT_PLIST)"
@@ -416,8 +436,15 @@ fi
 # --------------------------------------------------------------------------- #
 # Verify, then say what to do next
 # --------------------------------------------------------------------------- #
-step "Verifying"
-run_app doctor --offline || true
+if [ "$SHORTCUTS_ONLY" = "0" ]; then
+  step "Verifying"
+  run_app doctor --offline || true
+fi
+
+if [ "$SHORTCUTS_ONLY" = "1" ]; then
+  printf '\n%s\n' "${GREEN}Launcher entries updated.${RESET}"
+  exit 0
+fi
 
 printf '\n%s\n' "${GREEN}${BOLD}Installation complete.${RESET}"
 

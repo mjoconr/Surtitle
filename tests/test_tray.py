@@ -614,3 +614,94 @@ class TestUpdateAction:
         tray._select("update_page")
 
         assert opened and "releases" in opened[0]
+
+
+class TestShellMenu:
+    """Launcher and sign-in rows, for a user who never ran an installer."""
+
+    def test_a_downloaded_archive_is_offered_a_menu_entry_and_sign_in(self, snapshot):
+        snapshot["shell"] = {"supported": True, "menu": False, "startup": False}
+        entries = menu_entries(snapshot)
+        assert "shell_menu" in {e.action for e in entries if e.action}
+        sign_in = next(e for e in entries if e.action == "shell_startup")
+        assert sign_in.label == "Start at sign-in"
+
+    def test_an_existing_menu_entry_is_not_offered_again(self, snapshot):
+        snapshot["shell"] = {"supported": True, "menu": True, "startup": True}
+        entries = menu_entries(snapshot)
+        assert "shell_menu" not in {e.action for e in entries if e.action}
+        sign_in = next(e for e in entries if e.action == "shell_startup")
+        assert "Don't start" in sign_in.label
+
+    def test_nothing_is_offered_where_there_is_no_such_entry(self, snapshot):
+        """Windows and macOS have launcher entries; Linux has neither."""
+        snapshot["shell"] = {"supported": False, "menu": False, "startup": False}
+        offered = {e.action for e in menu_entries(snapshot) if e.action}
+        assert "shell_menu" not in offered
+        assert "shell_startup" not in offered
+
+    def test_the_rows_are_absent_when_the_server_says_nothing_about_them(self, snapshot):
+        offered = {e.action for e in menu_entries(snapshot) if e.action}
+        assert "shell_menu" not in offered
+
+
+class TestShellAction:
+    def _tray(self, startup: bool) -> SurtitleTray:
+        tray = SurtitleTray("http://127.0.0.1:8765")
+        tray._snapshot = {"shell": {"supported": True, "menu": True, "startup": startup}}
+        return tray
+
+    def _record(self, monkeypatch, tray, answer=None):
+        asked: list[dict] = []
+        shown: list[str] = []
+        monkeypatch.setattr(
+            "surtitle.tray.request_shell",
+            lambda url, **kwargs: asked.append(kwargs) or (answer or {"ok": True}),
+        )
+        monkeypatch.setattr(tray, "_message", lambda text, title: shown.append(text))
+        return asked, shown
+
+    def test_turning_sign_in_on_asks_for_on(self, monkeypatch):
+        tray = self._tray(startup=False)
+        asked, shown = self._record(monkeypatch, tray)
+
+        tray._select("shell_startup")
+
+        assert asked == [{"menu": None, "startup": True}]
+        assert shown and "will start" in shown[0]
+
+    def test_turning_sign_in_off_asks_for_off(self, monkeypatch):
+        tray = self._tray(startup=True)
+        asked, shown = self._record(monkeypatch, tray)
+
+        tray._select("shell_startup")
+
+        assert asked == [{"menu": None, "startup": False}]
+        assert shown and "no longer" in shown[0]
+
+    def test_adding_the_menu_entry_asks_for_it(self, monkeypatch):
+        tray = self._tray(startup=False)
+        asked, shown = self._record(monkeypatch, tray)
+
+        tray._select("shell_menu")
+
+        assert asked == [{"menu": True, "startup": None}]
+        assert shown and "Start Menu entry" in shown[0]
+
+    def test_a_refused_change_shows_the_reason(self, monkeypatch):
+        tray = self._tray(startup=False)
+        _, shown = self._record(monkeypatch, tray, answer={"ok": False, "error": "not writable"})
+
+        tray._select("shell_menu")
+
+        assert shown and "not writable" in shown[0]
+
+    def test_a_server_that_does_not_answer_is_reported(self, monkeypatch):
+        tray = self._tray(startup=False)
+        monkeypatch.setattr("surtitle.tray.request_shell", lambda url, **kwargs: None)
+        shown: list[str] = []
+        monkeypatch.setattr(tray, "_message", lambda text, title: shown.append(text))
+
+        tray._select("shell_menu")
+
+        assert shown and "did not accept" in shown[0]

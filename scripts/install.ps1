@@ -68,7 +68,11 @@ param(
     # Start Surtitle when this user signs in. Omitted: ask when interactive.
     [switch] $Startup,
     # Never start Surtitle at sign-in, and remove an entry if one exists.
-    [switch] $NoStartup
+    [switch] $NoStartup,
+    # Only set up the launcher and sign-in entries; touch nothing else. Used by
+    # the running app to offer those choices from its own menu, where running
+    # the Python steps would rebuild the environment the server is using.
+    [switch] $ShortcutsOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -153,7 +157,7 @@ $isArchive = (Test-Path (Join-Path $ProjectDir 'BUILD-INFO.json')) -and (
     (Test-Path (Join-Path $ProjectDir 'python\python.exe')) -or
     (Test-Path (Join-Path $ProjectDir 'venv\Scripts\python.exe'))
 )
-if ($isArchive) {
+if ($isArchive -and (-not $ShortcutsOnly)) {
     Write-Info 'release archive: the runtime is bundled, so this sets up the launcher'
     Write-Info 'and sign-in entries only - there is no Python to install.'
     if ($Check) {
@@ -178,8 +182,8 @@ function Find-Uv {
     return $null
 }
 
-$uv = if ($isArchive) { $null } else { Find-Uv }
-if ((-not $uv) -and (-not $isArchive)) {
+$uv = if ($isArchive -or $ShortcutsOnly) { $null } else { Find-Uv }
+if ((-not $uv) -and (-not $isArchive) -and (-not $ShortcutsOnly)) {
     if ($Check) { Fail 'uv is not installed. Run without -Check to install it.' }
     Write-Step 'Installing uv (Python toolchain, no admin rights needed)'
     try {
@@ -206,7 +210,7 @@ if ($uv) { Write-Info "uv:      $uv" }
 $venv = Join-Path $ProjectDir '.venv'
 $venvPy = Join-Path $venv 'Scripts\python.exe'
 
-if ((-not $Check) -and (-not $isArchive)) {
+if ((-not $Check) -and (-not $isArchive) -and (-not $ShortcutsOnly)) {
     Write-Step 'Preparing the Python environment'
     if (-not (Test-Path $venvPy)) {
         & $uv venv --allow-existing $venv --quiet
@@ -254,7 +258,7 @@ function Invoke-App([string[]] $AppArguments) {
 
 # The archive path never reaches here: it has a bundled runtime and reported its
 # state above.
-if ($Check -and (-not $isArchive)) {
+if ($Check -and (-not $isArchive) -and (-not $ShortcutsOnly)) {
     Write-Step 'Checking the installation'
     if (Test-Path $venvPy) {
         Invoke-App @('models', 'list') | Out-Null
@@ -266,7 +270,7 @@ if ($Check -and (-not $isArchive)) {
     exit 0
 }
 
-if ((-not $isArchive) -and (-not $NoVoice) -and (-not $NoModels)) {
+if ((-not $isArchive) -and (-not $ShortcutsOnly) -and (-not $NoVoice) -and (-not $NoModels)) {
     Write-Step 'Local speech models'
     Write-Info "cache: $modelsDir (this survives updates and is removed only by you)"
     # The application prints sizes and asks before downloading the speech models.
@@ -344,6 +348,7 @@ $startupLink = Join-Path ([Environment]::GetFolderPath('Startup')) 'Surtitle.lnk
 # -Startup and -NoStartup are the answers for an automated run. -Yes means "take
 # the defaults" and adding something to sign-in is not a default worth taking
 # silently, so it answers no.
+$changeStartup = $true
 $enableStartup = $false
 if ($Startup) {
     $enableStartup = $true
@@ -351,9 +356,16 @@ if ($Startup) {
     $enableStartup = $false
 } elseif ((-not $Yes) -and (Test-CanPrompt)) {
     $enableStartup = Ask-YesNo 'Start Surtitle when you sign in?' $false
+} else {
+    # Unattended with no answer: leave it alone. Defaulting to "no" deleted a
+    # sign-in entry the caller had never been asked about - which is what an
+    # app-driven run to add a Start Menu entry would have done.
+    $changeStartup = $false
 }
 try {
-    if ($enableStartup) {
+    if (-not $changeStartup) {
+        Write-Info 'sign-in setting left unchanged'
+    } elseif ($enableStartup) {
         # --no-browser: a browser window opening itself at every sign-in is
         # intrusive. The app is ready behind the notification icon, and the
         # Start Menu entry (or the icon) opens the UI when it is wanted.
@@ -372,10 +384,16 @@ try {
     Write-Warn "could not change the sign-in setting: $($_.Exception.Message)"
 }
 
+if ($ShortcutsOnly) {
+    Write-Host ''
+    Write-Host 'Launcher entries updated.' -ForegroundColor Green
+    exit 0
+}
+
 # --------------------------------------------------------------------------- #
 # Verify, then say what to do next
 # --------------------------------------------------------------------------- #
-if (-not $isArchive) {
+if ((-not $isArchive) -and (-not $ShortcutsOnly)) {
     Write-Step 'Verifying'
     Invoke-App @('doctor', '--offline') | Out-Null
 }

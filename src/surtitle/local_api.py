@@ -34,6 +34,7 @@ __all__ = [
     "find_instance",
     "instance_path",
     "read_instance",
+    "request_shell",
     "request_shutdown",
     "request_update",
     "request_voice_install",
@@ -47,6 +48,9 @@ INSTANCE_FILENAME = "server.json"
 # TCP timeout reads as a broken app. A loopback server answers in microseconds.
 _PROBE_TIMEOUT = 1.5
 _STOP_TIMEOUT = 3.0
+# Setting up a shortcut runs the installer, which is seconds rather than
+# microseconds but still should not hang a menu.
+_SHELL_TIMEOUT = 60.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -219,6 +223,42 @@ def request_update(
     except ValueError:
         return {}
     return payload if isinstance(payload, dict) else {}
+
+
+def request_shell(
+    url: str,
+    *,
+    menu: bool | None = None,
+    startup: bool | None = None,
+    timeout: float = _SHELL_TIMEOUT,
+) -> dict[str, Any] | None:
+    """Ask the server to set up the launcher entry, or start-at-sign-in.
+
+    ``None`` means nothing answered. The server's answer carries ``ok`` and, when
+    it failed, the reason to show.
+    """
+    payload: dict[str, Any] = {}
+    if menu is not None:
+        payload["menu"] = menu
+    if startup is not None:
+        payload["startup"] = startup
+    try:
+        with httpx.Client(base_url=url, timeout=timeout) as client:
+            response = client.post("/api/shell", json=payload)
+    except (httpx.HTTPError, ValueError, OSError):
+        return None
+    try:
+        body = response.json()
+    except ValueError:
+        return {}
+    if not isinstance(body, dict):
+        return {}
+    if response.status_code != 200:
+        return {
+            "ok": False,
+            "error": body.get("error") or "the launcher settings could not be changed",
+        }
+    return body
 
 
 def find_instance(

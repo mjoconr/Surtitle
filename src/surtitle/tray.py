@@ -25,6 +25,7 @@ from typing import Any
 
 from surtitle.local_api import (
     fetch_status,
+    request_shell,
     request_shutdown,
     request_update,
     request_voice_install,
@@ -71,6 +72,8 @@ ACTIONS = (
     "update_release",
     "update_main",
     "update_page",
+    "shell_menu",
+    "shell_startup",
     "stop",
 )
 
@@ -176,6 +179,7 @@ def menu_entries(snapshot: dict[str, Any] | None) -> list[MenuEntry]:
         MenuEntry(separator=True),
         MenuEntry(**_voice_entry(snapshot if live else None)),
         *_update_entries(snapshot if live else None),
+        *_shell_entries(snapshot if live else None),
         MenuEntry(separator=True),
         MenuEntry(label="Stop Surtitle", action="stop", enabled=live),
     ]
@@ -204,6 +208,28 @@ def _update_entries(snapshot: dict[str, Any] | None) -> list[MenuEntry]:
     if update.get("self_update"):
         return [MenuEntry(label="Update to the latest release…", action="update_release")]
     return [MenuEntry(label="Get the latest release…", action="update_page")]
+
+
+def _shell_entries(snapshot: dict[str, Any] | None) -> list[MenuEntry]:
+    """Launcher and sign-in rows, offered only where they mean something.
+
+    Both were reachable only by re-running Setup, which is how someone who
+    extracted the archive ended up with no Start Menu entry and no way to start at
+    sign-in without going looking for a script.
+    """
+    if snapshot is None:
+        return []
+    shell = snapshot.get("shell") or {}
+    if not shell.get("supported"):
+        return []
+    entries: list[MenuEntry] = []
+    if not shell.get("menu"):
+        entries.append(MenuEntry(label="Add Start Menu entry", action="shell_menu"))
+    if shell.get("startup"):
+        entries.append(MenuEntry(label="Don't start at sign-in", action="shell_startup"))
+    else:
+        entries.append(MenuEntry(label="Start at sign-in", action="shell_startup"))
+    return entries
 
 
 def _voice_entry(snapshot: dict[str, Any] | None) -> dict[str, Any]:
@@ -393,6 +419,11 @@ class SurtitleTray:
             self._update("main")
         elif action == "update_page":
             open_browser(RELEASES_PAGE)
+        elif action == "shell_menu":
+            self._set_shell(menu=True)
+        elif action == "shell_startup":
+            shell = (self.snapshot or {}).get("shell") or {}
+            self._set_shell(startup=not bool(shell.get("startup")))
         elif action == "stop":
             self._request_stop()
 
@@ -501,6 +532,26 @@ class SurtitleTray:
             "Surtitle when it finishes.",
             title,
         )
+
+    def _set_shell(self, *, menu: bool | None = None, startup: bool | None = None) -> None:
+        """Add the launcher entry, or turn start-at-sign-in on or off."""
+        title = "Surtitle — launcher"
+        answer = request_shell(self.url, menu=menu, startup=startup)
+        if answer is None:
+            self._message("Surtitle did not accept the request.", title)
+            return
+        if not answer.get("ok", True):
+            self._message(
+                str(answer.get("error") or "Could not change the launcher settings."), title
+            )
+            return
+        if startup is True:
+            detail = "Surtitle will start when you sign in."
+        elif startup is False:
+            detail = "Surtitle will no longer start when you sign in."
+        else:
+            detail = "The Start Menu entry is in place, with the application icon."
+        self._message(detail, title)
 
     def _confirm(self, text: str, title: str) -> bool:
         """A yes/no box, and 'no' whenever the icon cannot ask."""
