@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-09-19
+
+### Fixed
+
+- **The folder picker leads with the folder you are browsing.** At `C:\` it listed
+  the other drives first, and on a machine with a lot of mapped drives that was the
+  entire visible panel — the folders inside `C:\` sat below the fold, and the one
+  row on screen was the hidden `$Recycle.Bin`. The folder's own entries now come
+  first, the other volumes follow under an "Other drives" label, the level reports
+  how many folders it holds, and a level whose folders are all hidden says so
+  instead of looking empty. The Hidden toggle shows that it is on, the up button is
+  disabled at a filesystem root, and each level starts scrolled to its first entry.
+- **Two 0.5.0 tests that misbehaved on Windows.** The Windows chooser-refusal test
+  called the dialog entry point on Windows, where it is not the refusal branch — it
+  opens a real modal dialog with nobody to close it, and both `windows-latest` CI
+  jobs sat in "Run the test suite" for 43 minutes. It skips there now, as do the
+  symlink tests on a platform that cannot create symlinks without elevation, and a
+  POSIX-only file-name test.
+
 ## [0.5.0] - 2026-09-19
 
 ### Added
