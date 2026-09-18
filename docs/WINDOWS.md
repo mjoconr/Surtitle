@@ -377,6 +377,28 @@ the API is in flux. If you want it, the cross-compile path above is proven to wo
 
 ## Troubleshooting
 
+**"The update ran and it came back on the old version"**
+The swap happens *after* Surtitle has exited — Windows will not let a running
+program's files be replaced — so the updater reports by writing two files:
+
+```
+%LOCALAPPDATA%\Surtitle\updates\last-update.txt    the outcome, one line
+%LOCALAPPDATA%\Surtitle\updates\apply-update.log   every step it took
+```
+
+The tray shows a failed attempt as its own menu row (**Last update failed — …**),
+and selecting it shows the reason and that path; the Status dialog and
+`surtitle status` carry it too.
+
+Before 0.5.2 every in-place update on Windows failed this way, for a reason worth
+knowing: `run.bat` starts the server with the installation folder as its working
+directory, and the updater inherited it. Windows refuses to rename a directory
+that any process has as its current directory, so the swap could never happen.
+The updater now runs from the data folder instead. If you see "could not move …
+aside" on 0.5.2 or later, something else still has the folder open — usually the
+window Surtitle was started from; close it and try again, or install the release
+by hand (below).
+
 **"no Python environment was found"**
 Two very different causes, and the message now tells them apart.
 

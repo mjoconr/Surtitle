@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-09-19
+
+### Fixed
+
+- **In-place updates on Windows did nothing.** The tray offered the release, the
+  download and checksum succeeded, Surtitle closed — and it came back on the old
+  version. `run.bat` starts the server with the installation folder as its working
+  directory, and the updater inherited that directory, so PowerShell was running
+  *inside* the folder it was about to rename. Windows refuses to rename a directory
+  that any process has as its current directory, so the first `Move-Item` failed
+  every time, the script threw, and nothing was swapped. The updater now runs from
+  the app's data folder, and both scripts change directory there before touching
+  anything. The moves also retry for a directory that is briefly still held, while
+  a source that does not exist fails immediately rather than slowly.
+- **A failed update is no longer silent, and no longer leaves the app down.** The
+  swap happens after Surtitle has exited, so its outcome can only be reported in a
+  file: every step is now written to
+  `%LOCALAPPDATA%\Surtitle\updates\apply-update.log` with the result in
+  `last-update.txt` beside it. The tray shows a failure as its own row naming the
+  reason, selecting it explains what to do and where the log is, the Status dialog
+  and `surtitle status` carry it, and retrying says what went wrong last time
+  rather than repeating a blind attempt. If the swap fails the old installation is
+  put back *and started again* — previously a failure left the user with no running
+  app, and a leftover `.old` folder that could not be removed aborted the script
+  before it relaunched anything.
+
+  The tests missed this because they run the POSIX swap script, which allows that
+  rename, from outside the directory it moves. There is now a test that asserts the
+  updater's working directory is outside the installation, and the whole reporting
+  path is covered.
+
 ## [0.5.1] - 2026-09-19
 
 ### Fixed
