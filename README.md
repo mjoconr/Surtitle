@@ -443,6 +443,9 @@ URLs and file paths are stripped before speech, because they read terribly aloud
 
 ## Development
 
+Releases are cut from `main` by pushing a tag; the process, and what it
+checks, is in [`docs/RELEASING.md`](docs/RELEASING.md).
+
 ```bash
 uv sync                              # install
 uv sync --extra voice-local          # plus the offline speech engines

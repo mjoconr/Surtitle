@@ -45,7 +45,8 @@ What this means in practice:
   (browser assets), `cli.py`, `config.py`, `folder_browse.py`, `releases.py`.
 - `tests/` — offline and deterministic by default; every model and voice call
   is replayed through scripted fakes, so no API keys are needed.
-- `docs/` — `ARCHITECTURE.md`, `TOOLS.md`, `VOICE.md`, `WINDOWS.md`, `VCS.md`.
+- `docs/` — `ARCHITECTURE.md`, `TOOLS.md`, `VOICE.md`, `WINDOWS.md`, `VCS.md`,
+  `RELEASING.md` (the release process, and what a release must not do).
 
 ## Commands
 
@@ -70,6 +71,9 @@ CI does.
   returned as data rather than raised.
 - [`CHANGELOG.md`](CHANGELOG.md) — what changed and how to migrate an install.
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — how the pieces fit together.
+- [`docs/RELEASING.md`](docs/RELEASING.md) — read this before cutting a release. The version lives in
+  three files and CI checks all three; a published tag is never moved; and the artifact has to be
+  checked after it is published, not the workflow run.
 
 ## Commits
 

@@ -337,6 +337,9 @@ platform-specific — `release.yml` runs the build on `windows-latest` and
 `macos-latest` rather than cross-compiling. That applies double to the local
 engines, whose `sherpa-onnx` wheels are per-platform binaries.
 
+The release process itself — version bumps, tagging, and verifying what was
+published — is in [`RELEASING.md`](RELEASING.md).
+
 ## Installation and updates
 
 `scripts/install.sh` (macOS/Linux) and `scripts/install.ps1` (Windows) exist

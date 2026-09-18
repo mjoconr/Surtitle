@@ -95,7 +95,7 @@ need a comment.
 
 ## Adding a tool
 
-See the end of [`TOOLS.md`](TOOLS.md) — the pattern is a `Tool` with a JSON Schema, a
+See the end of [`docs/TOOLS.md`](docs/TOOLS.md) — the pattern is a `Tool` with a JSON Schema, a
 handler returning `ToolResult`, and an approval policy, then a line in
 `default_tool_list()`.
 
@@ -122,6 +122,10 @@ test(tools): cover requirement strings that look like flags
 no network. If you add a dependency, verify the build still works on Windows, since
 compiled wheels are platform-specific. CI builds and smoke-tests both platforms on every
 pull request, including importing the app from the bundled runtime.
+
+Cutting a release from that archive — version bumps, the changelog
+section, tagging, and checking the published artifacts — is in
+[`docs/RELEASING.md`](docs/RELEASING.md).
 
 ## Reporting issues
 
