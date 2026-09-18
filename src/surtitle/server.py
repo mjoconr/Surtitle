@@ -234,11 +234,16 @@ def _local_voice_payload(settings: Settings, job: InstallJob) -> dict[str, Any]:
     }
 
 
-def _update_payload(job: UpdateJob) -> dict[str, Any]:
+def _update_payload(job: UpdateJob, settings: Settings) -> dict[str, Any]:
     """How this installation can update, and how one in flight is going.
 
     Deliberately no network call: this rides on every tray poll. Deciding whether
     a newer release exists is a separate, on-demand request.
+
+    ``last`` is what the updater wrote after the previous attempt, which happens
+    once this process has exited and so cannot be reported any other way. Without
+    it a failed swap is silent: the app stops, nothing changes, and the user sees
+    the old version again with no reason given.
     """
     from surtitle import selfupdate
 
@@ -249,6 +254,7 @@ def _update_payload(job: UpdateJob) -> dict[str, Any]:
         # an unpacked source tree cannot), which decides what the tray offers.
         "self_update": selfupdate.supported(),
         "job": job.snapshot(),
+        "last": selfupdate.last_attempt(settings),
     }
 
 
@@ -328,7 +334,7 @@ def build_api(state: AppState) -> APIRouter:
                 "install": state.vcs_install.snapshot(),
             },
             "shell": shell_integration.state(),
-            "update": _update_payload(state.update),
+            "update": _update_payload(state.update, settings),
             "usage": usage,
             "storage": {
                 **state.store.counts(),

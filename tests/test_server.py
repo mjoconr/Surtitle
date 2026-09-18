@@ -752,6 +752,40 @@ class TestUpdate:
         assert "job" in body
 
 
+class TestUpdateOutcome:
+    """A swap happens after the app exits, so its result arrives here or nowhere."""
+
+    async def test_no_attempt_yet_is_null(self, client):
+        body = (await client.get("/api/status")).json()
+        assert body["update"]["last"] is None
+
+    async def test_a_failed_attempt_is_reported_with_its_reason(self, client, settings):
+        from surtitle import selfupdate
+
+        updates = selfupdate.updates_dir(settings)
+        updates.mkdir(parents=True, exist_ok=True)
+        (updates / "last-update.txt").write_text(
+            "1789000000 failed could not move the install aside\n", encoding="utf-8"
+        )
+
+        body = (await client.get("/api/status")).json()
+
+        assert body["update"]["last"]["ok"] is False
+        assert "could not move the install aside" in body["update"]["last"]["message"]
+        assert body["update"]["last"]["log"].endswith("apply-update.log")
+
+    async def test_the_reason_never_leaks_a_credential(self, client, settings):
+        """It is written by a script, but it is still shown to the user."""
+        from surtitle import selfupdate
+
+        updates = selfupdate.updates_dir(settings)
+        updates.mkdir(parents=True, exist_ok=True)
+        (updates / "last-update.txt").write_text(
+            "1789000000 failed access denied\n", encoding="utf-8"
+        )
+        assert "sk-test" not in (await client.get("/api/status")).text
+
+
 class TestFolderDialog:
     """The native folder chooser, and who may open a window on this desktop."""
 

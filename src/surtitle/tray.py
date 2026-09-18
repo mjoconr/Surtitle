@@ -79,6 +79,7 @@ ACTIONS = (
     "shell_menu",
     "shell_startup",
     "stop",
+    "update_why",
 )
 
 # How often the server is asked how it is doing. Every poll is a loopback
@@ -248,6 +249,14 @@ def _update_entries(snapshot: dict[str, Any] | None) -> list[MenuEntry]:
     update = snapshot.get("update") or {}
     if (update.get("job") or {}).get("running"):
         return [MenuEntry(label="Updating…", action="update_release", enabled=False)]
+    # A previous attempt that failed is worth saying before offering it again: the
+    # swap happens after Surtitle has exited, so its outcome arrives here and
+    # nowhere else. Selecting the row shows the whole reason.
+    last = update.get("last") or {}
+    failed = None
+    if last and not last.get("ok"):
+        reason = str(last.get("message") or "the update did not complete")
+        failed = MenuEntry(label=f"Last update failed — {_shorten(reason)}", action="update_why")
     if update.get("kind") == "git":
         rows = [
             MenuEntry(label="Update to the latest release…", action="update_release"),
@@ -259,7 +268,17 @@ def _update_entries(snapshot: dict[str, Any] | None) -> list[MenuEntry]:
         rows = [MenuEntry(label="Get the latest release…", action="update_page")]
 
     notice = _release_entry(snapshot)
-    return [notice, *rows] if notice is not None else rows
+    if notice is not None:
+        rows.insert(0, notice)
+    if failed is not None:
+        rows.insert(0, failed)
+    return rows
+
+
+def _shorten(text: str, limit: int = 34) -> str:
+    """A menu row is one line; the full reason is one click away."""
+    text = " ".join(text.split())
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
 
 
 def _release_entry(snapshot: dict[str, Any] | None) -> MenuEntry | None:
@@ -342,6 +361,11 @@ def format_status(snapshot: dict[str, Any]) -> str:
         if snapshot.get("voice_enabled")
         else "disabled"
     )
+    last = (snapshot.get("update") or {}).get("last") or {}
+    attempted = ""
+    if last:
+        outcome = "ok" if last.get("ok") else f"failed — {last.get('message') or 'no reason given'}"
+        attempted = f"Last update: {outcome}"
     lines = [
         f"Surtitle {snapshot.get('version') or ''}".strip(),
         "",
@@ -359,6 +383,8 @@ def format_status(snapshot: dict[str, Any]) -> str:
         f"Database      {human_bytes(int(storage.get('db_bytes') or 0))}",
         f"Data folder   {snapshot.get('data_dir') or ''}",
     ]
+    if attempted:
+        lines.append(attempted)
     return "\n".join(lines)
 
 
@@ -501,6 +527,8 @@ class SurtitleTray:
             self._update("main")
         elif action == "update_page":
             open_browser(RELEASES_PAGE)
+        elif action == "update_why":
+            self._show_update_failure()
         elif action == "shell_menu":
             self._set_shell(menu=True)
         elif action == "shell_startup":
@@ -613,6 +641,27 @@ class SurtitleTray:
             title,
         )
 
+    def _show_update_failure(self) -> None:
+        """Say why the last swap failed, and where the whole log is.
+
+        The reason matters more than the fact: "access denied moving the folder"
+        means close the window it was started from and try again, while "no build
+        for this platform" means something else entirely.
+        """
+        update = (self.snapshot or {}).get("update") or {}
+        last = update.get("last") or {}
+        title = "Surtitle — update failed"
+        message = str(last.get("message") or "The last update did not complete.")
+        log = str(last.get("log") or "")
+        text = (
+            f"{message}\n\n"
+            "Surtitle is still running the version it had, so nothing was lost. "
+            "Try again, and if it fails the same way, the details are here:"
+        )
+        if log:
+            text += f"\n\n{log}"
+        self._message(text, title)
+
     def _update(self, target: str) -> None:
         """Ask the server to update, and say which kind of update it will be.
 
@@ -625,8 +674,14 @@ class SurtitleTray:
         in_place = update.get("kind") != "git" and bool(update.get("self_update"))
 
         if in_place:
+            previous = (update.get("last") or {}).get("message") or ""
+            lead = ""
+            if previous and not (update.get("last") or {}).get("ok", True):
+                # Retrying the same thing without saying it failed last time is
+                # how a user ends up in a loop they cannot describe.
+                lead = f"The last attempt did not complete: {previous}\n\n"
             question = (
-                "Update Surtitle to the latest release?\n\n"
+                lead + "Update Surtitle to the latest release?\n\n"
                 "The release is downloaded and checked against its published "
                 "checksum, then installed. Surtitle closes and starts the new "
                 "version; your settings, database and speech models are kept."

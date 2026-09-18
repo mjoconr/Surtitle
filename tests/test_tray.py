@@ -953,3 +953,71 @@ class _NoThread:
 
     def is_alive(self) -> bool:
         return False
+
+
+class TestFailedUpdateIsVisible:
+    """The user must never be left guessing why the version did not change."""
+
+    def _snapshot(self, snapshot, message="could not move the install aside"):
+        snapshot["update"] = {
+            "kind": "archive",
+            "self_update": True,
+            "last": {
+                "ok": False,
+                "message": message,
+                "at": 1789000000.0,
+                "log": "/data/updates/apply-update.log",
+            },
+        }
+        return snapshot
+
+    def test_a_failed_update_gets_its_own_row(self, snapshot):
+        entry = next(e for e in menu_entries(self._snapshot(snapshot)) if e.action == "update_why")
+        assert "Last update failed" in entry.label
+        assert "could not move" in entry.label
+
+    def test_a_successful_update_gets_no_row(self, snapshot):
+        snapshot["update"] = {"kind": "archive", "self_update": True, "last": {"ok": True}}
+        assert not [e for e in menu_entries(snapshot) if e.action == "update_why"]
+
+    def test_the_row_points_at_the_dialog_that_explains_it(self, monkeypatch):
+        tray = SurtitleTray("http://127.0.0.1:8765")
+        tray._snapshot = {
+            "update": {
+                "last": {
+                    "ok": False,
+                    "message": "could not move the install aside",
+                    "log": "/data/updates/apply-update.log",
+                }
+            }
+        }
+        shown: list[str] = []
+        monkeypatch.setattr(tray, "_message", lambda text, title: shown.append(text))
+
+        tray._select("update_why")
+
+        assert shown and "could not move the install aside" in shown[0]
+        assert "apply-update.log" in shown[0], "the log is how this gets diagnosed"
+        assert "still running the version it had" in shown[0]
+
+    def test_the_status_dialog_carries_it_too(self, snapshot):
+        text = format_status(self._snapshot(snapshot))
+        assert "Last update: failed" in text
+        assert "could not move" in text
+
+    def test_retrying_says_what_went_wrong_last_time(self, monkeypatch):
+        """Otherwise the user retries the same thing and cannot describe the loop."""
+        tray = SurtitleTray("http://127.0.0.1:8765")
+        tray._snapshot = {
+            "update": {
+                "kind": "archive",
+                "self_update": True,
+                "last": {"ok": False, "message": "access denied", "log": ""},
+            }
+        }
+        asked: list[str] = []
+        monkeypatch.setattr(tray, "_confirm", lambda text, title: asked.append(text) or False)
+
+        tray._select("update_release")
+
+        assert asked and "The last attempt did not complete: access denied" in asked[0]

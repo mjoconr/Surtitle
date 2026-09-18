@@ -281,3 +281,194 @@ class TestTheSwap:
                 holder.kill()
         assert runner.returncode == 0, err
         assert (root / "marker.txt").read_text(encoding="utf-8") == "new"
+
+
+class TestTheUpdaterIsNotRunFromTheInstall:
+    """The bug that made every in-place update on Windows do nothing.
+
+    ``run.bat`` does ``cd /d "%~dp0"``, so the server's working directory is the
+    install directory, and the updater used to inherit it. Windows refuses to
+    rename a directory that any process has as its current directory, so the first
+    ``Move-Item`` always failed, the script threw, and the app came back on the old
+    version with nothing said. The POSIX swap tests never saw it because POSIX
+    allows that rename and because they run the script from outside the directory
+    it moves.
+    """
+
+    def test_the_updater_runs_with_a_working_directory_outside_the_install(
+        self, tmp_path, monkeypatch
+    ):
+        root = tmp_path / "Surtitle"
+        root.mkdir()
+        staged = tmp_path / "Surtitle.new"
+        staged.mkdir()
+        script = selfupdate.write_updater(_settings(tmp_path), staged, root)
+
+        seen: list[dict] = []
+        monkeypatch.setattr(
+            selfupdate.subprocess,
+            "Popen",
+            lambda argv, **kwargs: seen.append({"argv": argv, **kwargs}) or object(),
+        )
+
+        selfupdate._launch(script, root, staged, root / "run.sh")
+
+        assert seen, "the updater was never started"
+        cwd = Path(seen[0]["cwd"]).resolve()
+        assert not cwd.is_relative_to(root.resolve()), (
+            "the updater must not run from the install directory: Windows will not "
+            "rename a directory that is a process's working directory"
+        )
+        assert cwd == script.parent.resolve()
+
+    def test_the_script_is_written_outside_the_install(self, tmp_path):
+        root = tmp_path / "Surtitle"
+        root.mkdir()
+        settings = _settings(tmp_path)
+
+        script = selfupdate.write_updater(settings, tmp_path / "staged", root)
+
+        assert not Path(script).resolve().is_relative_to(root.resolve())
+        assert Path(script).parent == selfupdate.updates_dir(settings)
+        assert Path(script).parent.is_dir(), "the working directory has to exist"
+
+    def test_both_scripts_change_directory_before_moving_anything(self):
+        """Belt and braces for a host that launches them some other way."""
+        from surtitle.selfupdate import _UPDATER_PS1, _UPDATER_SH
+
+        assert _UPDATER_SH.index('cd "$here"') < _UPDATER_SH.index(
+            'move_with_retry "$install" "$backup"'
+        ), "the shell script must change directory before moving the install"
+        assert _UPDATER_PS1.index("Set-Location -LiteralPath $here") < _UPDATER_PS1.index(
+            "Move-WithRetry -From $Install -To $backup"
+        ), "the PowerShell script must change directory before moving the install"
+
+    def test_a_move_is_retried_but_a_missing_source_is_not(self):
+        """Windows releases a directory handle a moment after the process exits."""
+        from surtitle.selfupdate import _UPDATER_PS1, _UPDATER_SH
+
+        assert "move_with_retry" in _UPDATER_SH and "sleep 0.5" in _UPDATER_SH
+        assert "Move-WithRetry" in _UPDATER_PS1 and "Start-Sleep -Milliseconds 500" in _UPDATER_PS1
+        # Retrying a source that does not exist would only make a failure slow.
+        assert '[ -e "$from" ] || return 1' in _UPDATER_SH
+        assert "if (-not (Test-Path -LiteralPath $From)) { return $false }" in _UPDATER_PS1
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the POSIX swap script")
+class TestTheUpdaterReportsWhatItDid:
+    """The swap runs after the app exits, so a file is the only way it can report."""
+
+    def _prepare(self, tmp_path, *, staged: bool):
+        root = tmp_path / "Surtitle"
+        root.mkdir()
+        (root / "marker.txt").write_text("old", encoding="utf-8")
+        staged_dir = tmp_path / "Surtitle.new"
+        if staged:
+            staged_dir.mkdir()
+            (staged_dir / "marker.txt").write_text("new", encoding="utf-8")
+        settings = _settings(tmp_path)
+        script = selfupdate.write_updater(settings, staged_dir, root)
+        return settings, root, staged_dir, script
+
+    def _run(self, script, root, staged, relaunch=""):
+        holder = subprocess.Popen(["/bin/sh", "-c", "sleep 0.3"])
+        runner = subprocess.Popen(
+            ["/bin/sh", str(script), str(holder.pid), str(root), str(staged), relaunch],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        holder.wait(timeout=15)
+        runner.communicate(timeout=60)
+        return runner.returncode
+
+    def test_a_successful_swap_says_so(self, tmp_path):
+        settings, root, staged, script = self._prepare(tmp_path, staged=True)
+
+        assert self._run(script, root, staged) == 0
+
+        result = selfupdate.last_attempt(settings)
+        assert result is not None
+        assert result["ok"] is True
+        assert result["at"] > 0
+        assert selfupdate.log_path(settings).is_file()
+
+    def test_a_failed_swap_says_why_and_leaves_the_app_alone(self, tmp_path):
+        settings, root, staged, script = self._prepare(tmp_path, staged=False)
+
+        assert self._run(script, root, staged) != 0
+
+        result = selfupdate.last_attempt(settings)
+        assert result is not None and result["ok"] is False
+        assert "could not be moved" in result["message"]
+        assert (root / "marker.txt").read_text(encoding="utf-8") == "old"
+
+    def test_the_app_is_started_again_even_when_the_swap_failed(self, tmp_path):
+        """Being left with no app at all is worse than the update not happening."""
+        _settings_unused, root, staged, script = self._prepare(tmp_path, staged=False)
+        marker = tmp_path / "relaunched.txt"
+        relaunch = tmp_path / "relaunch.sh"
+        relaunch.write_text(f'#!/bin/sh\necho started > "{marker}"\n', encoding="utf-8")
+        relaunch.chmod(0o755)
+
+        self._run(script, root, staged, relaunch=str(relaunch))
+
+        for _ in range(50):
+            if marker.is_file():
+                break
+            time.sleep(0.1)
+        assert marker.is_file(), "a failed update must not leave the user with no app"
+
+    def test_the_log_records_the_steps(self, tmp_path):
+        settings, root, staged, script = self._prepare(tmp_path, staged=True)
+
+        self._run(script, root, staged)
+
+        log = selfupdate.log_path(settings).read_text(encoding="utf-8")
+        assert "waiting for pid" in log
+        assert "the new build is in place" in log
+
+
+class TestLastAttempt:
+    """Reading the outcome, which is written by PowerShell or sh, not by Python."""
+
+    def test_nothing_recorded_is_none(self, tmp_path):
+        assert selfupdate.last_attempt(_settings(tmp_path)) is None
+
+    def test_an_ok_result(self, tmp_path):
+        settings = _settings(tmp_path)
+        selfupdate.updates_dir(settings).mkdir(parents=True, exist_ok=True)
+        (selfupdate.updates_dir(settings) / "last-update.txt").write_text(
+            "1789000000 ok updated\n", encoding="utf-8"
+        )
+        result = selfupdate.last_attempt(settings)
+        assert result is not None
+        assert result["ok"] is True and result["at"] == 1789000000.0
+
+    def test_a_failure_keeps_its_whole_message(self, tmp_path):
+        settings = _settings(tmp_path)
+        selfupdate.updates_dir(settings).mkdir(parents=True, exist_ok=True)
+        (selfupdate.updates_dir(settings) / "last-update.txt").write_text(
+            "1789000000 failed could not move C:\\Wooltech\\Surtitle aside\n", encoding="utf-8"
+        )
+        result = selfupdate.last_attempt(settings)
+        assert result is not None
+        assert result["ok"] is False
+        assert result["message"] == "could not move C:\\Wooltech\\Surtitle aside"
+        assert result["log"].endswith("apply-update.log")
+
+    def test_a_byte_order_mark_is_tolerated(self, tmp_path):
+        """PowerShell 5.1 writes one with -Encoding UTF8."""
+        settings = _settings(tmp_path)
+        selfupdate.updates_dir(settings).mkdir(parents=True, exist_ok=True)
+        (selfupdate.updates_dir(settings) / "last-update.txt").write_bytes(
+            "\ufeff1789000000 ok updated\n".encode("utf-8")
+        )
+        assert selfupdate.last_attempt(settings)["ok"] is True
+
+    @pytest.mark.parametrize("text", ["", "   ", "not a result", "12345 ok"])
+    def test_a_malformed_result_is_ignored_rather_than_shown(self, tmp_path, text):
+        settings = _settings(tmp_path)
+        selfupdate.updates_dir(settings).mkdir(parents=True, exist_ok=True)
+        (selfupdate.updates_dir(settings) / "last-update.txt").write_text(text, encoding="utf-8")
+        assert selfupdate.last_attempt(settings) is None
