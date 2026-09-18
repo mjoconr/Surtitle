@@ -15,6 +15,7 @@ is exactly the sort of path a caller must not be able to smuggle in.
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -30,6 +31,21 @@ def tree(tmp_path):
     (tmp_path / ".hidden").mkdir()
     (tmp_path / "notes.txt").write_text("x", encoding="utf-8")
     return tmp_path
+
+
+@pytest.fixture
+def symlinks(tmp_path):
+    """Symlinks need a privilege Windows does not grant by default.
+
+    Creating one there raises WinError 1314, so the test would fail for a reason
+    that has nothing to do with the listing.
+    """
+    probe = tmp_path / "probe-link"
+    try:
+        probe.symlink_to(tmp_path, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("this platform cannot create symlinks without elevation")
+    probe.unlink()
 
 
 class TestFullyQualified:
@@ -127,13 +143,13 @@ class TestListing:
             os.chmod(locked, 0o755)
         assert "alpha" in [entry.name for entry in level.entries]
 
-    def test_a_symlink_to_a_directory_is_followed(self, tree):
+    def test_a_symlink_to_a_directory_is_followed(self, tree, symlinks):
         link = tree / "shortcut"
         link.symlink_to(tree / "alpha", target_is_directory=True)
         names = [entry.name for entry in folder_browse.listing(tree).entries]
         assert "shortcut" in names
 
-    def test_a_broken_symlink_is_skipped(self, tree):
+    def test_a_broken_symlink_is_skipped(self, tree, symlinks):
         (tree / "dangling").symlink_to(tree / "gone", target_is_directory=True)
         names = [entry.name for entry in folder_browse.listing(tree).entries]
         assert "dangling" not in names
@@ -223,6 +239,10 @@ class TestCreateDirectory:
         with pytest.raises(folder_browse.BrowserError):
             folder_browse.create_directory(tmp_path, "gamma.", platform="win32")
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="a colon is not a legal character in a Windows file name",
+    )
     def test_a_colon_is_allowed_on_posix(self, tmp_path):
         assert folder_browse.create_directory(tmp_path, "a:b", platform="linux").is_dir()
 

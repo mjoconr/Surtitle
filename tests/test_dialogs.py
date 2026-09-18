@@ -13,6 +13,10 @@ nothing has no way to tell that apart from a slow machine.
 
 from __future__ import annotations
 
+import sys
+
+import pytest
+
 from surtitle import dialogs
 
 
@@ -229,6 +233,14 @@ class TestWindows:
 class TestWindowsChildProcess:
     """The other half of the contract: what the child reports."""
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason=(
+            "this asserts the non-Windows refusal, which is the branch that exists "
+            "so importing the module is harmless; on Windows the same call opens a "
+            "real modal dialog and there is nobody to close it"
+        ),
+    )
     def test_main_refuses_to_run_off_windows(self):
         """One guard, so importing it on a build machine is still harmless."""
         from surtitle import win32_folder_dialog
