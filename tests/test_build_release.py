@@ -247,3 +247,30 @@ class TestWorkflowsUseTheSharedVerifier:
                 f"{workflow.name} re-implements the archive layout; interpreter "
                 "discovery belongs in scripts/build_release.py"
             )
+
+
+class TestVersionConsistency:
+    """pyproject, the package and the changelog must name the same version.
+
+    The release workflow refuses a tag that does not match pyproject.toml, but
+    nothing stopped ``surtitle --version`` from reporting a stale number to every
+    user of a built archive, or a release from shipping with no changelog entry.
+    """
+
+    ROOT = Path(__file__).resolve().parent.parent
+
+    def test_pyproject_and_the_package_agree(self):
+        import tomllib
+
+        import surtitle
+
+        declared = tomllib.loads((self.ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+        assert surtitle.__version__ == declared["project"]["version"]
+
+    def test_the_changelog_has_a_section_for_this_version(self):
+        import surtitle
+
+        text = (self.ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+        assert f"## [{surtitle.__version__}]" in text, (
+            f"CHANGELOG.md has no '## [{surtitle.__version__}]' section"
+        )
