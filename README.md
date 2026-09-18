@@ -95,7 +95,9 @@ local voice extra and the model download, in one step.
 2. **Settings → API keys**: add a DeepSeek key and, for hosted voice, a Deepgram key.
    They are stored locally with owner-only permissions and are never sent back to the
    browser.
-3. **New project**: create one, or point it at a folder you already have.
+3. **New project**: create one, or point it at a folder you already have. Where the
+   machine has a desktop, **Browse…** opens a native folder chooser instead of
+   typing the path.
 4. Click the mic and talk — or type. Click again to stop listening.
 
 To install everything — Python, dependencies, and optionally offline voice — use the

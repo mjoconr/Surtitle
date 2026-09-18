@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Choose the project folder with a native dialog.** The new-project dialog has
+  a **Browse…** button wherever the machine can show a chooser — the Win32 folder
+  picker on Windows, `choose folder` on macOS, zenity or kdialog on Linux — and
+  the chosen folder pre-fills the project name. The browser cannot supply a
+  usable path (a file handle is not a location the agent could be confined to and
+  read), so `POST /api/dialog/folder` opens the dialog on the machine running the
+  server. That endpoint is loopback-only — a remote caller must not be able to put
+  a modal window on someone's desktop — and a machine with no desktop answers 501
+  instead of hanging on a window nobody can see.
 - **Update from the tray.** A git checkout gets two rows — **Update to the latest
   release…** and **Update to current main…** — each confirmed before anything
   moves, then run by the server (`POST /api/update`, loopback only) so the menu
