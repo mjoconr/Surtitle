@@ -721,3 +721,68 @@ class TestUpdate:
         assert body["status"]["kind"] == "git"
         assert body["status"]["detail"] == "up to date on main"
         assert "job" in body
+
+
+class TestFolderDialog:
+    """The native folder chooser, and who may open a window on this desktop."""
+
+    async def test_a_local_request_returns_the_chosen_path(self, settings, monkeypatch):
+        app = create_app_for(settings)
+        from surtitle import dialogs
+
+        monkeypatch.setattr(dialogs, "available", lambda **kw: True)
+        monkeypatch.setattr(dialogs, "choose_folder", lambda **kw: "/tmp/chosen")
+        transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 51000))
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+            response = await http.post("/api/dialog/folder")
+        assert response.status_code == 200
+        assert response.json()["path"] == "/tmp/chosen"
+        await app.state.app_state.aclose()
+
+    async def test_cancelling_reports_no_path(self, settings, monkeypatch):
+        app = create_app_for(settings)
+        from surtitle import dialogs
+
+        monkeypatch.setattr(dialogs, "available", lambda **kw: True)
+        monkeypatch.setattr(dialogs, "choose_folder", lambda **kw: None)
+        transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 51000))
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+            response = await http.post("/api/dialog/folder")
+        assert response.status_code == 200
+        assert response.json()["path"] is None
+        assert response.json()["cancelled"] is True
+        await app.state.app_state.aclose()
+
+    async def test_a_machine_without_a_desktop_says_so(self, settings, monkeypatch):
+        """A headless server must answer, not hang on a window nobody can see."""
+        app = create_app_for(settings)
+        from surtitle import dialogs
+
+        monkeypatch.setattr(dialogs, "available", lambda **kw: False)
+        opened: list[int] = []
+        monkeypatch.setattr(dialogs, "choose_folder", lambda **kw: opened.append(1))
+        transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 51000))
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+            response = await http.post("/api/dialog/folder")
+        assert response.status_code == 501
+        assert opened == []
+        await app.state.app_state.aclose()
+
+    async def test_a_remote_request_cannot_open_a_window(self, settings, monkeypatch):
+        app = create_app_for(settings)
+        from surtitle import dialogs
+
+        monkeypatch.setattr(dialogs, "available", lambda **kw: True)
+        opened: list[int] = []
+        monkeypatch.setattr(dialogs, "choose_folder", lambda **kw: opened.append(1))
+        transport = httpx.ASGITransport(app=app, client=("10.211.55.9", 40123))
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+            response = await http.post("/api/dialog/folder")
+        assert response.status_code == 403
+        assert opened == []
+        await app.state.app_state.aclose()
+
+    async def test_health_reports_whether_a_chooser_exists(self, client):
+        body = (await client.get("/api/health")).json()
+        assert "folder_dialog" in body
+        assert isinstance(body["folder_dialog"], bool)

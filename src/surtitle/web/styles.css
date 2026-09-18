@@ -448,6 +448,17 @@ button, input, textarea, select {
 .input[aria-invalid="true"] { border-color: var(--dsw-alias-state-error-primary); }
 .input:disabled { background: var(--dsw-alias-bg-module-platform); color: var(--dsw-alias-label-tertiary); }
 
+/* An input with a button beside it — the project folder and its Browse button.
+   The button keeps its natural width; the input takes the rest. */
+.fieldRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.fieldRow .input { flex: 1 1 auto; min-width: 0; }
+.fieldRow .button { flex: 0 0 auto; white-space: nowrap; }
+
 .error {
   margin: 4px 0 0;
   font-size: 12px;

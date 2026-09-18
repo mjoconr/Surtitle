@@ -182,7 +182,12 @@
             managed folder in the app data directory.
           </span>
         </div>
-        <input class="input" id="projectRoot" placeholder="/path/to/existing/folder" autocomplete="off" />
+        <div class="fieldRow">
+          <input class="input" id="projectRoot" placeholder="/path/to/existing/folder" autocomplete="off" />
+          <!-- Shown only where this machine can open a native chooser; the server
+               reports that as folder_dialog on /api/health. -->
+          <button class="button button--ghost" id="projectBrowse" type="button" hidden>Browse…</button>
+        </div>
       </div>
       <div class="modal__footer">
         <button class="button button--ghost" id="projectCancel" type="button">Cancel</button>

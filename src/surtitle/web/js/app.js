@@ -1612,6 +1612,32 @@ document.getElementById("newProject").addEventListener("click", openProjectModal
 document.getElementById("projectClose").addEventListener("click", closeProjectModal);
 document.getElementById("projectCancel").addEventListener("click", closeProjectModal);
 document.getElementById("projectMask").addEventListener("click", closeProjectModal);
+
+// The folder chooser opens on the machine running the server: that is where the
+// agent reads and writes, and a browser file handle is not a path it could be
+// confined to. Cancelling returns no path, which is not an error.
+document.getElementById("projectBrowse").addEventListener("click", async (event) => {
+  const button = event.currentTarget;
+  button.disabled = true;
+  try {
+    const picked = await api("/api/dialog/folder", {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    if (!picked.path) return;
+    document.getElementById("projectRoot").value = picked.path;
+    // The folder's own name is nearly always the project name the user wants.
+    const name = document.getElementById("projectName");
+    if (!name.value.trim()) {
+      name.value = picked.path.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || "";
+    }
+  } catch (cause) {
+    toast(cause.message || "Could not open a folder chooser.", "error");
+  } finally {
+    button.disabled = false;
+  }
+});
+
 document.getElementById("projectCreate").addEventListener("click", async () => {
   const name = document.getElementById("projectName").value.trim();
   const root = document.getElementById("projectRoot").value.trim();
@@ -1688,6 +1714,9 @@ async function main() {
   try {
     const health = await api("/api/health");
     el.modelBadge.textContent = health.model;
+    // The chooser opens on the server's desktop, so the button is only offered
+    // where the machine actually has one.
+    document.getElementById("projectBrowse").hidden = !health.folder_dialog;
     if (!health.deepseek_configured) {
       toast("Add your DeepSeek API key in Settings to start.", "error");
       settings.open();
