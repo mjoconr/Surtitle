@@ -796,6 +796,82 @@ class TestFolderDialog:
         assert "folder_dialog" in body
         assert isinstance(body["folder_dialog"], bool)
 
+    async def test_the_in_app_browser_is_always_offered(self, client):
+        """It needs nothing from the machine's desktop, so it is never conditional."""
+        assert (await client.get("/api/health")).json()["folder_browse"] is True
+
+
+class TestFolderBrowse:
+    """The in-app picker: a directory listing over HTTP, loopback only.
+
+    This is what makes choosing a project folder work on a machine whose native
+    chooser will not open — a detached Windows session, a remote browser, a
+    headless host — so the listing itself and the fence around it are the tests
+    that matter.
+    """
+
+    async def test_a_level_is_listed_with_its_jump_targets(self, client, tmp_path):
+        level = tmp_path / "level"
+        level.mkdir()
+        (level / "alpha").mkdir()
+        (level / "beta").mkdir()
+        (level / "file.txt").write_text("x", encoding="utf-8")
+
+        body = (await client.get("/api/dialog/browse", params={"path": str(level)})).json()
+        assert [entry["name"] for entry in body["entries"]] == ["alpha", "beta"]
+        assert body["path"] == str(level)
+        assert body["parent"] == str(level.parent)
+        assert [crumb["path"] for crumb in body["crumbs"]][-1] == str(level)
+        assert body["home"]
+
+    async def test_an_absolute_path_is_required(self, client):
+        response = await client.get("/api/dialog/browse", params={"path": "relative/dir"})
+        assert response.status_code == 400
+        assert response.json()["code"] == "not-fully-qualified"
+
+    async def test_a_missing_folder_is_reported_not_raised(self, client, tmp_path):
+        response = await client.get("/api/dialog/browse", params={"path": str(tmp_path / "gone")})
+        assert response.status_code == 400
+        assert response.json()["code"] == "unreadable"
+
+    async def test_no_path_starts_at_home(self, client):
+        body = (await client.get("/api/dialog/browse")).json()
+        assert body["path"] == body["home"]
+
+    async def test_a_folder_can_be_created(self, client, tmp_path):
+        response = await client.post(
+            "/api/dialog/browse", json={"path": str(tmp_path), "name": "new-project"}
+        )
+        assert response.status_code == 200
+        assert response.json()["path"] == str(tmp_path / "new-project")
+        assert (tmp_path / "new-project").is_dir()
+
+    async def test_a_duplicate_name_is_refused(self, client, tmp_path):
+        (tmp_path / "taken").mkdir()
+        response = await client.post(
+            "/api/dialog/browse", json={"path": str(tmp_path), "name": "taken"}
+        )
+        assert response.status_code == 400
+        assert response.json()["code"] == "exists"
+
+    async def test_a_name_with_a_separator_is_refused(self, client, tmp_path):
+        """Otherwise a name could create a tree, or reach outside the parent."""
+        response = await client.post(
+            "/api/dialog/browse", json={"path": str(tmp_path), "name": "../escape"}
+        )
+        assert response.status_code == 400
+        assert not (tmp_path.parent / "escape").exists()
+
+    async def test_a_remote_caller_cannot_list_this_machine(self, settings):
+        app = create_app_for(settings)
+        transport = httpx.ASGITransport(app=app, client=("10.211.55.9", 40123))
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+            listed = await http.get("/api/dialog/browse")
+            made = await http.post("/api/dialog/browse", json={"path": "/", "name": "x"})
+        assert listed.status_code == 403
+        assert made.status_code == 403
+        await app.state.app_state.aclose()
+
 
 class TestShellIntegration:
     """Launcher and sign-in entries, managed from the app."""

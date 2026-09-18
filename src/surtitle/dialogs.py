@@ -11,10 +11,23 @@ Three implementations behind one function, because there is no portable one:
 osascript on macOS, and zenity or kdialog on Linux. A machine with no desktop (a
 headless server, an SSH session) answers ``None`` by being *unavailable* rather
 than by hanging on a window nobody can see.
+
+The Windows one runs in a child process rather than in this one, which is
+:mod:`surtitle.win32_folder_dialog` and explains why. The short version is that
+the server can only offer the dialog a worker thread and was started detached, so
+the window it produced could not be found on screen; a fresh process gets a main
+thread, per-monitor DPI awareness and a synthesized Alt press, which is what it
+takes to put the dialog in front of the user.
+
+This is the *second* answer to "where is the project folder" and never the only
+one: :mod:`surtitle.folder_browse` lists the filesystem over HTTP, so a machine
+this cannot serve — a remote browser, a headless host, a dialog that refuses to
+appear — still has a working picker.
 """
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -26,12 +39,13 @@ __all__ = ["DEFAULT_TITLE", "available", "choose_folder"]
 
 DEFAULT_TITLE = "Choose a folder for this project"
 
-# Windows: BIF_RETURNONLYFSDIRS hides files; BIF_NEWDIALOGSTYLE gives the resizable
-# dialog with a "New folder" button; BIF_EDITBOX lets a path be typed.
-_BIF_RETURNONLYFSDIRS = 0x00000001
-_BIF_EDITBOX = 0x00000010
-_BIF_NEWDIALOGSTYLE = 0x00000040
-_MAX_PATH = 260
+# The child process's contract; see surtitle/win32_folder_dialog.py. Exit 3 is a
+# cancel, which is an answer rather than a failure.
+_WIN32_CANCELLED = 3
+# CREATE_NO_WINDOW. The child is a console program only because the release ships
+# the console interpreter; without this the user sees a black window flash before
+# the dialog, which reads as a bug.
+_CREATE_NO_WINDOW = 0x08000000
 
 
 def available(
@@ -90,65 +104,37 @@ def _linux_choose(
     return None
 
 
-def _windows_choose(
-    title: str, initial: str | None
-) -> str | None:  # pragma: no cover - Windows only
-    """The Win32 folder picker, through ctypes so it adds no dependency.
+def _windows_command(title: str, initial: str | None) -> list[str]:
+    """The argv that runs the chooser in its own process."""
+    command = [sys.executable, "-m", "surtitle.win32_folder_dialog", title]
+    if initial:
+        command.append(initial)
+    return command
 
-    ``SHBrowseForFolderW`` is older than the shell's newer ``IFileDialog``, but it
-    is a single call with a plain struct rather than a COM interface that has to be
-    vtable-walked by hand — and the extra work buys a dialog the user cannot tell
-    apart for this purpose.
+
+def _child_choice(result: Any) -> str | None:
+    """Read a chooser child's answer: a path, or nothing for cancel or failure."""
+    if getattr(result, "returncode", 1) != 0:
+        return None
+    return (getattr(result, "stdout", "") or "").strip() or None
+
+
+def _windows_choose(title: str, initial: str | None, runner: Callable[..., Any]) -> str | None:
+    """Show the Windows chooser in a child process. ``None`` means no path.
+
+    A cancel and a crash are deliberately the same answer here. Both leave the
+    user with no folder chosen, and the picker's own in-app browser is still
+    available, so there is nothing the caller could do differently with the
+    distinction.
     """
-    import ctypes
-    from ctypes import wintypes
-
-    class BROWSEINFOW(ctypes.Structure):
-        _fields_ = [
-            ("hwndOwner", wintypes.HWND),
-            ("pidlRoot", ctypes.c_void_p),
-            ("pszDisplayName", wintypes.LPWSTR),
-            ("lpszTitle", wintypes.LPCWSTR),
-            ("ulFlags", wintypes.UINT),
-            ("lpfn", ctypes.c_void_p),
-            ("lParam", wintypes.LPARAM),
-            ("iImage", ctypes.c_int),
-        ]
-
-    ole32 = ctypes.windll.ole32
-    shell32 = ctypes.windll.shell32
-
-    # The dialog runs on whichever thread called this; COM has to be initialized
-    # there first. A refusal (already initialized with another threading model) is
-    # not fatal, so the corresponding CoUninitialize is skipped.
-    initialized = ole32.CoInitialize(None) == 0
+    kwargs: dict[str, Any] = {"capture_output": True, "text": True, "check": False}
+    if os.name == "nt":
+        kwargs["creationflags"] = _CREATE_NO_WINDOW
     try:
-        display = ctypes.create_unicode_buffer(_MAX_PATH)
-        info = BROWSEINFOW()
-        info.pidlRoot = None
-        info.pszDisplayName = ctypes.cast(display, wintypes.LPWSTR)
-        info.lpszTitle = title
-        info.ulFlags = _BIF_RETURNONLYFSDIRS | _BIF_EDITBOX | _BIF_NEWDIALOGSTYLE
-
-        shell32.SHBrowseForFolderW.restype = ctypes.c_void_p
-        shell32.SHBrowseForFolderW.argtypes = [ctypes.POINTER(BROWSEINFOW)]
-        pidl = shell32.SHBrowseForFolderW(ctypes.byref(info))
-        if not pidl:
-            return None
-
-        path = ctypes.create_unicode_buffer(_MAX_PATH)
-        shell32.SHGetPathFromIDListW.restype = wintypes.BOOL
-        shell32.SHGetPathFromIDListW.argtypes = [ctypes.c_void_p, wintypes.LPWSTR]
-        try:
-            found = shell32.SHGetPathFromIDListW(pidl, path)
-        finally:
-            # The shell allocated the item id list; leaking one per dialog would
-            # be small but permanent.
-            ole32.CoTaskMemFree(pidl)
-        return path.value if found and path.value else None
-    finally:
-        if initialized:
-            ole32.CoUninitialize()
+        result = runner(_windows_command(title, initial), encoding="utf-8", **kwargs)
+    except OSError:
+        return None
+    return _child_choice(result)
 
 
 def choose_folder(
@@ -167,7 +153,7 @@ def choose_folder(
     run = runner or subprocess.run
     current = platform or sys.platform
     if current == "win32":
-        return _windows_choose(title, initial)
+        return _windows_choose(title, initial, run)
     if current == "darwin":
         if which("osascript") is None:
             return None

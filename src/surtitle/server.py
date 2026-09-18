@@ -45,7 +45,7 @@ from fastapi import (
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from surtitle import __version__, dialogs, shell_integration
+from surtitle import __version__, dialogs, folder_browse, shell_integration
 from surtitle.config import Settings, get_settings, setup_logging
 from surtitle.core.events import ClientCommand, CommandKind, EventKind
 from surtitle.core.session import Session, SessionManager, decode_client_frame
@@ -173,6 +173,18 @@ def _error(status: int, message: str, *, field: str | None = None) -> JSONRespon
     return JSONResponse(payload, status_code=status)
 
 
+# Requests that may see this machine's filesystem or put a window on its desktop.
+# The server binds loopback, so this is defence in depth rather than the only
+# check: a proxy, a port forward or a future bind change must not turn "list any
+# directory on this machine" or "open a modal dialog" into a remote capability.
+_LOOPBACK = {"127.0.0.1", "::1", "localhost"}
+
+
+def _is_loopback(request: Request) -> bool:
+    client = request.client.host if request.client else ""
+    return client in _LOOPBACK
+
+
 def _local_voice_payload(settings: Settings, job: InstallJob) -> dict[str, Any]:
     """Local-speech state, plus any install in flight.
 
@@ -238,9 +250,11 @@ def build_api(state: AppState) -> APIRouter:
             "deepgram_configured": bool(settings.deepgram_key()),
             "sessions": state.sessions.count,
             "data_dir": str(settings.data_dir),
-            # Whether this machine can show a folder chooser, so the new-project
-            # dialog offers a Browse button only where it would work.
+            # Whether this machine can show a native chooser, so the new-project
+            # dialog offers that button only where it would work. The in-app
+            # browser needs no permission from the machine, so it is always on.
             "folder_dialog": dialogs.available(),
+            "folder_browse": True,
         }
 
     @api.get("/status")
@@ -423,7 +437,7 @@ def build_api(state: AppState) -> APIRouter:
         is a capability the UI checks before offering the button.
         """
         client = request.client.host if request.client else ""
-        if client not in {"127.0.0.1", "::1", "localhost"}:
+        if client not in _LOOPBACK:
             return _error(403, "opening a folder dialog is only allowed from this machine")
         if not dialogs.available():
             return _error(501, "this machine cannot show a folder chooser")
@@ -431,6 +445,36 @@ def build_api(state: AppState) -> APIRouter:
         if not path:
             return JSONResponse({"path": None, "cancelled": True})
         return JSONResponse({"path": path})
+
+    @api.get("/dialog/browse")
+    async def browse_folder(request: Request, path: str | None = None) -> Any:
+        """List one directory level, for the in-app folder picker (loopback only).
+
+        This is the picker that works everywhere: it is a JSON round trip rather
+        than a window on somebody's desktop, so it serves a remote browser, a
+        headless host, and a Windows session where the native dialog refuses to
+        come to the front. Loopback only all the same — it is a directory listing
+        of this machine, which is not something to hand to the network.
+        """
+        if not _is_loopback(request):
+            return _error(403, "browsing this machine's folders is only allowed from this machine")
+        try:
+            return folder_browse.listing(path).to_dict()
+        except folder_browse.BrowserError as exc:
+            return JSONResponse(exc.to_dict(), status_code=400)
+
+    @api.post("/dialog/browse")
+    async def make_folder(request: Request, body: dict[str, Any] = Body(...)) -> Any:
+        """Create one child directory for the in-app picker (loopback only)."""
+        if not _is_loopback(request):
+            return _error(403, "browsing this machine's folders is only allowed from this machine")
+        try:
+            created = folder_browse.create_directory(
+                str(body.get("path") or ""), str(body.get("name") or "")
+            )
+        except folder_browse.BrowserError as exc:
+            return JSONResponse(exc.to_dict(), status_code=400)
+        return JSONResponse({"ok": True, "path": str(created), "name": created.name})
 
     # --- settings --------------------------------------------------------
     @api.get("/settings")

@@ -1171,3 +1171,94 @@ button, input, textarea, select {
 
 .spin { animation: spin 0.9s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* ---------------------------------------------------- in-app folder picker */
+
+/* A single-column, dialog-sized panel: the picker shows one directory level and
+   the chain that leads to it, so it needs height and no sidebar. */
+.modal__panel--picker {
+  width: 640px;
+  height: min(560px, 100vh - 48px);
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.folder {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 18px;
+  min-height: 0;
+  flex: 1;
+}
+
+.folder__bar { display: flex; align-items: center; gap: 6px; min-width: 0; }
+
+.folder__crumbs {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+  overflow-x: auto;
+  white-space: nowrap;
+  scrollbar-width: none;
+}
+
+/* Every crumb is a jump target, so each is a real button rather than text with a
+   click handler. The root crumb carries its full path, which is long; it is
+   allowed to shrink so the last segments stay readable. */
+.folder__crumb {
+  border: 0;
+  background: none;
+  color: var(--dsw-alias-label-secondary);
+  font: inherit;
+  font-size: 12px;
+  padding: 3px 6px;
+  border-radius: 6px;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 220px;
+  flex: 0 0 auto;
+}
+
+.folder__crumb:hover { background: var(--dsw-alias-interactive-bg-hover); }
+.folder__crumb[aria-current="true"] { color: var(--dsw-alias-label-primary); font-weight: 600; }
+.folder__sep { color: var(--dsw-alias-label-caption); font-size: 11px; }
+
+.folder__list {
+  flex: 1;
+  min-height: 120px;
+  overflow-y: auto;
+  border: 0.5px solid var(--dsw-alias-border-l3);
+  border-radius: 12px;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.folder__entry {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  border: 0;
+  background: none;
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  padding: 7px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.folder__entry:hover { background: var(--dsw-alias-interactive-bg-hover); }
+.folder__entryIcon { color: var(--dsw-alias-label-tertiary); }
+.folder__empty { color: var(--dsw-alias-label-tertiary); font-size: 12px; padding: 10px; }
+
+/* Not a `display` rule: this element is toggled with the hidden attribute. */
+.folder__note { color: var(--dsw-alias-state-warn-label); font-size: 12px; margin: 0; }
+
+.folder__new { display: flex; gap: 8px; }
+.folder__new .input { flex: 1 1 auto; min-width: 0; }

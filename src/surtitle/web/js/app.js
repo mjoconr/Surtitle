@@ -84,6 +84,16 @@ const el = {
   fileInput: document.getElementById("fileInput"),
   attachButton: document.getElementById("attachButton"),
   dropzone: document.getElementById("dropzone"),
+  folderModal: document.getElementById("folderModal"),
+  folderCrumbs: document.getElementById("folderCrumbs"),
+  folderUp: document.getElementById("folderUp"),
+  folderHidden: document.getElementById("folderHidden"),
+  folderPath: document.getElementById("folderPath"),
+  folderList: document.getElementById("folderList"),
+  folderNote: document.getElementById("folderNote"),
+  folderNewName: document.getElementById("folderNewName"),
+  folderNew: document.getElementById("folderNew"),
+  folderUse: document.getElementById("folderUse"),
 };
 
 // --------------------------------------------------------------- utilities
@@ -1569,6 +1579,175 @@ function closeProjectModal() {
   projectModal.hidden = true;
 }
 
+// ------------------------------------------------------- in-app folder picker
+
+/**
+ * Choosing a project folder without a desktop dialog.
+ *
+ * The server lists one directory level at a time and returns every jump target
+ * with it, so this works from any browser on any machine — including the Windows
+ * session where the native chooser will not come to the front, and a headless
+ * host that has no chooser at all. Nothing here joins path segments: every row
+ * already carries an absolute path the server produced, which is what keeps the
+ * displayed location and the chosen one from drifting apart.
+ */
+const folderModal = document.getElementById("folderModal");
+const folderState = {
+  path: "",
+  crumbs: [],
+  entries: [],
+  parent: null,
+  roots: [],
+  truncated: false,
+  showHidden: false,
+  resolve: null,
+};
+
+/** Open the picker and resolve with the chosen absolute path, or null. */
+function openFolderPicker(startPath) {
+  folderState.showHidden = false;
+  el.folderHidden.setAttribute("aria-pressed", "false");
+  el.folderNewName.value = "";
+  el.folderNote.hidden = true;
+  folderModal.hidden = false;
+  el.folderUse.focus();
+  return new Promise((resolve) => {
+    folderState.resolve = resolve;
+    loadFolder(startPath || undefined);
+  });
+}
+
+function closeFolderPicker(path) {
+  if (folderModal.hidden && !folderState.resolve) return;
+  folderModal.hidden = true;
+  const resolve = folderState.resolve;
+  folderState.resolve = null;
+  if (resolve) resolve(path || null);
+}
+
+async function loadFolder(path) {
+  try {
+    // No path asks the server for its own home directory, which is the right
+    // place to start when nothing has been chosen yet.
+    const level = path
+      ? await api(`/api/dialog/browse?path=${encodeURIComponent(path)}`)
+      : await api("/api/dialog/browse");
+    applyFolder(level);
+  } catch (cause) {
+    // The current level stays on screen: a typo in the path box should cost the
+    // message, not the place the user had navigated to.
+    el.folderNote.textContent = cause.message;
+    el.folderNote.hidden = false;
+  }
+}
+
+function applyFolder(level) {
+  folderState.path = level.path;
+  folderState.crumbs = level.crumbs || [];
+  folderState.entries = level.entries || [];
+  folderState.parent = level.parent || null;
+  folderState.roots = level.roots || [];
+  folderState.truncated = Boolean(level.truncated);
+  el.folderPath.value = level.path;
+  el.folderNote.hidden = !folderState.truncated;
+  if (folderState.truncated) {
+    el.folderNote.textContent =
+      "This folder has more subfolders than can be listed. Type a path to go straight to one.";
+  }
+  renderFolder();
+}
+
+/** True when `inside` is `root` itself or somewhere below it. */
+function within(inside, root) {
+  if (!inside || !root) return false;
+  const a = inside.toLowerCase();
+  const b = root.toLowerCase();
+  return a === b || a.startsWith(b.endsWith("\\") || b.endsWith("/") ? b : `${b}/`) ||
+    a.startsWith(`${b}\\`);
+}
+
+function renderFolder() {
+  el.folderCrumbs.replaceChildren();
+  folderState.crumbs.forEach((crumb, index) => {
+    if (index > 0) el.folderCrumbs.append(node("span", "folder__sep", "›"));
+    const crumbButton = node("button", "folder__crumb", crumb.name);
+    crumbButton.type = "button";
+    crumbButton.title = crumb.path;
+    crumbButton.setAttribute("aria-current", String(crumb.path === folderState.path));
+    crumbButton.addEventListener("click", () => loadFolder(crumb.path));
+    el.folderCrumbs.append(crumbButton);
+  });
+
+  const rows = [];
+  if (folderState.parent) rows.push({ name: "..", path: folderState.parent, up: true });
+  // A drive we are not already inside; on this platform the root list is one
+  // entry and this loop adds nothing.
+  for (const root of folderState.roots) {
+    if (!within(folderState.path, root)) rows.push({ name: root, path: root, drive: true });
+  }
+  for (const entry of folderState.entries) {
+    if (entry.hidden && !folderState.showHidden) continue;
+    rows.push(entry);
+  }
+
+  el.folderList.replaceChildren();
+  if (rows.length === 0) {
+    el.folderList.append(node("p", "folder__empty", "No subfolders here."));
+    return;
+  }
+  for (const row of rows) {
+    const button = node("button", "folder__entry");
+    button.type = "button";
+    button.setAttribute("role", "option");
+    button.append(node("span", "folder__entryIcon", row.up ? "↰" : row.drive ? "▣" : "▸"));
+    button.append(node("span", "folder__entryName", row.name + (row.hidden ? "  (hidden)" : "")));
+    button.addEventListener("click", () => loadFolder(row.path));
+    el.folderList.append(button);
+  }
+}
+
+el.folderUp.addEventListener("click", () => {
+  if (folderState.parent) loadFolder(folderState.parent);
+});
+el.folderUse.addEventListener("click", () => closeFolderPicker(folderState.path));
+el.folderHidden.addEventListener("click", () => {
+  folderState.showHidden = !folderState.showHidden;
+  el.folderHidden.setAttribute("aria-pressed", String(folderState.showHidden));
+  renderFolder();
+});
+el.folderPath.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter") return;
+  event.preventDefault();
+  loadFolder(el.folderPath.value.trim() || undefined);
+});
+el.folderNew.addEventListener("click", async () => {
+  const name = el.folderNewName.value.trim();
+  if (!name) {
+    el.folderNewName.focus();
+    return;
+  }
+  try {
+    const created = await api("/api/dialog/browse", {
+      method: "POST",
+      body: JSON.stringify({ path: folderState.path, name }),
+    });
+    el.folderNewName.value = "";
+    // Land inside the folder that was just made: it is almost always the one
+    // the user means to choose.
+    await loadFolder(created.path);
+  } catch (cause) {
+    toast(cause.message || "Could not create that folder.", "error");
+  }
+});
+el.folderNewName.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    el.folderNew.click();
+  }
+});
+document.getElementById("folderCancel").addEventListener("click", () => closeFolderPicker(null));
+document.getElementById("folderMask").addEventListener("click", () => closeFolderPicker(null));
+
 // ------------------------------------------------------------- confirmation
 
 let confirmResolver = null;
@@ -1613,10 +1792,28 @@ document.getElementById("projectClose").addEventListener("click", closeProjectMo
 document.getElementById("projectCancel").addEventListener("click", closeProjectModal);
 document.getElementById("projectMask").addEventListener("click", closeProjectModal);
 
-// The folder chooser opens on the machine running the server: that is where the
+// Browse opens the in-app picker, which needs nothing from the machine's desktop
+// and therefore works everywhere. "System…" additionally offers the native
+// chooser, where /api/health reported that this machine can show one.
+function usePickedFolder(path) {
+  document.getElementById("projectRoot").value = path;
+  // The folder's own name is nearly always the project name the user wants.
+  const name = document.getElementById("projectName");
+  if (!name.value.trim()) {
+    name.value = path.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || "";
+  }
+}
+
+document.getElementById("projectBrowse").addEventListener("click", async () => {
+  const current = document.getElementById("projectRoot").value.trim();
+  const picked = await openFolderPicker(current || undefined);
+  if (picked) usePickedFolder(picked);
+});
+
+// The native chooser opens on the machine running the server: that is where the
 // agent reads and writes, and a browser file handle is not a path it could be
 // confined to. Cancelling returns no path, which is not an error.
-document.getElementById("projectBrowse").addEventListener("click", async (event) => {
+document.getElementById("projectSystem").addEventListener("click", async (event) => {
   const button = event.currentTarget;
   button.disabled = true;
   try {
@@ -1624,13 +1821,7 @@ document.getElementById("projectBrowse").addEventListener("click", async (event)
       method: "POST",
       body: JSON.stringify({}),
     });
-    if (!picked.path) return;
-    document.getElementById("projectRoot").value = picked.path;
-    // The folder's own name is nearly always the project name the user wants.
-    const name = document.getElementById("projectName");
-    if (!name.value.trim()) {
-      name.value = picked.path.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || "";
-    }
+    if (picked.path) usePickedFolder(picked.path);
   } catch (cause) {
     toast(cause.message || "Could not open a folder chooser.", "error");
   } finally {
@@ -1714,9 +1905,10 @@ async function main() {
   try {
     const health = await api("/api/health");
     el.modelBadge.textContent = health.model;
-    // The chooser opens on the server's desktop, so the button is only offered
-    // where the machine actually has one.
-    document.getElementById("projectBrowse").hidden = !health.folder_dialog;
+    // The native chooser opens on the server's desktop, so that button is only
+    // offered where the machine actually has one. The in-app picker next to it
+    // needs no such permission and is always available.
+    document.getElementById("projectSystem").hidden = !health.folder_dialog;
     if (!health.deepseek_configured) {
       toast("Add your DeepSeek API key in Settings to start.", "error");
       settings.open();

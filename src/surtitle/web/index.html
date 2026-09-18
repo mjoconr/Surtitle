@@ -184,14 +184,55 @@
         </div>
         <div class="fieldRow">
           <input class="input" id="projectRoot" placeholder="/path/to/existing/folder" autocomplete="off" />
-          <!-- Shown only where this machine can open a native chooser; the server
-               reports that as folder_dialog on /api/health. -->
-          <button class="button button--ghost" id="projectBrowse" type="button" hidden>Browse…</button>
+          <!-- The in-app browser always works: the server lists this machine's
+               folders over HTTP. The native chooser is offered additionally
+               where the machine can actually show one (folder_dialog on
+               /api/health), because it can fail to appear even then. -->
+          <button class="button button--ghost" id="projectBrowse" type="button">Browse…</button>
+          <button class="button button--ghost button--tiny" id="projectSystem" type="button" hidden
+                  title="Open the folder chooser on the machine running Surtitle">System…</button>
         </div>
       </div>
       <div class="modal__footer">
         <button class="button button--ghost" id="projectCancel" type="button">Cancel</button>
         <button class="button button--primary" id="projectCreate" type="button">Create</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- The in-app folder picker. A directory listing over HTTP rather than a window
+     on somebody's desktop, so it works from a remote browser, on a headless host,
+     and on a Windows session where the native dialog will not come to the front. -->
+<div class="modal" id="folderModal" hidden>
+  <div class="modal__mask" id="folderMask"></div>
+  <div class="modal__panel modal__panel--picker" role="dialog" aria-modal="true"
+       aria-labelledby="folderTitle">
+    <div class="modal__content">
+      <div class="modal__header">
+        <span class="modal__title" id="folderTitle">Choose a folder</span>
+      </div>
+      <div class="folder">
+        <div class="folder__bar">
+          <button class="button button--icon button--ghost" id="folderUp" type="button"
+                  title="Parent folder" aria-label="Parent folder">↑</button>
+          <nav class="folder__crumbs" id="folderCrumbs" aria-label="Folder path"></nav>
+          <button class="button button--ghost button--tiny" id="folderHidden" type="button"
+                  aria-pressed="false" title="Show folders the system hides">Hidden</button>
+        </div>
+        <input class="input" id="folderPath" placeholder="/path/to/folder" autocomplete="off"
+               spellcheck="false" aria-label="Folder path" />
+        <div class="folder__list" id="folderList" role="listbox" aria-label="Folders"></div>
+        <p class="folder__note" id="folderNote" hidden></p>
+        <div class="folder__new">
+          <input class="input" id="folderNewName" placeholder="New folder name" autocomplete="off"
+                 aria-label="New folder name" />
+          <button class="button button--ghost" id="folderNew" type="button">New folder</button>
+        </div>
+      </div>
+      <div class="modal__footer">
+        <button class="button button--ghost" id="folderCancel" type="button">Cancel</button>
+        <button class="button button--primary" id="folderUse" type="button">Use this folder</button>
       </div>
     </div>
   </div>
