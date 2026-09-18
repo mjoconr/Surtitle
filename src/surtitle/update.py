@@ -59,7 +59,7 @@ _API_TIMEOUT = 5.0
 class UpdateStatus:
     """What an update would do, without doing it."""
 
-    kind: str  # "git" | "archive"
+    kind: str  # "git" | "no-git" | "archive"
     version: str
     branch: str = ""
     latest_release: str = ""
@@ -67,6 +67,8 @@ class UpdateStatus:
     main_available: bool = False
     behind: int = 0
     detail: str = ""
+    # A release archive can replace itself: download, verify, stage, swap on exit.
+    self_update: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -78,6 +80,7 @@ class UpdateStatus:
             "main_available": self.main_available,
             "behind": self.behind,
             "detail": self.detail,
+            "self_update": self.self_update,
         }
 
 
@@ -86,6 +89,9 @@ class UpdateResult:
     ok: bool
     message: str
     steps: list[str] = field(default_factory=list)
+    # True when an update has been staged and the running server must exit for the
+    # swap to happen.
+    shutdown_required: bool = False
 
 
 def git_checkout() -> Path | None:
@@ -218,12 +224,24 @@ def check(
     )
 
     if root is None:
+        from surtitle import selfupdate
+
+        self_update = selfupdate.supported()
+        if release_available:
+            detail = (
+                f"{latest} can be installed in place"
+                if self_update
+                else f"{latest} is available to download"
+            )
+        else:
+            detail = f"Surtitle {__version__} is the newest release"
         return UpdateStatus(
             kind="archive",
             version=__version__,
             latest_release=latest,
             release_available=release_available,
-            detail=available_note,
+            self_update=self_update,
+            detail=detail,
         )
 
     if shutil.which("git") is None:
@@ -288,11 +306,14 @@ def apply(
     *,
     runner: Callable[..., Any] | None = None,
     fetcher: Callable[[], Any] | None = None,
+    settings: Any = None,
 ) -> UpdateResult:
-    """Move a git checkout to ``target`` and refresh its dependencies.
+    """Move this installation to ``target``.
 
-    Refuses anything that is not a checkout, rather than half-updating a release
-    archive. Never rebases or discards local work: a fast-forward or nothing.
+    A git checkout pulls or checks out a tag. Anything else is a release archive or
+    an unpacked source tree, which has no history to pull, so it takes the release
+    build instead — downloaded, checksum-verified, staged, and swapped in once this
+    process has exited. Never rebases or discards local work.
     """
     from surtitle import __version__
 
@@ -302,14 +323,7 @@ def apply(
     run = runner or subprocess.run
     root = git_checkout()
     if root is None:
-        return UpdateResult(
-            False,
-            "This installation cannot update itself — it has no git history to "
-            f"pull into (a release archive or an unpacked source ZIP). Download the "
-            f"newest release from {RELEASES_PAGE}, or clone the repository if you "
-            "want to follow updates in place.",
-            [],
-        )
+        return _apply_release_archive(target, settings=settings, fetcher=fetcher)
     if shutil.which("git") is None:
         return UpdateResult(
             False,
@@ -355,13 +369,72 @@ def apply(
     return UpdateResult(True, "updated; restart Surtitle to run the new version", steps)
 
 
+def _apply_release_archive(
+    target: str, *, settings: Any = None, fetcher: Callable[[], Any] | None = None
+) -> UpdateResult:
+    """Install a release build over a non-git installation.
+
+    Nothing is replaced while this process is running: the new tree is downloaded,
+    checksum-verified and staged beside the old one, and a detached updater swaps
+    them once this process has exited. The result says so, and asks the caller to
+    shut down.
+    """
+    from surtitle import __version__, selfupdate
+
+    if target == "main":
+        return UpdateResult(
+            False,
+            "Only a git checkout can follow main. This installation takes releases: "
+            "use the release target, or clone the repository.",
+            [],
+        )
+    if not selfupdate.supported():
+        return UpdateResult(
+            False,
+            "This installation cannot replace itself — either it is an unpacked "
+            "source ZIP rather than a release archive, or the folder is not "
+            f"writable. Download the newest release from {RELEASES_PAGE}.",
+            [],
+        )
+
+    if settings is None:
+        from surtitle.config import get_settings
+
+        settings = get_settings()
+
+    payload = selfupdate.release()
+    if not payload:
+        return UpdateResult(False, "could not reach GitHub for the release list", [])
+
+    tag = str(payload.get("tag_name") or "").strip()
+    if tag and not _is_newer(tag, __version__):
+        return UpdateResult(True, f"already on {tag}", [])
+
+    prepared, error = selfupdate.begin(settings, payload)
+    if prepared is None:
+        return UpdateResult(False, error, [])
+    return UpdateResult(
+        True,
+        f"{tag} was downloaded and verified. Surtitle will close now and start the "
+        "new version; settings, database and speech models are untouched.",
+        [f"staged {prepared.staged}"],
+        shutdown_required=True,
+    )
+
+
 class UpdateJob(BackgroundJob):
     """One background update, with a state the tray and the UI can read."""
 
-    def __init__(self) -> None:
+    def __init__(self, on_stop: Callable[[], None] | None = None) -> None:
         super().__init__(name="update")
+        # Called when a staged release needs the server to exit before it can be
+        # swapped in. Supplied by the server, which owns the shutdown.
+        self._on_stop = on_stop
 
-    def _work(self, target: str) -> tuple[bool, str]:
+    def _work(self, target: str, settings: Any = None) -> tuple[bool, str]:
         self.set_progress(0.0, f"updating from {target}…")
-        result = apply(target)
+        result = apply(target, settings=settings)
+        if result.ok and result.shutdown_required and self._on_stop is not None:
+            self.set_progress(100.0, "restarting to finish the update")
+            self._on_stop()
         return result.ok, result.message

@@ -155,7 +155,7 @@ class AppState:
         self.voice_install = InstallJob()
         # Pulling an update is the same shape of work: slow, network-bound, and
         # owned by the server so it survives whichever icon asked for it.
-        self.update = UpdateJob()
+        self.update = UpdateJob(on_stop=on_shutdown)
         # Re-apply stored preferences and credentials onto the live settings.
         self.settings_store.effective()
 
@@ -197,7 +197,16 @@ def _update_payload(job: UpdateJob) -> dict[str, Any]:
     Deliberately no network call: this rides on every tray poll. Deciding whether
     a newer release exists is a separate, on-demand request.
     """
-    return {"kind": update_kind(), "version": __version__, "job": job.snapshot()}
+    from surtitle import selfupdate
+
+    return {
+        "kind": update_kind(),
+        "version": __version__,
+        # Whether this install can replace itself in place (a release archive can;
+        # an unpacked source tree cannot), which decides what the tray offers.
+        "self_update": selfupdate.supported(),
+        "job": job.snapshot(),
+    }
 
 
 def _project_or_404(state: AppState, project_id: str):
@@ -364,7 +373,7 @@ def build_api(state: AppState) -> APIRouter:
         target = str(body.get("target") or "release").strip().lower()
         if target not in update_targets:
             return _error(400, f"unknown update target {target!r}", field="target")
-        if not state.update.start(target):
+        if not state.update.start(target, state.settings):
             return JSONResponse({"started": False, "reason": "already running"}, status_code=409)
         log.info("update to %s requested by %s", target, client)
         return JSONResponse({"started": True, "target": target}, status_code=202)

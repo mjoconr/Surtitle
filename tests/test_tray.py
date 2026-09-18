@@ -523,6 +523,20 @@ class TestUpdateMenu:
         assert "update_page" in offered
         assert "update_main" not in offered
 
+    def test_a_self_updating_archive_is_offered_an_in_place_update(self, snapshot):
+        """It stages the release and swaps itself in, so no browser trip is needed."""
+        snapshot["update"] = {"kind": "archive", "self_update": True, "job": {"running": False}}
+        offered = {e.action for e in menu_entries(snapshot) if e.action}
+        assert "update_release" in offered
+        assert "update_page" not in offered, "there is nothing to download by hand"
+        assert "update_main" not in offered, "an archive has no main to follow"
+
+    def test_an_unpacked_source_tree_is_offered_the_download_page(self, snapshot):
+        """No build marker to replace and no history to pull, so say where to get it."""
+        snapshot["update"] = {"kind": "archive", "self_update": False, "job": {"running": False}}
+        offered = {e.action for e in menu_entries(snapshot) if e.action}
+        assert "update_page" in offered
+
     def test_an_update_in_flight_is_not_clickable_twice(self, snapshot):
         snapshot["update"] = {"kind": "git", "job": {"running": True}}
         entry = next(e for e in menu_entries(snapshot) if e.action == "update_release")

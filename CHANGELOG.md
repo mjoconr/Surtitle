@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A downloaded release can update itself.** The tray's **Update to the latest
+  release…** now works for a zip install instead of opening a browser. It
+  downloads the build for this platform, verifies it against the release's
+  published `SHA256SUMS.txt`, stages it beside the install, and — once the server
+  has exited, which Windows requires because a running program's files are locked
+  — swaps the directories and starts the new version. A failed swap puts the old
+  directory back, so a failed update leaves a working installation rather than
+  half of one. The data directory (settings, database, ~400 MB of speech models)
+  lives outside the install and is untouched, which is why an update never
+  re-downloads the models. `surtitle update` does the same from a terminal. An
+  unpacked *source* ZIP still cannot replace itself and is pointed at the download
+  page, as is a folder the user cannot write to.
+
 ### Fixed
 
 - **A release archive's shortcut and app keep their icon.** Both installers

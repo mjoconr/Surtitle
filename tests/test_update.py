@@ -209,11 +209,82 @@ class TestApplyWithoutGit:
         assert "git is not installed" in result.message
         assert updater.RELEASES_PAGE in result.message
 
-    def test_a_non_checkout_is_told_it_has_no_history_to_pull(self, monkeypatch):
+    def test_an_install_that_cannot_replace_itself_is_told_to_download(self, monkeypatch):
         monkeypatch.setattr(updater, "git_checkout", lambda: None)
+        monkeypatch.setattr("surtitle.selfupdate.supported", lambda *a, **k: False)
 
         result = updater.apply("release")
 
         assert result.ok is False
-        assert "no git history" in result.message
+        assert "cannot replace itself" in result.message
         assert updater.RELEASES_PAGE in result.message
+
+
+class TestReleaseArchiveUpdate:
+    """A downloaded archive installs the release build itself."""
+
+    def test_a_staged_release_asks_the_caller_to_shut_down(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(updater, "git_checkout", lambda: None)
+        monkeypatch.setattr("surtitle.selfupdate.supported", lambda *a, **k: True)
+        monkeypatch.setattr(
+            "surtitle.selfupdate.release", lambda *a, **k: {"tag_name": "v9.9.9", "assets": []}
+        )
+
+        class Prepared:
+            staged = tmp_path / "install.new"
+
+        monkeypatch.setattr(
+            "surtitle.selfupdate.begin", lambda settings, payload, **k: (Prepared(), "")
+        )
+
+        result = updater.apply("release", settings=object())
+
+        assert result.ok is True
+        assert result.shutdown_required is True, "the swap needs this process to exit first"
+        assert "9.9.9" in result.message
+        assert "untouched" in result.message, "the data directory must be promised safe"
+
+    def test_already_being_on_the_release_does_not_download_it(self, monkeypatch):
+        import surtitle
+
+        monkeypatch.setattr(updater, "git_checkout", lambda: None)
+        monkeypatch.setattr("surtitle.selfupdate.supported", lambda *a, **k: True)
+        monkeypatch.setattr(
+            "surtitle.selfupdate.release",
+            lambda *a, **k: {"tag_name": f"v{surtitle.__version__}", "assets": []},
+        )
+        called: list[int] = []
+        monkeypatch.setattr(
+            "surtitle.selfupdate.begin", lambda settings, payload, **k: called.append(1)
+        )
+
+        result = updater.apply("release", settings=object())
+
+        assert result.ok is True
+        assert "already on" in result.message
+        assert called == []
+
+    def test_main_is_refused_for_an_archive(self, monkeypatch):
+        monkeypatch.setattr(updater, "git_checkout", lambda: None)
+        monkeypatch.setattr("surtitle.selfupdate.supported", lambda *a, **k: True)
+
+        result = updater.apply("main", settings=object())
+
+        assert result.ok is False
+        assert "git checkout" in result.message
+
+    def test_a_failed_stage_is_reported_and_nothing_shuts_down(self, monkeypatch):
+        monkeypatch.setattr(updater, "git_checkout", lambda: None)
+        monkeypatch.setattr("surtitle.selfupdate.supported", lambda *a, **k: True)
+        monkeypatch.setattr(
+            "surtitle.selfupdate.release", lambda *a, **k: {"tag_name": "v9.9.9", "assets": []}
+        )
+        monkeypatch.setattr(
+            "surtitle.selfupdate.begin", lambda settings, payload, **k: (None, "checksum mismatch")
+        )
+
+        result = updater.apply("release", settings=object())
+
+        assert result.ok is False
+        assert "checksum mismatch" in result.message
+        assert result.shutdown_required is False

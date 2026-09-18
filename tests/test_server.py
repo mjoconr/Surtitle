@@ -643,15 +643,18 @@ class TestUpdate:
     async def test_status_carries_the_update_block(self, client):
         body = (await client.get("/api/status")).json()
         update = body["update"]
-        assert {"kind", "version", "job"} <= set(update)
+        assert {"kind", "version", "job", "self_update"} <= set(update)
         assert update["kind"] in {"git", "archive"}
+        assert isinstance(update["self_update"], bool)
         assert update["job"]["running"] is False
 
     async def test_a_local_request_starts_the_update(self, settings, monkeypatch):
         app = create_app_for(settings)
         started: list[str] = []
         monkeypatch.setattr(
-            app.state.app_state.update, "start", lambda target: started.append(target) or True
+            app.state.app_state.update,
+            "start",
+            lambda target, settings=None: started.append(target) or True,
         )
         transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 51000))
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
@@ -665,7 +668,9 @@ class TestUpdate:
         app = create_app_for(settings)
         started: list[str] = []
         monkeypatch.setattr(
-            app.state.app_state.update, "start", lambda target: started.append(target) or True
+            app.state.app_state.update,
+            "start",
+            lambda target, settings=None: started.append(target) or True,
         )
         transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 51000))
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
@@ -687,7 +692,9 @@ class TestUpdate:
         app = create_app_for(settings)
         started: list[str] = []
         monkeypatch.setattr(
-            app.state.app_state.update, "start", lambda target: started.append(target) or True
+            app.state.app_state.update,
+            "start",
+            lambda target, settings=None: started.append(target) or True,
         )
         transport = httpx.ASGITransport(app=app, client=("10.211.55.9", 40123))
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
@@ -698,7 +705,9 @@ class TestUpdate:
 
     async def test_a_second_request_while_running_is_a_conflict(self, settings, monkeypatch):
         app = create_app_for(settings)
-        monkeypatch.setattr(app.state.app_state.update, "start", lambda target: False)
+        monkeypatch.setattr(
+            app.state.app_state.update, "start", lambda target, settings=None: False
+        )
         transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 51000))
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
             response = await http.post("/api/update", json={"target": "main"})

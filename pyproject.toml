@@ -137,3 +137,6 @@ ignore = ["B008"] # Typer uses function calls in argument defaults by design
 # because the request that started it has already been answered and has nobody
 # left to raise into.
 "src/surtitle/jobs.py" = ["BLE001"]
+# Downloading a release treats any network or payload failure as "could not
+# update", which is reported to the user rather than raised at them.
+"src/surtitle/selfupdate.py" = ["BLE001"]

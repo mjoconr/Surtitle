@@ -186,9 +186,9 @@ def _update_entries(snapshot: dict[str, Any] | None) -> list[MenuEntry]:
 
     A git checkout can move itself, and there are two sensible destinations: the
     newest tagged release for most people, the development branch for someone
-    following it. A release archive cannot replace its own running files, so it
-    is offered the download page instead — saying so is better than a menu item
-    that fails.
+    following it. A release archive installs the release build itself and restarts.
+    Only an unpacked source tree, which has neither history nor a build marker, is
+    left with the download page.
     """
     if snapshot is None:
         return [MenuEntry(label="Update Surtitle…", action="update_release", enabled=False)]
@@ -201,6 +201,8 @@ def _update_entries(snapshot: dict[str, Any] | None) -> list[MenuEntry]:
             MenuEntry(label="Update to the latest release…", action="update_release"),
             MenuEntry(label="Update to current main…", action="update_main"),
         ]
+    if update.get("self_update"):
+        return [MenuEntry(label="Update to the latest release…", action="update_release")]
     return [MenuEntry(label="Get the latest release…", action="update_page")]
 
 
@@ -451,23 +453,38 @@ class SurtitleTray:
         )
 
     def _update(self, target: str) -> None:
-        """Ask the server to pull a release tag or the development branch.
+        """Ask the server to update, and say which kind of update it will be.
 
-        The destination is named in the question, because "update" on its own is
-        ambiguous when the answer can be either the last release or main.
+        Two very different things hide behind one word: a git checkout pulls code
+        and needs restarting afterwards, while a release archive downloads and
+        installs a new build and restarts itself. The question says which.
         """
         title = "Surtitle — update"
-        destination = (
-            "the current development branch (main)" if target == "main" else "the latest release"
-        )
-        if not self._confirm(
-            f"Update Surtitle to {destination}?\n\n"
-            "This pulls the new code into this checkout and re-installs the "
-            "dependencies. Surtitle keeps running the version it started with until "
-            "you restart it, and local changes stop the update rather than being "
-            "overwritten.",
-            title,
-        ):
+        update = (self.snapshot or {}).get("update") or {}
+        in_place = update.get("kind") != "git" and bool(update.get("self_update"))
+
+        if in_place:
+            question = (
+                "Update Surtitle to the latest release?\n\n"
+                "The release is downloaded and checked against its published "
+                "checksum, then installed. Surtitle closes and starts the new "
+                "version; your settings, database and speech models are kept."
+            )
+        else:
+            destination = (
+                "the current development branch (main)"
+                if target == "main"
+                else "the latest release"
+            )
+            question = (
+                f"Update Surtitle to {destination}?\n\n"
+                "This pulls the new code into this checkout and re-installs the "
+                "dependencies. Surtitle keeps running the version it started with "
+                "until you restart it, and local changes stop the update rather than "
+                "being overwritten."
+            )
+
+        if not self._confirm(question, title):
             return
 
         answer = request_update(self.url, target)
@@ -478,7 +495,9 @@ class SurtitleTray:
             self._message("An update is already running.", title)
             return
         self._message(
-            "Updating in the background. The menu shows how it is going; restart "
+            "Surtitle will close and start the new version when the download finishes."
+            if in_place
+            else "Updating in the background. The menu shows how it is going; restart "
             "Surtitle when it finishes.",
             title,
         )

@@ -680,6 +680,10 @@ def update(
         console.print(f"[red]--target must be one of: {', '.join(updater.TARGETS)}[/red]")
         raise typer.Exit(code=2)
 
+    store = _open_store()
+    assert store is not None
+    settings = store.effective()
+
     status = updater.check()
     table = Table(box=None, show_header=False)
     table.add_row("Installed", status.version)
@@ -693,11 +697,11 @@ def update(
 
     if check_only:
         return
-    if status.kind != "git":
+    if status.kind != "git" and not status.self_update:
         console.print(f"Download the newest release from {updater.RELEASES_PAGE}")
         raise typer.Exit(code=1)
 
-    result = updater.apply(target)
+    result = updater.apply(target, settings=settings)
     style = "[green]Done.[/green]" if result.ok else "[red]Failed.[/red]"
     console.print(f"{style} {result.message}")
     if not result.ok:
