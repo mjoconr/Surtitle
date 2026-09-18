@@ -264,7 +264,7 @@ class TestSetupEntryPoints:
 
 
 class TestArchiveMode:
-    """An extracted archive can add a launcher and a sign-in entry - and nothing else.
+    """An extracted archive can add a launcher and a sign-in entry - nothing else.
 
     Setup.* ship inside the archive, so a download user gets a double-clickable way
     to add a Start Menu entry / ~/Applications app and to answer the sign-in
@@ -282,73 +282,78 @@ class TestArchiveMode:
         assert "BUILD-INFO.json" in text
         assert "release archive" in text
 
-    @pytest.mark.skipif(sys.platform == "win32", reason="run.sh is for macOS and Linux")
-    @pytest.mark.skipif(shutil.which("bash") is None, reason="no bash available")
-    def test_an_archive_gets_a_launcher_without_touching_python(self, tmp_path):
-        archive = tmp_path / "archive"
-        (archive / "scripts").mkdir(parents=True)
-        shutil.copy(SCRIPTS / "install.sh", archive / "scripts" / "install.sh")
-        (archive / "BUILD-INFO.json").write_text('{"platform": "darwin"}', encoding="utf-8")
-        (archive / "run.sh").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-        (archive / "run.sh").chmod(0o755)
-        python = archive / "python" / "bin" / "python3"
-        python.parent.mkdir(parents=True)
-        # Stands in for the bundled runtime: answers --version lookups and exits 0
-        # for the doctor/models probes.
-        python.write_text(
-            '#!/bin/sh\nif [ "$1" = "-c" ]; then echo 9.9.9; fi\nexit 0\n',
-            encoding="utf-8",
-        )
-        python.chmod(0o755)
-        home = tmp_path / "home"
-        home.mkdir()
+    @staticmethod
+    def _fake_archive(root):
+        """A release archive on disk: installer, marker, and a bundled runtime.
 
-        done = subprocess.run(
-            ["bash", str(archive / "scripts" / "install.sh"), "--no-startup"],
-            # No uv on PATH and nowhere to find one: if the archive were not
-            # detected, the installer would die trying to install uv.
-            env={"HOME": str(home), "PATH": "/usr/bin:/bin"},
-            capture_output=True,
-            text=True,
-            timeout=60,
-            check=False,
-        )
-
-        assert done.returncode == 0, done.stderr
-        assert "Installing uv" not in done.stdout
-        assert "release archive" in done.stdout
-
-        launched = home / "Applications" / "Surtitle.app" / "Contents" / "MacOS" / "Surtitle"
-        assert launched.is_file(), "the archive set up no launcher"
-        # Opening the app runs the archive's own documented entry point.
-        assert str(archive / "run.sh") in launched.read_text(encoding="utf-8")
-
-    @pytest.mark.skipif(sys.platform == "win32", reason="run.sh is for macOS and Linux")
-    @pytest.mark.skipif(shutil.which("bash") is None, reason="no bash available")
-    def test_an_archive_can_decline_the_sign_in_entry(self, tmp_path):
-        archive = tmp_path / "archive"
-        (archive / "scripts").mkdir(parents=True)
-        shutil.copy(SCRIPTS / "install.sh", archive / "scripts" / "install.sh")
-        (archive / "BUILD-INFO.json").write_text('{"platform": "darwin"}', encoding="utf-8")
-        (archive / "run.sh").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-        (archive / "run.sh").chmod(0o755)
-        python = archive / "python" / "bin" / "python3"
+        The runtime is a stub that answers the version lookup and exits 0 for the
+        doctor and model probes, so the installer's own bookkeeping is exercised
+        without a real Surtitle.
+        """
+        (root / "scripts").mkdir(parents=True)
+        shutil.copy(SCRIPTS / "install.sh", root / "scripts" / "install.sh")
+        (root / "BUILD-INFO.json").write_text('{"platform": "darwin"}', encoding="utf-8")
+        launcher = root / "run.sh"
+        launcher.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        launcher.chmod(0o755)
+        python = root / "python" / "bin" / "python3"
         python.parent.mkdir(parents=True)
         python.write_text(
             '#!/bin/sh\nif [ "$1" = "-c" ]; then echo 9.9.9; fi\nexit 0\n', encoding="utf-8"
         )
         python.chmod(0o755)
-        home = tmp_path / "home"
-        home.mkdir()
+        return root
 
-        subprocess.run(
-            ["bash", str(archive / "scripts" / "install.sh"), "--no-startup"],
+    @staticmethod
+    def _run(archive, home, *args):
+        # No uv on PATH and nowhere to find one: if the archive were not detected,
+        # the installer would die trying to install uv.
+        return subprocess.run(
+            ["bash", str(archive / "scripts" / "install.sh"), *args],
             env={"HOME": str(home), "PATH": "/usr/bin:/bin"},
             capture_output=True,
             text=True,
             timeout=60,
             check=False,
         )
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="install.sh is for macOS and Linux")
+    @pytest.mark.skipif(shutil.which("bash") is None, reason="no bash available")
+    def test_an_archive_is_detected_without_installing_python(self, tmp_path):
+        archive = self._fake_archive(tmp_path / "archive")
+        home = tmp_path / "home"
+        home.mkdir()
+
+        done = self._run(archive, home, "--no-startup")
+
+        assert done.returncode == 0, done.stderr
+        assert "release archive" in done.stdout
+        assert "Installing uv" not in done.stdout
+
+    @pytest.mark.skipif(sys.platform != "darwin", reason="the app bundle is macOS only")
+    @pytest.mark.skipif(shutil.which("bash") is None, reason="no bash available")
+    def test_macos_archive_gets_a_launcher_at_its_own_root(self, tmp_path):
+        archive = self._fake_archive(tmp_path / "archive")
+        home = tmp_path / "home"
+        home.mkdir()
+
+        done = self._run(archive, home, "--no-startup")
+
+        assert done.returncode == 0, done.stderr
+        launched = home / "Applications" / "Surtitle.app" / "Contents" / "MacOS" / "Surtitle"
+        assert launched.is_file(), "the archive set up no launcher"
+        # Opening the app runs the archive's own documented entry point, not the
+        # copy in scripts/.
+        assert str(archive / "run.sh") in launched.read_text(encoding="utf-8")
+
+    @pytest.mark.skipif(sys.platform != "darwin", reason="the LaunchAgent is macOS only")
+    @pytest.mark.skipif(shutil.which("bash") is None, reason="no bash available")
+    def test_macos_archive_can_decline_the_sign_in_entry(self, tmp_path):
+        archive = self._fake_archive(tmp_path / "archive")
+        home = tmp_path / "home"
+        home.mkdir()
+
+        self._run(archive, home, "--no-startup")
 
         assert not (home / "Library" / "LaunchAgents").exists(), (
             "--no-startup must not write a sign-in agent"
