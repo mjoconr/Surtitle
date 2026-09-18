@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.2.0] - 2026-09-18
+## [0.3.0] - 2026-09-18
 
 ### Added
 
@@ -19,6 +19,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   refuses to run inside an archive, so someone who downloaded the zip had no way
   to get a menu entry without opening a terminal — which is exactly the case the
   setup path was asked to cover.
+
+## [0.2.0] - 2026-09-18
+
+### Added
+
 - **Choose the project folder with a native dialog.** The new-project dialog has
   a **Browse…** button wherever the machine can show a chooser — the Win32 folder
   picker on Windows, `choose folder` on macOS, zenity or kdialog on Linux — and
@@ -264,6 +269,7 @@ Then:
 - Speech models are **not** carried over by the `.env` change alone. If you skip
   the data-directory move, run `surtitle models download` to fetch them again.
 
-[Unreleased]: https://github.com/mjoconr/Surtitle/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/mjoconr/Surtitle/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/mjoconr/Surtitle/releases/tag/v0.3.0
 [0.2.0]: https://github.com/mjoconr/Surtitle/releases/tag/v0.2.0
 [0.1.0]: https://github.com/mjoconr/Surtitle/releases/tag/v0.1.0
