@@ -96,9 +96,9 @@ local voice extra and the model download, in one step.
 2. **Settings → API keys**: add a DeepSeek key and, for hosted voice, a Deepgram key.
    They are stored locally with owner-only permissions and are never sent back to the
    browser.
-3. **New project**: create one, or point it at a folder you already have. Where the
-   machine has a desktop, **Browse…** opens a native folder chooser instead of
-   typing the path.
+3. **New project**: create one, or point it at a folder you already have. **Browse…**
+   opens the in-app folder picker, so you do not have to type the path; on a machine
+   that can show one, **System…** opens the real folder dialog instead.
 4. Click the mic and talk — or type. Click again to stop listening.
 
 To install everything — Python, dependencies, and optionally offline voice — use the
@@ -159,6 +159,17 @@ and write inside that directory.
 - Create one and give an existing folder path to work in place, or
 - leave the folder blank for a managed directory under the app data folder.
 
+**Browse…** picks the folder from inside the app — the server lists one directory
+level at a time with a breadcrumb trail, so it works from any browser on any
+machine, including one whose desktop cannot show a folder dialog. **System…** is
+offered alongside it on machines that can show the real chooser. Either way, files
+are only ever read and written where you pointed.
+
+**Deleting a project deletes Surtitle's records of it, never your files.** The
+confirm dialog names the folder and says it is untouched, and the same holds for a
+conversation: archive one to file it away, delete one to remove the transcript, and
+the project folder is left exactly as it was.
+
 Confinement is enforced in one place and tested adversarially: path traversal,
 symlink escapes, absolute paths, Windows `\\?\` device paths, UNC shares and
 `C:` drive-relative paths are all refused. Per-project settings live in
@@ -177,6 +188,8 @@ configuration.
 | `convert_document` | Convert documents — Word/Excel/PowerPoint/OpenDocument/PDF. Needs nothing installed; uses LibreOffice when present for more formats and layout. |
 | `environment_info` | Report which Python environment code runs in. |
 | `search_packages`, `install_packages` | **Acquire new capability on demand** (below). |
+| `vcs_status`, `vcs_guide` | Read the project's git or svn state, and the correct usage notes for it. |
+| `vcs_commit` | Add, commit and push — **only after asking you**, and only at the level of detail you chose. |
 | Attachments | Drag, paste or pick files; they are saved into the project and read like any other file. |
 | `<server>__<tool>` | Any tool from a configured **MCP server**. |
 
@@ -207,6 +220,31 @@ Agent: <say>I need pandas for this. Installing it now.</say>
 Installing a package runs third-party code, which is exactly why it is gated and
 why the environment is isolated.
 
+### Version control
+
+The agent can use **git and svn**, including on a machine that has neither: the
+tray, `surtitle tools install`, or the app itself fetches portable builds into the
+app's data folder — no installer, no administrator rights, nothing added to your
+own `PATH`. Both downloads are verified against a pinned checksum and then run to
+confirm they report the version they should. (Windows only: elsewhere Surtitle uses
+the `git` and `svn` already on your `PATH`.)
+
+Using them is the interesting half. The agent is told, always, that when a piece of
+work is done it must ask you two things in one short question — whether to **add,
+commit and push**, and how detailed the message should be: **one line**, **a
+summary**, or **detailed**. It never commits, tags or pushes unasked, and an earlier
+yes does not cover later work.
+
+`vcs_commit` enforces what it can rather than trusting the caller: an empty change
+is refused instead of leaving an empty commit, a body is refused when you asked for
+a single line, and `.surtitle/` — the agent's own state, not your work — is kept out
+of the commit and reported as excluded.
+
+Before its first version-control action in a conversation the agent reads
+`vcs_guide`, which is where the correct usage lives: the model of each system, the
+commands that matter, how to undo at each level of destruction, and the rule that a
+command which discards work is never run without asking. See [`docs/VCS.md`](docs/VCS.md).
+
 ### What the agent is primed with
 
 Priming is layered, and you can add to it without touching code:
@@ -220,6 +258,7 @@ Priming is layered, and you can add to it without touching code:
 | **Work memory** | Each turn records `[work this turn]`, so the agent can see what it already read or ran |
 | **Project instructions** | `AGENTS.md`, `CLAUDE.md`, `.cursorrules`, `CONTRIBUTING.md`, and `instructions` in `.surtitle.json` — loaded automatically every turn |
 | **Project notebook** | `.surtitle/notes.md`, written by the agent's own `remember` tool and injected into every future session |
+| **Version control** | The standing rule (ask before add/commit/push, and ask how detailed) plus, per session, which git and svn are installed here and what the project's working copy currently is |
 | **Conversation search** | SQLite FTS5 over every stored message, via the `search_history` tool — finds what the notebook did not record |
 | Project briefing | The working directory and its top-level entries |
 

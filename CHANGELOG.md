@@ -7,6 +7,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-19
+
+### Added
+
+- **The project folder is chosen from a picker that works everywhere.** The native
+  folder chooser could not be seen on Windows: it ran in-process on a worker thread
+  of a detached server, so its window had no main thread and no claim to the
+  foreground, and clicking Browse appeared to do nothing at all. The server now
+  answers the question itself — `GET /api/dialog/browse` lists one directory level
+  with the breadcrumb chain leading to it, `POST` creates a child folder — so
+  **Browse…** is a JSON round trip that works from any browser on any machine,
+  including a remote browser and a headless host the native chooser can never serve.
+  The Windows chooser is kept as **System…** and now runs in its own process, with
+  COM, per-monitor-v2 DPI awareness and a synthesized Alt press to take the
+  foreground. Both halves are behind one capability the UI reads from `/api/health`,
+  so the native button appears only where it could work. Listing is directories
+  only, paths must be fully qualified, and both endpoints are loopback only.
+- **A project can be deleted, and its conversations with it, without touching your
+  files.** Project rows gained rename and delete actions. `DELETE /api/projects/{id}`
+  drops the project's live conversations before forgetting it, and reports how many
+  conversations went and which folder it left alone; the confirm dialog says the
+  same thing before anything happens. A conversation can also be deleted straight
+  from the live list, rather than only after archiving it.
+- **Portable git and svn, so the agent has history on a machine with neither.** The
+  tray's **Install git and svn…**, `surtitle tools install`, or the app downloads
+  MinGit and Apache Subversion into `%LOCALAPPDATA%\Surtitle\tools` — no installer,
+  no administrator rights, nothing added to your own `PATH`. Each archive is
+  verified against a pinned SHA-256 and the unpacked binary must then run and report
+  the version it should, because a corrupt download is common and a tree that
+  unpacks but does not execute is the failure worth catching. Windows only,
+  deliberately: elsewhere Surtitle uses the `git` and `svn` on your `PATH`, and says
+  so instead of installing a second copy your system cannot see. `surtitle tools
+  status`, `surtitle doctor` and `GET/POST /api/tools/vcs` report and drive the same
+  thing; the install endpoint is loopback only.
+- **The agent is told to use version control, and to ask before saving with it.**
+  When a piece of work is done — the idea mostly works or is actually finished — the
+  agent asks, in one short question, whether to add, commit and push and how
+  detailed the commit message should be: one line, a summary, or detailed. It never
+  commits, tags or pushes unasked, and an earlier yes does not cover later work. A
+  session also reports which git and svn are installed and what the project's
+  working copy currently is.
+- **`vcs_status`, `vcs_guide` and `vcs_commit`.** `vcs_status` reports the working
+  copy — system, branch or revision, uncommitted work, ahead/behind, remote.
+  `vcs_guide` is the correct usage for git and svn: the model of each system, the
+  commands that matter, how to undo at each level of destruction, and what is never
+  committed. It is a tool result rather than prompt text, because it is long and only
+  needed once the agent is about to touch history. `vcs_commit` is the one mutating
+  step, behind an approval: it refuses an empty change rather than leaving an empty
+  commit, refuses a body when you asked for one line, and keeps `.surtitle/` out of
+  the commit — reporting it as excluded rather than including it silently.
+- **The tray notices a new release and says so a few times.** At most three mentions
+  of a given version, never two within twelve hours, and the count resets when a
+  *newer* version appears; it lives in the data directory, so restarting the app does
+  not restart the nagging, and the tray and the browser share one budget. The lookup
+  is cached for hours, because the tray polls every couple of seconds and GitHub is
+  not free. On Windows the announcement is a notification balloon rather than a
+  dialog, and the menu gains a row naming the version and offering whichever update
+  this installation can perform. A prerelease is never announced to somebody running
+  a released build.
+
+### Fixed
+
+- **A conversation or project deletion no longer leaves a live session behind.** The
+  runtimes hold the project root, so they outlived the record they belonged to and
+  could still answer a WebSocket for a project that no longer existed.
+
 ## [0.4.0] - 2026-09-18
 
 ### Added

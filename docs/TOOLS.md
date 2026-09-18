@@ -185,6 +185,37 @@ installs it silently. A **new** package always asks.
 **`environment_info`** — reports whether the project has its own environment and which
 packages are installed.
 
+## Version control
+
+Three tools, two of which never change anything. The policy they serve — ask when
+the work is done, never commit unasked — is in the system prompt; see
+[`VCS.md`](VCS.md) for how git and svn are provided on a machine that has neither.
+
+**`vcs_status`** — the working copy: git or svn, branch or revision, what is
+uncommitted, ahead and behind, the remote, and which git and svn are installed
+here. Read-only, and cheap enough to call whenever the state matters.
+
+**`vcs_guide`** — the correct usage notes for git or svn: the model of each system,
+the commands that matter, how to undo at each level of destruction, the rules about
+what is never committed, and the commit-message levels to offer you. Deliberately a
+tool result rather than prompt text, because it is long and only needed once the
+agent is actually about to touch history.
+
+**`vcs_commit`** — stages and commits, optionally pushes. Approval-gated, and the
+only tool that writes to your repository. It refuses an empty change rather than
+leaving an empty commit, refuses a body when you asked for a one-line message, and
+keeps `.surtitle/` out of the commit — reporting it as excluded rather than
+including it silently.
+
+```
+Agent: <say>The parser change is working and the tests pass. Should I add, commit
+       and push it — and do you want the message as one line, a summary, or
+       detailed?</say>
+You:   "Summary, and push it."
+       vcs_commit(message="Fix the CSV parser dropping quoted newlines\n\n...",
+                  detail="summary", push=true)
+```
+
 ## MCP
 
 Any [Model Context Protocol](https://modelcontextprotocol.io) server configured in

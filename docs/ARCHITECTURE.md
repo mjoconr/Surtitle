@@ -295,6 +295,24 @@ human summary for the approval prompt, an approval policy, and a `mutating` flag
 - `environment.py` — per-project virtual environments.
 - `mcp.py` — stdio JSON-RPC client.
 
+Outside `tools/`, three modules do work the tool layer calls into:
+
+- `vcs/` — `provision.py` fetches portable git and svn into the data directory
+  (pinned versions, verified twice: checksum, then the binary must run);
+  `repo.py` reads a working copy and changes nothing; `commit.py` is the one
+  mutating step, behind an approval; `guide.py` is the usage text the agent
+  reads on demand.
+- `folder_browse.py` — lists one directory level for the in-app folder picker,
+  and creates a child directory. Directories only, fully-qualified paths only,
+  loopback only.
+- `releases.py` — compares the running version with the newest published one,
+  caches the GitHub lookup, and keeps the bounded count of how often the user
+  has been told about it on disk.
+
+`dialogs.py` is the native folder chooser; on Windows it runs in a child process
+(`win32_folder_dialog.py`) because a detached server can only offer the dialog a
+worker thread and no way to reach the foreground.
+
 ## Packaging
 
 `scripts/build_release.py` produces one archive containing a standalone Python

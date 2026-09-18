@@ -40,11 +40,12 @@ What this means in practice:
 
 - `src/surtitle/` — `server.py` (FastAPI + WebSocket), `core/` (agent loop,
   sessions, events), `tools/` (model-callable tools, `path_guard.py`,
-  `mcp.py`), `voice/` (hosted and local STT/TTS), `llm/`, `store/`, `web/`
-  (browser assets), `cli.py`, `config.py`.
+  `mcp.py`), `voice/` (hosted and local STT/TTS), `vcs/` (portable git and svn,
+  working-copy state, committing, usage guide), `llm/`, `store/`, `web/`
+  (browser assets), `cli.py`, `config.py`, `folder_browse.py`, `releases.py`.
 - `tests/` — offline and deterministic by default; every model and voice call
   is replayed through scripted fakes, so no API keys are needed.
-- `docs/` — `ARCHITECTURE.md`, `TOOLS.md`, `VOICE.md`, `WINDOWS.md`.
+- `docs/` — `ARCHITECTURE.md`, `TOOLS.md`, `VOICE.md`, `WINDOWS.md`, `VCS.md`.
 
 ## Commands
 

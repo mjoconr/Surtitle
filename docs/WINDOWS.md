@@ -29,6 +29,8 @@ double-click it to open the app in your browser; right-click it for:
 | **Status…** | Address, uptime, model, which voice engines are in use, whether each key is set, how many conversations are live, and what is in the database |
 | **Usage…** | Turns answered, tool calls, tokens in and out, cache hits, and an estimated cost for this run |
 | **Install local voice…** | Downloads the offline speech engines and their models (several hundred MB) after asking. While it runs the row shows progress; once it is done it reads "Local voice is installed" |
+| **Install git and svn…** | Downloads portable builds of both into `%LOCALAPPDATA%\Surtitle\tools` — no installer, no admin rights, and nothing added to your own `PATH`. The agent uses them for the project's history. The row names what is missing, shows progress while it downloads, and reads "git and svn are installed" when there is nothing to do. Also available as `surtitle tools install` |
+| **Surtitle x.y.z is available — install it** | Appears only when a newer release has been published, naming the version. Selecting it does the update above. You are told at most three times about a given version, never twice in twelve hours, and the notice appears as a notification balloon rather than a dialog |
 | **Update to the latest release…** | A git checkout pulls the newest tagged release and re-installs the dependencies; an extracted archive downloads the new build, checks it against its published checksum, installs it, and restarts. Your settings, database and models are kept either way |
 | **Update to current main…** | Only from a git checkout: follow the development branch instead. A fast-forward, so local changes stop it rather than being overwritten |
 | **Get the latest release…** | What an unpacked *source* ZIP is offered: it has no git history to pull and no build to replace, so this opens the download page |
@@ -288,6 +290,25 @@ Python **3.13** works: `sherpa-onnx` 1.13.8 publishes `win_amd64` wheels for
 `cp311` through `cp314`, and the project supports all of them.
 
 
+
+## Version control tools
+
+The agent can use git and svn, including on a machine that has neither. The tray's
+**Install git and svn…** fetches portable builds into the app's own data folder:
+
+```
+%LOCALAPPDATA%\Surtitle\tools\git\cmd\git.exe     MinGit 2.51.0
+%LOCALAPPDATA%\Surtitle\tools\svn\bin\svn.exe     Apache Subversion 1.14.5
+```
+
+No installer runs, no administrator rights are needed, and nothing is added to your
+system or user `PATH` — the tools go on the `PATH` of the processes Surtitle starts.
+Every download is checked against a pinned SHA-256 and then the binary itself is run
+to confirm it reports the version it should.
+
+`surtitle tools status` lists what is installed and from where; `surtitle doctor`
+includes the same two rows. See [`VCS.md`](VCS.md) for what the agent does with
+them, and its rule that it never commits without asking you first.
 
 ## Package installation by the agent
 
