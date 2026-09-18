@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-18
+
 ### Added
 
 - **The launcher entry and start-at-sign-in are reachable from the tray.** Both
@@ -317,7 +319,8 @@ Then:
 - Speech models are **not** carried over by the `.env` change alone. If you skip
   the data-directory move, run `surtitle models download` to fetch them again.
 
-[Unreleased]: https://github.com/mjoconr/Surtitle/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/mjoconr/Surtitle/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/mjoconr/Surtitle/releases/tag/v0.4.0
 [0.3.0]: https://github.com/mjoconr/Surtitle/releases/tag/v0.3.0
 [0.2.0]: https://github.com/mjoconr/Surtitle/releases/tag/v0.2.0
 [0.1.0]: https://github.com/mjoconr/Surtitle/releases/tag/v0.1.0
