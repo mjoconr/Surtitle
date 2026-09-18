@@ -3,13 +3,19 @@
     Surtitle installer for Windows.
 
 .DESCRIPTION
-    Usually reached by double-clicking Setup.bat at the top of the checkout,
-    which needs no terminal and no command. Run it directly if you prefer:
+    Usually reached by double-clicking Setup.bat, which needs no terminal and no
+    command. Run it directly if you prefer:
 
         .\scripts\install.ps1                # install everything, including local voice
         .\scripts\install.ps1 -Update        # bring an existing install up to date
         .\scripts\install.ps1 -NoVoice       # hosted voice only (smaller, faster)
         .\scripts\install.ps1 -Check         # verify without changing anything
+
+    Inside a release archive there is no Python to install - the runtime is
+    bundled - so steps 1 to 3 are skipped and only the launcher and sign-in
+    entries (steps 4 and 5) are set up. That is what makes an extracted archive
+    able to add a Start Menu entry and offer to start at sign-in without anyone
+    opening a terminal.
 
     What it does, and why in this order:
 
@@ -145,14 +151,17 @@ $isArchive = (Test-Path (Join-Path $ProjectDir 'BUILD-INFO.json')) -and (
     (Test-Path (Join-Path $ProjectDir 'venv\Scripts\python.exe'))
 )
 if ($isArchive) {
-    Write-Host ''
-    Write-Host 'This is a Surtitle release archive, and it is already installed.' -ForegroundColor Yellow
-    Write-Host ''
-    Write-Host 'Start it by double-clicking run.bat.'
-    Write-Host 'To update it, right-click the notification-area icon, choose "Get the'
-    Write-Host 'latest release", and replace this folder. Your settings, database and'
-    Write-Host 'speech models live in the app data directory and are kept.'
-    exit 0
+    Write-Info 'release archive: the runtime is bundled, so this sets up the launcher'
+    Write-Info 'and sign-in entries only - there is no Python to install.'
+    if ($Check) {
+        Write-Step 'Checking the installation'
+        Write-Info "runtime:  $(Join-Path $ProjectDir 'python\python.exe')"
+        $bootLink = Join-Path ([Environment]::GetFolderPath('Startup')) 'Surtitle.lnk'
+        if (Test-Path $bootLink) { Write-Info 'sign-in:  installed' } else { Write-Info 'sign-in:  not installed' }
+        $menuLink = Join-Path (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs') 'Surtitle.lnk'
+        if (Test-Path $menuLink) { Write-Info 'menu:     installed' } else { Write-Info 'menu:     not installed' }
+        exit 0
+    }
 }
 
 # --------------------------------------------------------------------------- #
@@ -166,8 +175,8 @@ function Find-Uv {
     return $null
 }
 
-$uv = Find-Uv
-if (-not $uv) {
+$uv = if ($isArchive) { $null } else { Find-Uv }
+if ((-not $uv) -and (-not $isArchive)) {
     if ($Check) { Fail 'uv is not installed. Run without -Check to install it.' }
     Write-Step 'Installing uv (Python toolchain, no admin rights needed)'
     try {
@@ -186,7 +195,7 @@ Install it yourself, then re-run this script:
         Fail 'uv was installed but is not on PATH. Open a new PowerShell window and re-run.'
     }
 }
-Write-Info "uv:      $uv"
+if ($uv) { Write-Info "uv:      $uv" }
 
 # --------------------------------------------------------------------------- #
 # Virtual environment and dependencies
@@ -194,7 +203,7 @@ Write-Info "uv:      $uv"
 $venv = Join-Path $ProjectDir '.venv'
 $venvPy = Join-Path $venv 'Scripts\python.exe'
 
-if (-not $Check) {
+if ((-not $Check) -and (-not $isArchive)) {
     Write-Step 'Preparing the Python environment'
     if (-not (Test-Path $venvPy)) {
         & $uv venv --allow-existing $venv --quiet
@@ -240,7 +249,9 @@ function Invoke-App([string[]] $AppArguments) {
     }
 }
 
-if ($Check) {
+# The archive path never reaches here: it has a bundled runtime and reported its
+# state above.
+if ($Check -and (-not $isArchive)) {
     Write-Step 'Checking the installation'
     if (Test-Path $venvPy) {
         Invoke-App @('models', 'list') | Out-Null
@@ -252,7 +263,7 @@ if ($Check) {
     exit 0
 }
 
-if ((-not $NoVoice) -and (-not $NoModels)) {
+if ((-not $isArchive) -and (-not $NoVoice) -and (-not $NoModels)) {
     Write-Step 'Local speech models'
     Write-Info "cache: $modelsDir (this survives updates and is removed only by you)"
     # The application prints sizes and asks before downloading the speech models.
@@ -271,7 +282,14 @@ if ((-not $NoVoice) -and (-not $NoModels)) {
 # --------------------------------------------------------------------------- #
 # Per-user and outside Program Files, like everything else here: created without
 # elevation and removed by deleting one .lnk.
-$launcher = Join-Path $ProjectDir 'scripts\run.bat'
+#
+# An archive keeps its documented entry point at the root; a source checkout keeps
+# it in scripts\. Prefer whichever actually sits at the root, so the shortcut a
+# user gets is the file the documentation told them to run.
+$launcher = Join-Path $ProjectDir 'run.bat'
+if (-not (Test-Path $launcher)) {
+    $launcher = Join-Path $ProjectDir 'scripts\run.bat'
+}
 
 if (-not $NoShortcut) {
     Write-Step 'Start Menu shortcut'
@@ -329,11 +347,35 @@ try {
 # --------------------------------------------------------------------------- #
 # Verify, then say what to do next
 # --------------------------------------------------------------------------- #
-Write-Step 'Verifying'
-Invoke-App @('doctor', '--offline') | Out-Null
+if (-not $isArchive) {
+    Write-Step 'Verifying'
+    Invoke-App @('doctor', '--offline') | Out-Null
+}
 
 Write-Host ''
 Write-Host 'Installation complete.' -ForegroundColor Green
+
+if ($isArchive) {
+    @"
+
+This is a release archive, so there was no Python to install - it is bundled.
+Start it by double-clicking run.bat, or from the Surtitle entry added to the
+Start Menu.
+
+To change the sign-in setting later, run this again with -Startup or -NoStartup:
+
+    powershell -ExecutionPolicy Bypass -File $ProjectDir\scripts\install.ps1 -NoStartup
+
+To add the offline speech engines, right-click the notification-area icon and
+choose "Install local voice" - or run:
+
+    run.bat voice install
+
+Your settings, database and speech models live in: $dataDir
+"@ | Write-Host
+    exit 0
+}
+
 @"
 
 Start it with:

@@ -60,10 +60,11 @@ skips the offline speech engines (and their multi-hundred-megabyte models), `-St
 what is installed without changing anything.
 
 There is nothing to install for a **release archive** — it bundles its runtime, so
-extract it and run `run.bat`. `Setup.bat` is for a source checkout and refuses to
-run inside an archive. How you got Surtitle also decides how it updates: a git
-clone updates itself from the tray (**Update to the latest release…** or **Update
-to current main…**), while an archive or an unpacked source ZIP is pointed at the
+extract it and run `run.bat`. Double-click **`Setup.bat`** if you want a Start Menu
+entry and to be asked about starting at sign-in; it notices the archive and skips
+the Python work. How you got Surtitle also decides how it updates: a git clone
+updates itself from the tray (**Update to the latest release…** or **Update to
+current main…**), while an archive or an unpacked source ZIP is pointed at the
 download page, having no git history to pull.
 
 ### macOS / Linux

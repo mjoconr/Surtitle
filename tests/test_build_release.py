@@ -274,3 +274,32 @@ class TestVersionConsistency:
         assert f"## [{surtitle.__version__}]" in text, (
             f"CHANGELOG.md has no '## [{surtitle.__version__}]' section"
         )
+
+
+class TestArchiveContents:
+    """What the distributable carries, beyond the runtime itself."""
+
+    def test_the_archive_ships_the_double_clickable_setup(self):
+        """A download user must be able to add a launcher without a terminal.
+
+        Setup.bat/Setup.command detect the archive, skip the Python work the
+        bundled runtime already did, and set up the Start Menu entry or
+        ~/Applications app plus the sign-in answer.
+        """
+        assert "Setup.bat" in build_release.INCLUDE_TOP_LEVEL
+        assert "Setup.command" in build_release.INCLUDE_TOP_LEVEL
+
+    def test_copy_sources_actually_places_them_in_the_tree(self, tmp_path):
+        build_release.copy_sources(tmp_path)
+        assert (tmp_path / "Setup.bat").is_file()
+        assert (tmp_path / "Setup.command").is_file()
+
+    def test_the_macos_setup_keeps_its_exec_bit(self, tmp_path):
+        import sys
+
+        if sys.platform == "win32":
+            pytest.skip("the exec bit is POSIX")
+        build_release.copy_sources(tmp_path)
+        # Finder will not run a .command that is not executable, and the archive
+        # is built on macOS, so this is the mode that ships.
+        assert (tmp_path / "Setup.command").stat().st_mode & 0o111

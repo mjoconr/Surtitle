@@ -75,6 +75,7 @@ it is not a remote-control endpoint either.
 | `run.bat` | Launcher for Command Prompt / double-click |
 | `run.ps1` | Launcher for PowerShell |
 | `run.sh` | Launcher for macOS and Linux (shipped, but not the Windows entry point) |
+| `Setup.bat`, `Setup.command` | Optional setup: adds the launcher entry (Start Menu / `~/Applications`) and asks about starting at sign-in. Skips the Python steps — the runtime is already bundled |
 | `python/` | Standalone CPython — needs no installer and no registry entries. A Windows archive installs the dependencies into this runtime as well. |
 | `venv/` | **macOS and Linux only** — the dependencies, already installed. A Windows archive deliberately has no `venv/`: a Windows virtual environment records an absolute base path and cannot be moved once the archive is extracted, so its interpreter would not start. |
 | `wheelhouse/` | Offline copies of every wheel, for repair without network |
@@ -135,14 +136,16 @@ Or use `run.bat`, which has no execution-policy restriction.
 
 | You have | Install | Update |
 |---|---|---|
-| **Release archive** — `surtitle-<version>-win32-AMD64.zip` | Nothing to install. The runtime and every dependency are bundled: extract it and double-click `run.bat`. | Right-click the notification icon → **Get the latest release…**, then extract the new zip. Settings, database and speech models live in `%LOCALAPPDATA%\Surtitle` and are kept. |
+| **Release archive** — `surtitle-<version>-win32-AMD64.zip` | Nothing to install: the runtime and every dependency are bundled, so extract it and double-click `run.bat`. Double-click **`Setup.bat`** to add a Start Menu entry and to choose whether Surtitle starts when you sign in. | Right-click the notification icon → **Get the latest release…**, then extract the new zip. Settings, database and speech models live in `%LOCALAPPDATA%\Surtitle` and are kept. |
 | **git clone** | Double-click `Setup.bat` once. | Right-click the icon → **Update to the latest release…** or **Update to current main…**. `Setup.bat` is not needed again. |
 | **Source ZIP** — GitHub → **Code → Download ZIP** | Double-click `Setup.bat` once. | There is no git history to pull, so the tray offers **Get the latest release…**. To follow updates in place instead, `git clone` the repository. |
 
-`Setup.bat` is for a source checkout. Run `scripts\install.ps1` inside a release
-archive by mistake and it says so and exits without touching anything — otherwise
-it would build a second environment beside the bundled runtime, and the launcher
-prefers `venv\`, so it would quietly change which interpreter runs.
+`Setup.bat` works out which of these it is looking at. In a release archive there
+is no Python to install, so it skips straight to the launcher: a Start Menu entry
+for this user, and the sign-in question. It never builds a virtual environment
+inside an archive — that would put a second environment beside the bundled
+runtime, and the launcher prefers `venv\`, so it would quietly change which
+interpreter runs.
 
 **If git is not installed**, a clone cannot pull. The tray offers the download
 page and `surtitle update --check` says *"git is not installed"* — it does not

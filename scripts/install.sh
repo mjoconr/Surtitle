@@ -9,8 +9,10 @@
 #   ./scripts/install.sh --no-voice   # hosted voice only (smaller, faster)
 #   ./scripts/install.sh --check      # verify without changing anything
 #
-# Usually reached by double-clicking Setup.command at the top of the checkout,
-# which needs no terminal and no command.
+# Usually reached by double-clicking Setup.command, which needs no terminal and no
+# command. Inside a release archive there is no Python to install - the runtime is
+# bundled - so the uv and dependency steps are skipped and only the launcher and
+# sign-in entries are set up.
 #
 # What it does, and why in this order:
 #
@@ -124,24 +126,35 @@ APP_BUNDLE="$HOME/Applications/Surtitle.app"
 AGENT_LABEL="com.surtitle.launcher"
 AGENT_PLIST="$HOME/Library/LaunchAgents/$AGENT_LABEL.plist"
 
+# The documented entry point: at the archive root in a release, in scripts/ in a
+# checkout. Resolved once so the app bundle and the sign-in agent cannot disagree
+# about what "start Surtitle" means.
+LAUNCHER="$PROJECT_DIR/run.sh"
+[ -x "$LAUNCHER" ] || LAUNCHER="$PROJECT_DIR/scripts/run.sh"
+
 printf '\n%s\n' "${BOLD}Surtitle installer — $PLATFORM${RESET}"
 info "project: $PROJECT_DIR"
 info "data:    $DATA_DIR"
 
-# A release archive already carries a complete runtime. Running this inside one
-# would build a second environment beside it — and the launcher prefers venv/,
-# so it would quietly change which interpreter runs. There is nothing to install.
-if [ -f "$PROJECT_DIR/BUILD-INFO.json" ] &&
-  { [ -x "$PROJECT_DIR/python/bin/python3" ] || [ -x "$PROJECT_DIR/venv/bin/python" ]; }; then
-  printf '\n%s\n' "${YELLOW}This is a Surtitle release archive, and it is already installed.${RESET}"
-  cat <<EOF
-
-Start it with ./scripts/run.sh.
-
-To update it, download the newest release and replace this folder. Your settings,
-database and speech models live in the app data directory and are kept.
-EOF
-  exit 0
+# A release archive already carries a complete runtime, so there is no Python to
+# install and no virtual environment to build: running that part inside one would
+# put a second environment beside the bundled one, and the launcher prefers venv/,
+# so it would quietly change which interpreter runs. The launcher and sign-in
+# entries below are still worth setting up, which is what Setup.command in the
+# archive exists for.
+ARCHIVE=0
+BUNDLED_PY=""
+for candidate in \
+  "$PROJECT_DIR/python/bin/python3" \
+  "$PROJECT_DIR/python/bin/python" \
+  "$PROJECT_DIR/venv/bin/python"
+do
+  [ -x "$candidate" ] && { BUNDLED_PY="$candidate"; break; }
+done
+if [ -f "$PROJECT_DIR/BUILD-INFO.json" ] && [ -n "$BUNDLED_PY" ]; then
+  ARCHIVE=1
+  info "release archive: the runtime is bundled, so this sets up the launcher"
+  info "and sign-in entries only — there is no Python to install."
 fi
 
 # --------------------------------------------------------------------------- #
@@ -170,14 +183,17 @@ Install uv from https://docs.astral.sh/uv/getting-started/installation/ and re-r
   fi
 }
 
-if ! UV="$(find_uv)"; then
-  if [ "$CHECK_ONLY" = "1" ]; then
-    die "uv is not installed. Run without --check to install it."
+UV=""
+if [ "$ARCHIVE" = "0" ]; then
+  if ! UV="$(find_uv)"; then
+    if [ "$CHECK_ONLY" = "1" ]; then
+      die "uv is not installed. Run without --check to install it."
+    fi
+    install_uv
+    UV="$(find_uv)" || die "uv was installed but is not on PATH. Open a new terminal and re-run."
   fi
-  install_uv
-  UV="$(find_uv)" || die "uv was installed but is not on PATH. Open a new terminal and re-run."
+  info "uv:      $UV ($("$UV" --version 2>/dev/null | head -1))"
 fi
-info "uv:      $UV ($("$UV" --version 2>/dev/null | head -1))"
 
 # --------------------------------------------------------------------------- #
 # Virtual environment
@@ -185,7 +201,7 @@ info "uv:      $UV ($("$UV" --version 2>/dev/null | head -1))"
 VENV="$PROJECT_DIR/.venv"
 VENV_PY="$VENV/bin/python"
 
-if [ "$CHECK_ONLY" = "0" ]; then
+if [ "$CHECK_ONLY" = "0" ] && [ "$ARCHIVE" = "0" ]; then
   step "Preparing the Python environment"
   if [ ! -x "$VENV_PY" ]; then
     "$UV" venv --allow-existing "$VENV" --quiet
@@ -215,7 +231,10 @@ fi
 # Local speech models
 # --------------------------------------------------------------------------- #
 run_app() {
-  if [ -x "$VENV_PY" ]; then
+  if [ "$ARCHIVE" = "1" ]; then
+    # The archive's own interpreter, which already has Surtitle installed into it.
+    SURTITLE_HOME="$DATA_DIR" "$BUNDLED_PY" -m surtitle "$@"
+  elif [ -x "$VENV_PY" ]; then
     SURTITLE_HOME="$DATA_DIR" "$VENV_PY" -m surtitle "$@"
   else
     SURTITLE_HOME="$DATA_DIR" "$UV" run --quiet --python "$VENV_PY" surtitle "$@"
@@ -224,7 +243,7 @@ run_app() {
 
 if [ "$CHECK_ONLY" = "1" ]; then
   step "Checking the installation"
-  if [ -x "$VENV_PY" ]; then
+  if [ "$ARCHIVE" = "1" ] || [ -x "$VENV_PY" ]; then
     run_app models list || true
   else
     warn "no virtual environment at $VENV"
@@ -237,7 +256,7 @@ if [ "$CHECK_ONLY" = "1" ]; then
   exit 0
 fi
 
-if [ "$WITH_VOICE" = "1" ] && [ "$DO_MODELS" = "1" ]; then
+if [ "$ARCHIVE" = "0" ] && [ "$WITH_VOICE" = "1" ] && [ "$DO_MODELS" = "1" ]; then
   step "Local speech models"
   info "cache: $MODELS_DIR (this survives updates and is removed only by you)"
   MODEL_ARGS=(models download)
@@ -266,8 +285,12 @@ ask_yes_no() {
 }
 
 create_app_bundle() {
-  local version png iconset size
-  version="$("$VENV_PY" -c 'import surtitle; print(surtitle.__version__)' 2>/dev/null || true)"
+  local version png iconset size interpreter
+  # The version comes from whichever interpreter this installation runs with: the
+  # venv in a checkout, the bundled runtime in an archive.
+  interpreter="$VENV_PY"
+  [ "$ARCHIVE" = "1" ] && interpreter="$BUNDLED_PY"
+  version="$("$interpreter" -c 'import surtitle; print(surtitle.__version__)' 2>/dev/null || true)"
   [ -n "$version" ] || version="0.0.0"
 
   mkdir -p "$APP_BUNDLE/Contents/MacOS" "$APP_BUNDLE/Contents/Resources"
@@ -288,11 +311,11 @@ create_app_bundle() {
 </plist>
 PLIST
 
-  # The launcher runs this checkout's own run.sh, so opening the app from Finder
-  # and running ./scripts/run.sh in a terminal are the same code path.
+  # The launcher runs this installation's own run.sh, so opening the app from
+  # Finder and running the launcher in a terminal are the same code path.
   cat > "$APP_BUNDLE/Contents/MacOS/Surtitle" <<LAUNCHER
 #!/bin/sh
-exec "$PROJECT_DIR/scripts/run.sh" "\$@"
+exec "$LAUNCHER" "\$@"
 LAUNCHER
   chmod +x "$APP_BUNDLE/Contents/MacOS/Surtitle"
 
@@ -324,7 +347,7 @@ write_agent() {
     <key>Label</key><string>$AGENT_LABEL</string>
     <key>ProgramArguments</key>
     <array>
-        <string>$PROJECT_DIR/scripts/run.sh</string>
+        <string>$LAUNCHER</string>
         <string>run</string>
     </array>
     <key>WorkingDirectory</key><string>$PROJECT_DIR</string>
@@ -388,6 +411,31 @@ step "Verifying"
 run_app doctor --offline || true
 
 printf '\n%s\n' "${GREEN}${BOLD}Installation complete.${RESET}"
+
+if [ "$ARCHIVE" = "1" ]; then
+  # The archive already had everything it needs to run; what was missing was the
+  # launcher entry and the sign-in answer, which is what just happened.
+  cat <<EOF
+
+This is a release archive, so there was no Python to install — it is bundled.
+Start it with the launcher, or from Surtitle in ~/Applications.
+
+    $LAUNCHER
+
+Change the sign-in setting later by running this again:
+
+    $PROJECT_DIR/scripts/install.sh --no-startup     # stop starting at sign-in
+    $PROJECT_DIR/scripts/install.sh --startup        # start at sign-in
+
+To add the offline speech engines, run:
+
+    $LAUNCHER voice install
+
+Your data lives in: $DATA_DIR
+EOF
+  exit 0
+fi
+
 cat <<EOF
 
 Start it with:

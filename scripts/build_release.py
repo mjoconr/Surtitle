@@ -53,6 +53,12 @@ BUILD_DIR = REPO_ROOT / "build" / "release"
 INCLUDE_TOP_LEVEL = (
     "src",
     "scripts",
+    # The double-clickable setup, so an extracted archive can add a Start Menu
+    # entry, a ~/Applications app and an optional sign-in entry without anyone
+    # needing a terminal. It detects the archive and skips the Python work the
+    # bundled runtime already did.
+    "Setup.bat",
+    "Setup.command",
     "pyproject.toml",
     "uv.lock",
     "README.md",

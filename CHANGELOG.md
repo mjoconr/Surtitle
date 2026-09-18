@@ -11,6 +11,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A release archive can add a launcher entry and a sign-in entry.** `Setup.bat`
+  and `Setup.command` now ship inside the archive and detect it: they skip the
+  Python and model steps the bundled runtime has already done, and go straight to
+  a Start Menu entry (or `~/Applications/Surtitle.app`) and the "start when you
+  sign in?" question. Before this the archive carried only the installer that
+  refuses to run inside an archive, so someone who downloaded the zip had no way
+  to get a menu entry without opening a terminal — which is exactly the case the
+  setup path was asked to cover.
 - **Choose the project folder with a native dialog.** The new-project dialog has
   a **Browse…** button wherever the machine can show a chooser — the Win32 folder
   picker on Windows, `choose folder` on macOS, zenity or kdialog on Linux — and
