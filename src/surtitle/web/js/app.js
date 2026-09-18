@@ -88,6 +88,7 @@ const el = {
   folderCrumbs: document.getElementById("folderCrumbs"),
   folderUp: document.getElementById("folderUp"),
   folderHidden: document.getElementById("folderHidden"),
+  folderCount: document.getElementById("folderCount"),
   folderPath: document.getElementById("folderPath"),
   folderList: document.getElementById("folderList"),
   folderNote: document.getElementById("folderNote"),
@@ -1787,24 +1788,44 @@ function renderFolder() {
     el.folderCrumbs.append(crumbButton);
   });
 
+  const visible = folderState.entries.filter(
+    (entry) => folderState.showHidden || !entry.hidden,
+  );
+  const hiddenCount = folderState.entries.length - visible.length;
+
+  // Entries first, drives last. At a drive root the other volumes used to come
+  // first, which pushed the folder's own contents below the fold: ten rows of
+  // "D:\ E:\ F:\" filled the panel and the answer to "what is in here?" was
+  // nowhere on screen. The folder being looked at leads; the jump targets follow.
   const rows = [];
   if (folderState.parent) rows.push({ name: "..", path: folderState.parent, up: true });
-  // A drive we are not already inside; on this platform the root list is one
-  // entry and this loop adds nothing.
-  for (const root of folderState.roots) {
-    if (!within(folderState.path, root)) rows.push({ name: root, path: root, drive: true });
-  }
-  for (const entry of folderState.entries) {
-    if (entry.hidden && !folderState.showHidden) continue;
-    rows.push(entry);
+  rows.push(...visible);
+  const drives = folderState.roots.filter((root) => !within(folderState.path, root));
+  if (drives.length) {
+    rows.push({ group: "Other drives" });
+    for (const root of drives) rows.push({ name: root, path: root, drive: true });
   }
 
   el.folderList.replaceChildren();
-  if (rows.length === 0) {
-    el.folderList.append(node("p", "folder__empty", "No subfolders here."));
-    return;
+  if (visible.length === 0) {
+    // Say which silence this is. "Nothing here" and "everything here is hidden
+    // and the toggle is off" look identical otherwise, which is how a level full
+    // of folders came to read as a broken picker.
+    el.folderList.append(
+      node(
+        "p",
+        "folder__empty",
+        hiddenCount
+          ? `No subfolders shown. ${hiddenCount} hidden — choose Hidden to show them.`
+          : "No subfolders here.",
+      ),
+    );
   }
   for (const row of rows) {
+    if (row.group) {
+      el.folderList.append(node("p", "folder__group", row.group));
+      continue;
+    }
     const button = node("button", "folder__entry");
     button.type = "button";
     button.setAttribute("role", "option");
@@ -1813,6 +1834,13 @@ function renderFolder() {
     button.addEventListener("click", () => loadFolder(row.path));
     el.folderList.append(button);
   }
+
+  // A count is the quickest answer to "did this load, or is it empty?".
+  el.folderCount.textContent = visible.length === 1 ? "1 folder" : `${visible.length} folders`;
+  el.folderCount.hidden = visible.length === 0;
+  el.folderUp.disabled = !folderState.parent;
+  // A new level starts at its first folder, not where the last one was scrolled.
+  el.folderList.scrollTop = 0;
 }
 
 el.folderUp.addEventListener("click", () => {

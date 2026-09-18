@@ -1262,3 +1262,34 @@ button, input, textarea, select {
 
 .folder__new { display: flex; gap: 8px; }
 .folder__new .input { flex: 1 1 auto; min-width: 0; }
+
+/* A group label inside the list — "Other drives" — so jump targets never read as
+   the contents of the folder being browsed. */
+.folder__group {
+  margin: 6px 0 0;
+  padding: 4px 10px 2px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--dsw-alias-label-caption);
+}
+
+/* No `display` rule: this is toggled with the hidden attribute. */
+.folder__count {
+  margin-left: auto;
+  padding-right: 6px;
+  font-size: 12px;
+  color: var(--dsw-alias-label-tertiary);
+  white-space: nowrap;
+}
+
+/* The toggle is a state, not an action, so it has to look like one when it is on.
+   Without this the difference between "no folders here" and "all of them are
+   hidden" was invisible. */
+.button[aria-pressed="true"] {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+
+.folder__entry:disabled { opacity: 0.45; cursor: default; }

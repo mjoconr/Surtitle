@@ -552,3 +552,42 @@ class TestIcon:
             width, height = raw[entry], raw[entry + 1]
             sizes.add((width or 256, height or 256))
         assert {(16, 16), (32, 32), (48, 48), (256, 256)} <= sizes
+
+
+class TestFolderPickerList:
+    """The in-app picker has to lead with the folder being looked at.
+
+    It used to lead with the *other* drives, so at ``C:\\`` ten rows of
+    ``D:\\ E:\\ F:\\`` filled the panel and the folders inside ``C:\\`` sat below
+    the fold. To the person using it that is a picker that can see nothing at all,
+    which is how it was reported.
+    """
+
+    def _render_folder(self, script) -> str:
+        body = script[script.index("function renderFolder") :]
+        return body[: body.index("\n}\n")]
+
+    def test_the_folders_come_before_the_other_drives(self, script):
+        body = self._render_folder(script)
+        assert body.index("rows.push(...visible)") < body.index("Other drives")
+
+    def test_the_drives_are_labelled_so_they_do_not_read_as_contents(self, script):
+        assert 'node("p", "folder__group", row.group)' in script
+
+    def test_hidden_folders_are_left_out_until_asked_for(self, script):
+        assert "folderState.showHidden || !entry.hidden" in script
+
+    def test_a_level_of_only_hidden_folders_says_which_silence_it_is(self, script):
+        assert "hidden — choose Hidden to show them" in script
+
+    def test_the_count_is_rendered_and_declared(self, html, script):
+        assert re.search(r'id="folderCount"[^>]*\bhidden\b', html)
+        assert 'document.getElementById("folderCount")' in script
+
+    def test_the_hidden_toggle_shows_that_it_is_on(self, css):
+        assert re.search(r'\.button\[aria-pressed="true"\]', css), (
+            "without a pressed style, 'nothing here' and 'everything here is hidden' look identical"
+        )
+
+    def test_a_new_level_starts_at_the_top(self, script):
+        assert "el.folderList.scrollTop = 0" in script
