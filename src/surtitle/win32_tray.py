@@ -66,6 +66,16 @@ NOTIFYICON_VERSION_4 = 4
 NIF_MESSAGE = 0x00000001
 NIF_ICON = 0x00000002
 NIF_TIP = 0x00000004
+# The notification balloon. On Windows 10 and 11 the shell renders this as a
+# toast, which is the right shape for something the user did not ask for: it
+# waits to be noticed instead of interrupting what they were doing.
+NIF_INFO = 0x00000010
+
+NIIF_INFO = 0x00000001
+# A balloon's own timeout is ignored from Vista onwards; the shell decides. The
+# field is still set because it shares storage with uVersion and must be
+# written as a sane number rather than left as whatever was there.
+BALLOON_MS = 10000
 
 MF_STRING = 0x00000000
 MF_SEPARATOR = 0x00000800
@@ -402,6 +412,29 @@ class TrayIcon:
             title or self._title,
             MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND | MB_TOPMOST,
         )
+
+    def balloon(self, text: str, *, title: str | None = None) -> bool:
+        """Show a notification balloon beside the icon. False when it was refused.
+
+        Preferred over :meth:`message` for anything the user did not ask for. A
+        modal box raised by a background check steals focus from whatever they
+        were doing; a balloon does not, and the shell keeps it in the Action
+        Center if they miss it.
+        """
+        if not self._hwnd:
+            return False
+        try:
+            data = self._data(NIF_INFO)
+            # The struct's fields are fixed-size; a longer string would be
+            # truncated by ctypes anyway, and silently.
+            data.szInfoTitle = (title or self._title)[:63]
+            data.szInfo = text[:255]
+            data.dwInfoFlags = NIIF_INFO
+            data.uVersion = BALLOON_MS
+            return bool(_shell32.Shell_NotifyIconW(NIM_MODIFY, ctypes.byref(data)))
+        except Exception:  # a refused balloon must not take the tray down
+            log.debug("could not show a tray balloon", exc_info=True)
+            return False
 
     def confirm(self, text: str, *, title: str | None = None) -> bool:
         """Ask a yes/no question owned by the icon. True when the user says yes.

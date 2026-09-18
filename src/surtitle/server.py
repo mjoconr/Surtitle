@@ -51,6 +51,7 @@ from surtitle.config import Settings, get_settings, setup_logging
 from surtitle.core.events import ClientCommand, CommandKind, EventKind
 from surtitle.core.session import Session, SessionManager, decode_client_frame
 from surtitle.llm.deepseek import DeepSeekClient
+from surtitle.releases import ReleaseWatcher
 from surtitle.stats import RunStats
 from surtitle.store.db import Store
 from surtitle.store.settings_store import (
@@ -163,6 +164,10 @@ class AppState:
         # Pulling an update is the same shape of work: slow, network-bound, and
         # owned by the server so it survives whichever icon asked for it.
         self.update = UpdateJob(on_stop=on_shutdown)
+        # Noticing a new release is a lookup with a long memory: the tray polls
+        # every couple of seconds and GitHub is not free, so the answer is cached
+        # here and the announcement budget lives on disk beside the settings.
+        self.releases = ReleaseWatcher(settings)
         # Put the portable tools on this process's PATH before anything can run a
         # command: the agent's shell, a project environment, and the git and svn
         # commands this app runs itself all inherit it.
@@ -317,6 +322,7 @@ def build_api(state: AppState) -> APIRouter:
             "deepgram_configured": bool(settings.deepgram_key()),
             "sessions": state.sessions.count,
             "local_voice": _local_voice_payload(settings, state.voice_install),
+            "release": state.releases.snapshot(),
             "vcs": {
                 "tools": [row.to_dict() for row in _vcs_rows(settings)],
                 "install": state.vcs_install.snapshot(),
@@ -425,6 +431,29 @@ def build_api(state: AppState) -> APIRouter:
             return JSONResponse({"started": False, "reason": "already running"}, status_code=409)
         log.info("portable git/svn install requested by %s", client)
         return JSONResponse({"started": True}, status_code=202)
+
+    @api.get("/release")
+    async def release_status(force: bool = False) -> dict[str, Any]:
+        """Whether a newer release exists, and whether it is still worth saying so.
+
+        The lookup is cached for hours, so the tray can ask on every poll without
+        turning that into a request per poll. ``force=true`` is for the Settings
+        screen's "check now".
+        """
+        return await asyncio.to_thread(state.releases.check, force=force)
+
+    @api.post("/release/noticed")
+    async def release_noticed(request: Request) -> Any:
+        """Record that the user has now been told about the available release.
+
+        Loopback only: this spends the user's remaining announcements, and a
+        remote caller has no business doing that. The cap itself lives in
+        :mod:`surtitle.releases`, so the tray and the browser share one budget
+        rather than each deciding for itself when to stop.
+        """
+        if not _is_loopback(request):
+            return _error(403, "recording a release notice is only allowed from this machine")
+        return state.releases.record_notice()
 
     @api.get("/update")
     async def update_status() -> dict[str, Any]:

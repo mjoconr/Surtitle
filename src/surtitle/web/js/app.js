@@ -2051,6 +2051,26 @@ const settings = new SettingsPanel({
 });
 document.getElementById("settingsOpen").addEventListener("click", () => settings.open());
 
+/**
+ * Tell the user once that a newer Surtitle exists.
+ *
+ * Nothing is recorded unless the message was actually shown, and a failure here
+ * is deliberately silent: an update notice that cannot be fetched must not look
+ * like the app is broken.
+ */
+async function noticeRelease() {
+  try {
+    const release = await api("/api/release");
+    if (!release.available || !release.can_announce) return;
+    const version = (release.latest || {}).version;
+    if (!version) return;
+    toast(`Surtitle ${version} is available — update from the tray menu or the releases page.`);
+    await api("/api/release/noticed", { method: "POST", body: JSON.stringify({}) });
+  } catch {
+    // Offline, or the endpoint is unhappy: neither is the user's problem now.
+  }
+}
+
 // ------------------------------------------------------------------ startup
 
 async function main() {
@@ -2078,6 +2098,11 @@ async function main() {
   } catch (error) {
     toast(`Cannot reach the server: ${error.message}`, "error");
   }
+
+  // A newer release is worth one sentence, and only a few times. The server keeps
+  // the count, so a browser and the tray share one budget instead of each
+  // deciding for itself that the user has not heard yet.
+  noticeRelease();
 
   try {
     await loadProjects();

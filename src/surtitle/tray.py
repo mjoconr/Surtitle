@@ -24,6 +24,8 @@ from pathlib import Path
 from typing import Any
 
 from surtitle.local_api import (
+    acknowledge_release,
+    fetch_release,
     fetch_status,
     request_shell,
     request_shutdown,
@@ -92,6 +94,11 @@ _MISSES_BEFORE_GONE = 3
 # first poll legitimately fails; a tray with nothing to attach to should not
 # linger forever either.
 _GRACE_SECONDS = 30.0
+# How often the tray asks whether a newer release has been published. The server
+# caches the GitHub lookup for hours, so this is about how quickly a long-running
+# tray notices, not about how often GitHub is asked. The first check happens at
+# once: someone restarting the app after a release should hear about it.
+_RELEASE_CHECK_SECONDS = 6 * 60 * 60
 
 
 def human_count(value: int) -> str:
@@ -251,7 +258,32 @@ def _update_entries(snapshot: dict[str, Any] | None) -> list[MenuEntry]:
     else:
         rows = [MenuEntry(label="Get the latest release…", action="update_page")]
 
-    return rows
+    notice = _release_entry(snapshot)
+    return [notice, *rows] if notice is not None else rows
+
+
+def _release_entry(snapshot: dict[str, Any] | None) -> MenuEntry | None:
+    """The row that says a newer version has been published.
+
+    It carries the version number rather than a bare "update available", because
+    the number is what lets somebody decide whether it is worth interrupting their
+    work for. The action is whichever update their installation can actually
+    perform, so the notice is also the way to act on it.
+    """
+    release = (snapshot or {}).get("release") or {}
+    if not release.get("available"):
+        return None
+    version = (release.get("latest") or {}).get("version") or ""
+    if not version:
+        return None
+    update = (snapshot or {}).get("update") or {}
+    in_place = update.get("kind") == "git" or bool(update.get("self_update"))
+    label = (
+        f"Surtitle {version} is available — install it"
+        if in_place
+        else f"Surtitle {version} is available — download it"
+    )
+    return MenuEntry(label=label, action="update_release" if in_place else "update_page")
 
 
 def _shell_entries(snapshot: dict[str, Any] | None) -> list[MenuEntry]:
@@ -397,6 +429,10 @@ class SurtitleTray:
         self._icon: Any = None
         self._poller: threading.Thread | None = None
         self._on_change = on_change
+        # Release notices: when the last check was made, and the thread doing it.
+        # Both are touched only from the poll loop or the check itself.
+        self._release_checked_at = 0.0
+        self._release_thread: threading.Thread | None = None
 
     # --- state -----------------------------------------------------------
     @property
@@ -667,6 +703,7 @@ class SurtitleTray:
             snapshot = fetch_status(self.url)
             if snapshot is not None:
                 self._publish(snapshot)
+                self._maybe_notice_release()
                 self._misses = 0
                 self._seen = True
             else:
@@ -686,6 +723,55 @@ class SurtitleTray:
             self._snapshot = snapshot
         if self._on_change is not None:
             self._on_change(snapshot)
+
+    # --- release notices -------------------------------------------------
+    def _maybe_notice_release(self) -> None:
+        """Ask whether a newer release exists, now and then, without blocking.
+
+        The answer is cached by the server, so the usual case is one cheap loopback
+        request; the first ask after a fresh start can still be a network round
+        trip, and a menu that waits on GitHub is a menu that feels broken.
+        """
+        now = time.monotonic()
+        if self._release_checked_at and now - self._release_checked_at < _RELEASE_CHECK_SECONDS:
+            return
+        if self._release_thread is not None and self._release_thread.is_alive():
+            return
+        self._release_checked_at = now
+        self._release_thread = threading.Thread(
+            target=self._check_release, name="surtitle-release-check", daemon=True
+        )
+        self._release_thread.start()
+
+    def _check_release(self) -> None:
+        """Tell the user about a newer release, at most a few times per version.
+
+        The server owns the count, so a tray and a browser cannot each decide
+        separately that the user has not been told yet. Nothing is recorded unless
+        a notification actually went out.
+        """
+        payload = fetch_release(self.url)
+        if not payload or not payload.get("available") or not payload.get("can_announce"):
+            return
+        version = (payload.get("latest") or {}).get("version") or ""
+        if not version:
+            return
+
+        title = "Surtitle — update available"
+        text = (
+            f"Surtitle {version} has been released.\n\n"
+            'Use "Update to the latest release…" in this menu when you are ready; '
+            "nothing has changed yet."
+        )
+        balloon = getattr(self._icon, "balloon", None)
+        if callable(balloon) and balloon(text, title=title):
+            log.info("announced release %s with a balloon", version)
+        else:
+            # No balloon here (the Windows shell refused it, or this platform has
+            # no tray balloons). A box is intrusive for something unasked, so it is
+            # the fallback rather than the default.
+            self._message(text, title)
+        acknowledge_release(self.url)
 
     def _finish(self) -> None:
         """The server is gone: take the icon down and let a waiter proceed."""

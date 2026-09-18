@@ -822,3 +822,134 @@ class TestVersionControlAction:
         tray._select("vcs")
 
         assert shown and "already installed" in shown[0]
+
+
+class TestReleaseNotice:
+    """The tray is what tells a Windows user a new version exists."""
+
+    def _snapshot_with(self, snapshot, *, available=True, can_announce=True, kind="git"):
+        snapshot["release"] = {
+            "available": available,
+            "can_announce": can_announce,
+            "latest": {"version": "0.5.0"} if available else None,
+        }
+        snapshot["update"] = {"kind": kind, "self_update": kind != "git"}
+        return snapshot
+
+    def test_the_version_number_is_in_the_menu_row(self, snapshot):
+        entry = next(
+            e for e in menu_entries(self._snapshot_with(snapshot)) if "is available" in e.label
+        )
+        assert "0.5.0" in entry.label
+
+    def test_an_installable_update_offers_the_update_action(self, snapshot):
+        entry = next(
+            e for e in menu_entries(self._snapshot_with(snapshot)) if "is available" in e.label
+        )
+        assert entry.action == "update_release"
+
+    def test_an_unpacked_source_tree_is_sent_to_the_download_page(self, snapshot):
+        """It cannot replace itself, so offering that would be a lie."""
+        snapshot = self._snapshot_with(snapshot, kind="archive")
+        snapshot["update"] = {"kind": "archive", "self_update": False}
+        entry = next(e for e in menu_entries(snapshot) if "is available" in e.label)
+        assert entry.action == "update_page"
+        assert "download" in entry.label
+
+    def test_no_row_when_there_is_nothing_new(self, snapshot):
+        snapshot = self._snapshot_with(snapshot, available=False)
+        assert not [e for e in menu_entries(snapshot) if "is available" in e.label]
+
+
+class TestReleaseNoticeDelivery:
+    def _tray(self, monkeypatch, payload, *, balloon_ok=True):
+        tray = SurtitleTray("http://127.0.0.1:8765")
+        monkeypatch.setattr("surtitle.tray.fetch_release", lambda url, timeout=None: payload)
+        shown: list[str] = []
+        monkeypatch.setattr(tray, "_message", lambda text, title: shown.append(text))
+
+        class Icon:
+            def balloon(self, text, title=None):
+                shown.append(text)
+                return balloon_ok
+
+        tray._icon = Icon()
+        return tray, shown
+
+    def test_a_new_release_is_announced_and_counted(self, monkeypatch):
+        payload = {
+            "available": True,
+            "can_announce": True,
+            "latest": {"version": "0.5.0"},
+        }
+        tray, shown = self._tray(monkeypatch, payload)
+        counted: list[str] = []
+        monkeypatch.setattr(
+            "surtitle.tray.acknowledge_release", lambda url, timeout=None: counted.append(url)
+        )
+
+        tray._check_release()
+
+        assert shown and "0.5.0" in shown[0]
+        assert counted == ["http://127.0.0.1:8765"]
+
+    def test_nothing_is_counted_when_the_budget_is_spent(self, monkeypatch):
+        """Otherwise the last three announcements would be spent in one poll."""
+        payload = {"available": True, "can_announce": False, "latest": {"version": "0.5.0"}}
+        tray, shown = self._tray(monkeypatch, payload)
+        counted: list[int] = []
+        monkeypatch.setattr(
+            "surtitle.tray.acknowledge_release", lambda url, timeout=None: counted.append(1)
+        )
+
+        tray._check_release()
+
+        assert shown == []
+        assert counted == []
+
+    def test_nothing_is_announced_when_there_is_no_new_version(self, monkeypatch):
+        tray, shown = self._tray(monkeypatch, {"available": False, "can_announce": False})
+        counted: list[int] = []
+        monkeypatch.setattr(
+            "surtitle.tray.acknowledge_release", lambda url, timeout=None: counted.append(1)
+        )
+
+        tray._check_release()
+
+        assert shown == []
+        assert counted == []
+
+    def test_a_refused_balloon_falls_back_to_a_box(self, monkeypatch):
+        payload = {"available": True, "can_announce": True, "latest": {"version": "0.5.0"}}
+        tray, shown = self._tray(monkeypatch, payload, balloon_ok=False)
+        monkeypatch.setattr("surtitle.tray.acknowledge_release", lambda url, timeout=None: None)
+
+        tray._check_release()
+
+        assert shown and "0.5.0" in shown[-1]
+
+    def test_the_check_is_not_made_on_every_poll(self, monkeypatch):
+        """The server caches the lookup; the tray must not ask GitHub per poll."""
+        tray = SurtitleTray("http://127.0.0.1:8765")
+        monkeypatch.setattr(tray, "_check_release", lambda: None)
+        threads: list[object] = []
+        monkeypatch.setattr(
+            "surtitle.tray.threading.Thread",
+            lambda **kwargs: threads.append(kwargs) or _NoThread(),
+        )
+
+        tray._maybe_notice_release()
+        tray._maybe_notice_release()
+        tray._maybe_notice_release()
+
+        assert len(threads) == 1
+
+
+class _NoThread:
+    """Stands in for a thread that has already finished."""
+
+    def start(self) -> None:
+        return None
+
+    def is_alive(self) -> bool:
+        return False

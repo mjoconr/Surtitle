@@ -29,7 +29,9 @@ from surtitle.config import Settings
 __all__ = [
     "INSTANCE_FILENAME",
     "ServerInstance",
+    "acknowledge_release",
     "clear_instance",
+    "fetch_release",
     "fetch_status",
     "find_instance",
     "instance_path",
@@ -202,6 +204,47 @@ def request_voice_install(url: str, *, timeout: float = _PROBE_TIMEOUT) -> dict[
     except ValueError:
         return {}
     return payload if isinstance(payload, dict) else {}
+
+
+def fetch_release(url: str, *, timeout: float = _PROBE_TIMEOUT) -> dict[str, Any] | None:
+    """Ask the server whether a newer release exists.
+
+    The server caches the GitHub lookup, so the tray can ask on its own schedule
+    without becoming the thing that hammers the API. ``None`` means nothing
+    answered.
+    """
+    try:
+        with httpx.Client(base_url=url, timeout=timeout) as client:
+            response = client.get("/api/release")
+    except (httpx.HTTPError, ValueError, OSError):
+        return None
+    if response.status_code != 200:
+        return None
+    try:
+        payload = response.json()
+    except ValueError:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def acknowledge_release(url: str, *, timeout: float = _PROBE_TIMEOUT) -> dict[str, Any] | None:
+    """Tell the server the user has now been shown the release notice.
+
+    That is what spends one of the few announcements, so it is called only after
+    the notification has actually been put in front of them.
+    """
+    try:
+        with httpx.Client(base_url=url, timeout=timeout) as client:
+            response = client.post("/api/release/noticed")
+    except (httpx.HTTPError, ValueError, OSError):
+        return None
+    if response.status_code != 200:
+        return None
+    try:
+        payload = response.json()
+    except ValueError:
+        return None
+    return payload if isinstance(payload, dict) else None
 
 
 def request_vcs_install(url: str, *, timeout: float = _PROBE_TIMEOUT) -> dict[str, Any] | None:

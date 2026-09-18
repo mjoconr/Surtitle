@@ -893,6 +893,81 @@ class TestFolderBrowse:
         await app.state.app_state.aclose()
 
 
+class TestReleaseNotices:
+    """The endpoint the tray and the browser ask before telling the user."""
+
+    async def test_a_newer_release_is_reported(self, client, monkeypatch):
+        from surtitle import selfupdate
+
+        monkeypatch.setattr(
+            selfupdate,
+            "_get_json",
+            lambda url, timeout=None: {
+                "tag_name": "v99.0.0",
+                "html_url": "https://github.com/mjoconr/Surtitle/releases/tag/v99.0.0",
+            },
+        )
+
+        body = (await client.get("/api/release", params={"force": "true"})).json()
+
+        assert body["available"] is True
+        assert body["latest"]["version"] == "99.0.0"
+        assert body["can_announce"] is True
+        assert body["current"]
+
+    async def test_the_running_version_is_never_announced(self, client, monkeypatch):
+        from surtitle import __version__, selfupdate
+
+        monkeypatch.setattr(
+            selfupdate, "_get_json", lambda url, timeout=None: {"tag_name": f"v{__version__}"}
+        )
+        body = (await client.get("/api/release", params={"force": "true"})).json()
+        assert body["available"] is False
+        # Without this the test would pass on a NameError inside the lambda, which
+        # lands in the same "not available" answer as a correct comparison.
+        assert body["error"] == ""
+        assert body["latest"]["version"] == __version__
+
+    async def test_a_failed_lookup_is_an_error_not_a_crash(self, client, monkeypatch):
+        from surtitle import selfupdate
+
+        def broken(url, timeout=None):
+            raise OSError("no network")
+
+        monkeypatch.setattr(selfupdate, "_get_json", broken)
+        response = await client.get("/api/release", params={"force": "true"})
+        assert response.status_code == 200
+        assert response.json()["available"] is False
+        assert "no network" in response.json()["error"]
+
+    async def test_recording_a_notice_spends_one_announcement(self, client, monkeypatch):
+        from surtitle import selfupdate
+        from surtitle.releases import MAX_ANNOUNCEMENTS
+
+        monkeypatch.setattr(
+            selfupdate, "_get_json", lambda url, timeout=None: {"tag_name": "v99.0.0"}
+        )
+        await client.get("/api/release", params={"force": "true"})
+
+        body = (await client.post("/api/release/noticed")).json()
+        assert body["announcements"] == 1
+        assert body["remaining"] == MAX_ANNOUNCEMENTS - 1
+
+    async def test_the_notice_budget_is_not_spent_by_a_remote_caller(self, settings, monkeypatch):
+        app = create_app_for(settings)
+        transport = httpx.ASGITransport(app=app, client=("10.211.55.9", 40123))
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+            response = await http.post("/api/release/noticed")
+        assert response.status_code == 403
+        await app.state.app_state.aclose()
+
+    async def test_status_carries_the_cached_answer(self, client):
+        """The tray reads /api/status on every poll, so it must not reach GitHub."""
+        body = (await client.get("/api/status")).json()
+        assert "release" in body
+        assert body["release"]["current"]
+
+
 class TestVersionControlTools:
     """The portable git and svn, from the app's point of view."""
 
