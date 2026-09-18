@@ -99,19 +99,36 @@ class TestListing:
         level = folder_browse.listing(tree)
         assert level.parent == str(tree.parent)
 
-    def test_a_filesystem_root_has_no_parent(self):
-        level = folder_browse.listing("/", platform="linux")
+    def _root_of(self, tmp_path):
+        """The filesystem root this host's temp directory lives under.
+
+        Written this way rather than hard-coding "/" because listing walks the real
+        filesystem: on Windows the root of the checkout's drive is the honest
+        equivalent, and the properties below are about the chain, not the spelling.
+        """
+        return Path(tmp_path.anchor)
+
+    def test_a_filesystem_root_has_no_parent(self, tmp_path):
+        level = folder_browse.listing(self._root_of(tmp_path))
         assert level.parent is None
 
-    def test_the_breadcrumb_chain_runs_from_the_root(self):
-        level = folder_browse.listing("/usr/share", platform="linux")
-        paths = [crumb["path"] for crumb in level.crumbs]
-        assert paths == ["/", "/usr", "/usr/share"]
+    def test_the_breadcrumb_chain_runs_from_the_root(self, tmp_path):
+        deep = tmp_path / "a" / "b"
+        deep.mkdir(parents=True)
 
-    def test_the_root_crumb_is_labelled_by_its_path(self):
-        """An empty name for "/" would be an unlabelled jump target."""
-        level = folder_browse.listing("/", platform="linux")
-        assert level.crumbs == [{"name": "/", "path": "/"}]
+        level = folder_browse.listing(deep)
+
+        paths = [crumb["path"] for crumb in level.crumbs]
+        assert paths[-1] == str(deep)
+        assert paths[0] == str(self._root_of(tmp_path))
+        # root, then one crumb per component down to the target
+        assert len(paths) == len(deep.parts)
+
+    def test_the_root_crumb_is_labelled_by_its_path(self, tmp_path):
+        """An empty name for the root would be an unlabelled jump target."""
+        root = self._root_of(tmp_path)
+        level = folder_browse.listing(root)
+        assert level.crumbs == [{"name": str(root), "path": str(root)}]
 
     def test_an_existing_path_is_reported_as_an_error(self, tmp_path):
         with pytest.raises(folder_browse.BrowserError) as caught:
@@ -185,8 +202,12 @@ class TestListing:
 
 
 class TestRoots:
-    def test_posix_has_one_root(self):
+    def test_posix_has_one_root_whatever_the_host(self):
+        """The separator used to come from the host, so this asked for Linux and
+        was answered with a backslash on Windows."""
         assert folder_browse.roots(platform="linux") == ["/"]
+        assert folder_browse.roots(platform="darwin") == ["/"]
+        assert folder_browse.roots(platform="win32") != ["/"]
 
     def test_windows_drive_letters_come_from_the_bitmask(self):
         """Bit 2 is C:, bit 3 is D:; the mapping is the whole risk here."""

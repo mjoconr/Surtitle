@@ -132,9 +132,16 @@ def _windows_roots() -> list[str]:  # pragma: no cover - Windows only
 
 
 def roots(*, platform: str | None = None) -> list[str]:
-    """Every filesystem root the picker offers as a jump target."""
+    """Every filesystem root the picker offers as a jump target.
+
+    The POSIX root is ``/`` and not ``os.sep``: the separator belongs to the host,
+    while this function answers for the platform it was asked about. They are the
+    same thing in production, where the question is always about this machine —
+    but a seam that quietly reports the host's separator for another platform
+    cannot be tested or reasoned about, which is how it was caught.
+    """
     if (platform or sys.platform) != "win32":
-        return [os.sep]
+        return ["/"]
     return _windows_roots()
 
 
