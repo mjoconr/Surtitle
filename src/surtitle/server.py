@@ -656,10 +656,37 @@ def build_api(state: AppState) -> APIRouter:
 
     @api.delete("/projects/{project_id}")
     async def delete_project(project_id: str) -> dict[str, Any]:
-        """Forget a project. The user's files on disk are never deleted."""
-        _project_or_404(state, project_id)
+        """Forget a project and every conversation in it. Files are never deleted.
+
+        The store cascades to the project's sessions, so this is the "remove it
+        from Surtitle" operation rather than a delete of the user's work: the
+        folder, and everything the agent wrote into it, is left exactly as it is.
+        The reply says so explicitly, because a UI that reports "deleted" without
+        saying what survived invites the user to assume the worst.
+
+        Live conversations are dropped first. Their runtimes hold the project
+        root and would otherwise outlive the record they belong to — still
+        registered, still able to answer a WebSocket for a project that no longer
+        exists.
+        """
+        project = _project_or_404(state, project_id)
+        sessions = state.store.list_sessions(project_id, include_archived=True, limit=1000)
+        for session in sessions:
+            await state.sessions.remove(session.id)
         state.store.delete_project(project_id)
-        return {"deleted": project_id, "files_removed": False}
+        log.info(
+            "deleted project %s (%s): %d conversation(s) removed, folder kept",
+            project.name,
+            project_id,
+            len(sessions),
+        )
+        return {
+            "deleted": project_id,
+            "name": project.name,
+            "root": project.root,
+            "sessions_removed": len(sessions),
+            "files_removed": False,
+        }
 
     @api.put("/projects/{project_id}/trusted-tools")
     async def set_trusted_tools(project_id: str, body: dict[str, Any] = Body(...)) -> Any:

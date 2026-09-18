@@ -415,6 +415,7 @@ function renderProjects() {
     return;
   }
   for (const project of state.projects) {
+    const wrap = node("div", "row-wrap");
     const button = node("button", "row");
     button.type = "button";
     button.setAttribute("aria-current", String(state.project?.id === project.id));
@@ -424,7 +425,21 @@ function renderProjects() {
     main.append(node("div", "row__meta", project.exists ? project.root : "folder missing"));
     button.append(main);
     button.addEventListener("click", () => selectProject(project.id));
-    el.projectList.append(button);
+
+    // Removing a project is only ever about Surtitle's own records, so both
+    // actions say what happens to the folder rather than leaving it implied.
+    const actions = node("div", "row__actions");
+    actions.append(
+      rowAction("✎", "Rename this project", () => renameProject(project)),
+      rowAction(
+        "✕",
+        "Delete this project and its conversations — the folder itself is kept",
+        () => deleteProject(project),
+        { danger: true },
+      ),
+    );
+    wrap.append(button, actions);
+    el.projectList.append(wrap);
   }
 }
 
@@ -468,10 +483,16 @@ function sessionRow(session, { archived }) {
       }),
     );
   } else {
+    // Both are offered on a live conversation: filing it away is the cautious
+    // choice, and deleting one you have just finished with should not require
+    // archiving it first.
     actions.append(
       rowAction("▤", "Archive — keeps the chat, hides it from the list", () =>
         archiveSession(session),
       ),
+      rowAction("✕", "Delete this conversation for good", () => deleteSessionForever(session), {
+        danger: true,
+      }),
     );
   }
 
@@ -1232,6 +1253,94 @@ async function selectProject(projectId) {
   }
 }
 
+async function renameProject(project) {
+  const name = await promptAction({
+    title: "Rename project",
+    label: "Project name",
+    value: project.name,
+    confirmLabel: "Rename",
+    note: "Only the name in Surtitle changes. The folder on disk keeps its name.",
+  });
+  if (!name || name === project.name) return;
+  try {
+    const updated = await api(`/api/projects/${project.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ name }),
+    });
+    if (state.project?.id === project.id) {
+      state.project = { ...state.project, name: updated.name };
+      renderHeader();
+    }
+    await loadProjects();
+    toast("Project renamed.");
+  } catch (cause) {
+    toast(cause.message, "error");
+  }
+}
+
+/**
+ * Remove a project and every conversation in it, keeping the folder.
+ *
+ * "Delete the project" is the one action here that could reasonably be read as
+ * "delete my work", so the dialog names the folder and says it is untouched
+ * before anything happens, and the confirmation afterwards repeats it. Nothing
+ * on disk is ever removed: this forgets the project in Surtitle's own database.
+ */
+async function deleteProject(project) {
+  let total = 0;
+  try {
+    const full = await api(`/api/projects/${project.id}`);
+    const counts = full.session_counts || {};
+    total = (counts.active || 0) + (counts.archived || 0);
+  } catch {
+    // The count is a courtesy; the confirmation does not depend on it.
+  }
+  const conversations =
+    total === 1 ? "its one conversation" : `its ${total} conversations`;
+  const ok = await confirmAction({
+    title: `Delete "${project.name}"?`,
+    text: total
+      ? `The project and ${conversations} will be removed from Surtitle permanently.`
+      : "The project will be removed from Surtitle permanently.",
+    note: `Your files are not touched: ${project.root} and everything in it stays exactly as it is.`,
+    confirmLabel: "Delete project",
+  });
+  if (!ok) return;
+  const wasOpen = state.project?.id === project.id;
+  try {
+    await api(`/api/projects/${project.id}`, { method: "DELETE" });
+    await loadProjects();
+    toast(`Project deleted. ${project.root} was left as it is.`);
+    if (wasOpen) await forgetOpenProject();
+  } catch (cause) {
+    toast(cause.message, "error");
+  }
+}
+
+/** Clear the view after the open project went away, then open another. */
+async function forgetOpenProject() {
+  state.project = null;
+  state.session = null;
+  state.sessions = [];
+  state.archive = [];
+  state.showArchive = false;
+  state.turns.clear();
+  state.toolRows.clear();
+  state.currentTurn = null;
+  state.activity = [];
+  state.files = { path: ".", entries: [] };
+  el.turns.replaceChildren();
+  renderProjects();
+  renderSessions();
+  renderHeader();
+  renderRightbar();
+  if (state.projects.length) {
+    await selectProject(state.projects[0].id);
+  } else {
+    openProjectModal();
+  }
+}
+
 /** Reload both halves of the conversation list from the server. */
 async function refreshSessions() {
   if (!state.project) return;
@@ -1781,6 +1890,57 @@ function closeConfirm(result) {
 document.getElementById("confirmOk").addEventListener("click", () => closeConfirm(true));
 document.getElementById("confirmCancel").addEventListener("click", () => closeConfirm(false));
 document.getElementById("confirmMask").addEventListener("click", () => closeConfirm(false));
+
+// ----------------------------------------------------------- text prompt
+
+let promptResolver = null;
+
+/**
+ * Ask for one line of text. Resolves the trimmed value, or null on cancel.
+ *
+ * Enter submits, which is what anyone types into a name field expects; Escape
+ * cancels for the same reason.
+ */
+function promptAction({ title, label, value = "", confirmLabel = "Save", note = "" }) {
+  document.getElementById("promptTitle").textContent = title;
+  document.getElementById("promptLabel").textContent = label;
+  document.getElementById("promptInput").value = value;
+  document.getElementById("promptNote").textContent = note;
+  document.getElementById("promptNote").hidden = !note;
+  document.getElementById("promptOk").textContent = confirmLabel;
+  const modal = document.getElementById("promptModal");
+  modal.hidden = false;
+  const input = document.getElementById("promptInput");
+  input.focus();
+  input.select();
+  return new Promise((resolve) => {
+    promptResolver = resolve;
+  });
+}
+
+function closePrompt(result) {
+  const modal = document.getElementById("promptModal");
+  if (modal.hidden && !promptResolver) return;
+  modal.hidden = true;
+  const resolve = promptResolver;
+  promptResolver = null;
+  if (resolve) resolve(result);
+}
+
+document.getElementById("promptOk").addEventListener("click", () => {
+  closePrompt(document.getElementById("promptInput").value.trim() || null);
+});
+document.getElementById("promptCancel").addEventListener("click", () => closePrompt(null));
+document.getElementById("promptMask").addEventListener("click", () => closePrompt(null));
+document.getElementById("promptInput").addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    closePrompt(event.currentTarget.value.trim() || null);
+  } else if (event.key === "Escape") {
+    event.preventDefault();
+    closePrompt(null);
+  }
+});
 
 document.getElementById("archiveToggle").addEventListener("click", () => {
   state.showArchive = !state.showArchive;

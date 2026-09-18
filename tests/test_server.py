@@ -195,8 +195,28 @@ class TestProjects:
 
         response = await client.delete(f"/api/projects/{project['id']}")
         assert response.status_code == 200
-        assert response.json()["files_removed"] is False
+        body = response.json()
+        assert body["files_removed"] is False
+        # The reply names the folder it left alone, so the UI can say so too
+        # rather than leaving "deleted" to mean whatever the user fears.
+        assert body["root"] == str(target.resolve())
         assert (target / "important.txt").read_text(encoding="utf-8") == "do not delete"
+
+    async def test_delete_takes_the_conversations_with_it(self, client, tmp_path):
+        target = tmp_path / "project"
+        project = (
+            await client.post("/api/projects", json={"name": "Talks", "root": str(target)})
+        ).json()
+        session = (
+            await client.post(f"/api/projects/{project['id']}/sessions", json={"title": "One"})
+        ).json()
+
+        body = (await client.delete(f"/api/projects/{project['id']}")).json()
+        assert body["sessions_removed"] == 1
+        assert (await client.get(f"/api/sessions/{session['id']}")).status_code == 404
+        assert (await client.get(f"/api/projects/{project['id']}")).status_code == 404
+        # The folder and anything the agent wrote into it survive.
+        assert target.is_dir()
 
     async def test_duplicate_root_reuses_the_project(self, client, tmp_path):
         payload = {"name": "First", "root": str(tmp_path / "same")}

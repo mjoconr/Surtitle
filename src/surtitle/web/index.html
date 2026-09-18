@@ -238,6 +238,31 @@
   </div>
 </div>
 
+<!-- Text entry, used for renaming. Separate from the confirm dialog because a
+     rename is reversible and should not be dressed as a destructive action. -->
+<div class="modal" id="promptModal" hidden>
+  <div class="modal__mask" id="promptMask"></div>
+  <div class="modal__panel modal__panel--narrow" role="dialog" aria-modal="true"
+       aria-labelledby="promptTitle">
+    <div class="modal__content">
+      <div class="modal__header">
+        <span class="modal__title" id="promptTitle">Rename</span>
+      </div>
+      <div class="modal__options">
+        <label class="setting" for="promptInput">
+          <span class="setting__name" id="promptLabel">Name</span>
+          <input class="input" id="promptInput" autocomplete="off" />
+        </label>
+        <p class="setting__desc setting__desc--note" id="promptNote" hidden></p>
+      </div>
+      <div class="modal__footer">
+        <button class="button button--ghost" id="promptCancel" type="button">Cancel</button>
+        <button class="button button--primary" id="promptOk" type="button">Save</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- Confirmation for destructive conversation actions. Always states that files
      in the project folder are not touched. -->
 <div class="modal" id="confirmModal" hidden>
