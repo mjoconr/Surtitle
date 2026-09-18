@@ -150,7 +150,51 @@ class TestPosixLauncherBehaviour:
 
     @pytest.mark.skipif(sys.platform == "win32", reason="run.sh is for macOS and Linux")
     @pytest.mark.skipif(shutil.which("bash") is None, reason="no bash available")
+    def test_a_warm_environment_is_not_synced_again(self, tmp_path):
+        """Launching must not re-run uv sync: it uninstalls the voice-local extra.
+
+        `uv sync` without --extra voice-local removes that extra even with
+        --inexact, because the extra is in the lock. Syncing on every launch meant
+        the offline engines had to be installed again after each start from a
+        shortcut, and a drifted environment was rebuilt from scratch.
+        """
+        checkout = tmp_path / "checkout"
+        (checkout / "scripts").mkdir(parents=True)
+        shutil.copy(RUN_SH, checkout / "scripts" / "run.sh")
+
+        venv_python = checkout / ".venv" / "bin" / "python"
+        venv_python.parent.mkdir(parents=True)
+        venv_python.write_text('#!/bin/sh\necho "STUB python $*"\n', encoding="utf-8")
+        venv_python.chmod(0o755)
+
+        home = tmp_path / "home"
+        (home / ".local" / "bin").mkdir(parents=True)
+        uv = home / ".local" / "bin" / "uv"
+        uv.write_text('#!/bin/sh\necho "STUB uv $*"\n', encoding="utf-8")
+        uv.chmod(0o755)
+
+        done = subprocess.run(
+            ["bash", str(checkout / "scripts" / "run.sh"), "--version"],
+            env={"HOME": str(home), "PATH": "/usr/bin:/bin"},
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+
+        assert done.returncode == 0, done.stderr
+        assert "STUB python -m surtitle --version" in done.stdout
+        assert "STUB uv" not in done.stdout, "a warm environment must not be re-synced"
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="run.sh is for macOS and Linux")
+    @pytest.mark.skipif(shutil.which("bash") is None, reason="no bash available")
     def test_a_uv_off_path_is_found_and_used(self, tmp_path):
+        # A checkout of its own: running the repo's run.sh would find the repo's
+        # real .venv, and a warm environment is launched without uv on purpose.
+        checkout = tmp_path / "checkout"
+        (checkout / "scripts").mkdir(parents=True)
+        shutil.copy(RUN_SH, checkout / "scripts" / "run.sh")
+
         home = tmp_path / "home"
         (home / ".local" / "bin").mkdir(parents=True)
         stub = home / ".local" / "bin" / "uv"
@@ -158,7 +202,7 @@ class TestPosixLauncherBehaviour:
         stub.chmod(0o755)
 
         done = subprocess.run(
-            ["bash", str(RUN_SH), "--version"],
+            ["bash", str(checkout / "scripts" / "run.sh"), "--version"],
             # A PATH with no uv on it at all, which is the state of the window
             # that just installed uv.
             env={"HOME": str(home), "PATH": "/usr/bin:/bin"},
@@ -282,13 +326,23 @@ class TestArchiveMode:
         assert "BUILD-INFO.json" in text
         assert "release archive" in text
 
+    def test_the_windows_installer_resolves_the_icon_from_the_package(self):
+        """A release archive excludes src/surtitle/web, so that path is not the one.
+
+        The shortcut was built with a generic icon because the only lookup was the
+        source tree, which an archive does not carry.
+        """
+        text = (SCRIPTS / "install.ps1").read_text(encoding="utf-8")
+        assert "surtitle.__file__" in text
+
     @staticmethod
-    def _fake_archive(root):
+    def _fake_archive(root, icon=None):
         """A release archive on disk: installer, marker, and a bundled runtime.
 
-        The runtime is a stub that answers the version lookup and exits 0 for the
-        doctor and model probes, so the installer's own bookkeeping is exercised
-        without a real Surtitle.
+        The runtime is a stub that answers the version and icon lookups the way a
+        real one would - the icon only where the package actually has it - and
+        exits 0 for the doctor and model probes, so the installer's own bookkeeping
+        is exercised without a real Surtitle.
         """
         (root / "scripts").mkdir(parents=True)
         shutil.copy(SCRIPTS / "install.sh", root / "scripts" / "install.sh")
@@ -299,7 +353,15 @@ class TestArchiveMode:
         python = root / "python" / "bin" / "python3"
         python.parent.mkdir(parents=True)
         python.write_text(
-            '#!/bin/sh\nif [ "$1" = "-c" ]; then echo 9.9.9; fi\nexit 0\n', encoding="utf-8"
+            "#!/bin/sh\n"
+            'if [ "$1" = "-c" ]; then\n'
+            '  case "$2" in\n'
+            f'    *surtitle-icon*) [ -n "{icon or ""}" ] && echo "{icon or ""}" ;;\n'
+            "    *) echo 9.9.9 ;;\n"
+            "  esac\n"
+            "fi\n"
+            "exit 0\n",
+            encoding="utf-8",
         )
         python.chmod(0o755)
         return root
@@ -345,6 +407,26 @@ class TestArchiveMode:
         # Opening the app runs the archive's own documented entry point, not the
         # copy in scripts/.
         assert str(archive / "run.sh") in launched.read_text(encoding="utf-8")
+
+    @pytest.mark.skipif(sys.platform != "darwin", reason="the app icon is macOS only")
+    @pytest.mark.skipif(shutil.which("bash") is None, reason="no bash available")
+    def test_macos_archive_app_gets_an_icon(self, tmp_path):
+        """The icon lives in the installed package, which is where an archive's is.
+
+        The old lookup was src/surtitle/web, which an archive deliberately excludes,
+        so the app came out with a generic icon and no way to tell why.
+        """
+        icon = tmp_path / "surtitle-icon.png"
+        shutil.copy(ROOT / "src" / "surtitle" / "web" / "surtitle-icon.png", icon)
+        archive = self._fake_archive(tmp_path / "archive", icon=icon)
+        home = tmp_path / "home"
+        home.mkdir()
+
+        done = self._run(archive, home, "--no-startup")
+
+        assert done.returncode == 0, done.stderr
+        resources = home / "Applications" / "Surtitle.app" / "Contents" / "Resources"
+        assert (resources / "AppIcon.icns").is_file(), "the app was built without its icon"
 
     @pytest.mark.skipif(sys.platform != "darwin", reason="the LaunchAgent is macOS only")
     @pytest.mark.skipif(shutil.which("bash") is None, reason="no bash available")

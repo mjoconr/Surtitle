@@ -52,23 +52,27 @@ REM environment was found.
 set "DEV_VENV=%SCRIPT_DIR%.venv\Scripts\python.exe"
 if not exist "%DEV_VENV%" if exist "%SCRIPT_DIR%..\.venv\Scripts\python.exe" set "DEV_VENV=%SCRIPT_DIR%..\.venv\Scripts\python.exe"
 
+REM --- 2. existing environment, launched as it is ----------------------------
+REM Dependencies are an install/update concern, not a launch one. Syncing here
+REM every time was wrong twice over: "uv sync" without --extra voice-local
+REM uninstalls that extra even with --inexact (it is in the lock, so --inexact
+REM does not protect it), so the offline engines had to be installed again after
+REM every launch from a shortcut; and a warm environment that had drifted was
+REM rebuilt, re-downloading Python and every dependency. Setup, the tray's
+REM update, or an explicit "uv sync" are the places that refresh the environment.
+if exist "%DEV_VENV%" (
+    "%DEV_VENV%" -m surtitle %DEFAULT_COMMAND% %*
+    set "EXITCODE=%ERRORLEVEL%"
+    goto :done
+)
+
+REM --- 3. nothing installed yet: bootstrap once, with uv ---------------------
 if defined UV (
-    REM --inexact matters: a bare "uv sync" prunes anything the lock does not
-    REM name, which silently deletes the optional voice-local extra. "uv run"
-    REM then syncs again by default, so it has to be told not to as well.
-    REM
-    REM Quiet on a warm checkout, loud on a cold one. A first run pulls the whole
-    REM dependency set - hundreds of megabytes - and silence for several minutes
-    REM is indistinguishable from a hang, which is exactly what the user has just
-    REM been through once already.
-    if exist "%DEV_VENV%" (
-        echo Syncing dependencies with uv...
-        "%UV%" sync --inexact --quiet
-    ) else (
-        echo First run: fetching Python and dependencies. This takes a few minutes,
-        echo and only happens once.
-        "%UV%" sync --inexact
-    )
+    REM The only path that touches uv, and the only one where silence for several
+    REM minutes would be indistinguishable from a hang.
+    echo First run: fetching Python and dependencies. This takes a few minutes,
+    echo and only happens once.
+    "%UV%" sync --inexact
     if errorlevel 1 (
         echo.
         echo error: uv sync failed. Run "uv sync" to see the full output.
@@ -76,13 +80,6 @@ if defined UV (
         goto :done
     )
     "%UV%" run --no-sync --quiet surtitle %DEFAULT_COMMAND% %*
-    set "EXITCODE=%ERRORLEVEL%"
-    goto :done
-)
-
-REM --- 3. existing development virtual environment --------------------------
-if exist "%DEV_VENV%" (
-    "%DEV_VENV%" -m surtitle %DEFAULT_COMMAND% %*
     set "EXITCODE=%ERRORLEVEL%"
     goto :done
 )

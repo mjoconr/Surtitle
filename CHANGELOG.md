@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A release archive's shortcut and app keep their icon.** Both installers
+  resolved the icon from `src/surtitle/web`, which a release archive deliberately
+  excludes — the copy inside the installed package is the one that travels — so
+  the Start Menu entry was created with a generic icon and the macOS app was built
+  without one. They now ask the interpreter that runs Surtitle where its own
+  package lives, which is right in both layouts, and say so when no icon is found
+  rather than failing quietly.
+- **Launching no longer re-syncs the environment.** `run.bat`, `run.ps1` and
+  `run.sh` ran `uv sync` on every start, which was wrong twice over: without
+  `--extra voice-local` it uninstalls that extra even with `--inexact` (the extra
+  is in the lock, so `--inexact` does not protect it), so the offline engines had
+  to be installed again after every launch from a shortcut; and an environment
+  that had drifted from the lock was rebuilt, re-downloading Python and every
+  dependency. A warm environment is now launched as it is, and the bootstrap runs
+  only when nothing is installed yet. Refreshing dependencies belongs to Setup,
+  `-Update`, the tray's update, or an explicit `uv sync`.
+
 ## [0.3.0] - 2026-09-18
 
 ### Added

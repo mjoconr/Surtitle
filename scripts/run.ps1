@@ -95,32 +95,29 @@ try {
     # Python environment was found.
     $devVenv = Find-DevVenv
 
-    # --- 2. source checkout with uv ---------------------------------------
-    $uv = Find-Uv
-    if ($uv) {
-        # --inexact matters: a plain `uv sync` prunes anything the lock does not
-        # name, which silently deletes the optional voice-local extra on every
-        # run. `uv run` then syncs again by default, so it has to be told not to.
-        #
-        # Quiet on a warm checkout, loud on a cold one: a first run pulls the
-        # whole dependency set, and several silent minutes are indistinguishable
-        # from a hang.
-        if ($devVenv) {
-            Write-Host 'Syncing dependencies with uv...' -ForegroundColor DarkGray
-            & $uv sync --inexact --quiet
-        } else {
-            Write-Host 'First run: fetching Python and dependencies.' -ForegroundColor DarkGray
-            Write-Host 'This takes a few minutes, and only happens once.' -ForegroundColor DarkGray
-            & $uv sync --inexact
-        }
-        if ($LASTEXITCODE -ne 0) { Fail 'uv sync failed. Run "uv sync" to see the full output.' }
-        & $uv run --no-sync --quiet surtitle @Arguments
+    # --- 2. existing environment, launched as it is -----------------------
+    # Dependencies are an install/update concern, not a launch one. Syncing here
+    # every time was wrong twice over: `uv sync` without --extra voice-local
+    # uninstalls that extra even with --inexact (it is in the lock, so --inexact
+    # does not protect it), so the offline engines had to be reinstalled after
+    # every launch from a shortcut; and a warm environment that had drifted was
+    # rebuilt, re-downloading Python and every dependency. Setup, the tray's
+    # update, or an explicit `uv sync` are the places that refresh it.
+    if ($devVenv) {
+        & $devVenv -m surtitle @Arguments
         exit $LASTEXITCODE
     }
 
-    # --- 3. existing development virtual environment ----------------------
-    if ($devVenv) {
-        & $devVenv -m surtitle @Arguments
+    # --- 3. nothing installed yet: bootstrap once, with uv ----------------
+    $uv = Find-Uv
+    if ($uv) {
+        # The only path that touches uv, and the only one where several silent
+        # minutes would be indistinguishable from a hang.
+        Write-Host 'First run: fetching Python and dependencies.' -ForegroundColor DarkGray
+        Write-Host 'This takes a few minutes, and only happens once.' -ForegroundColor DarkGray
+        & $uv sync --inexact
+        if ($LASTEXITCODE -ne 0) { Fail 'uv sync failed. Run "uv sync" to see the full output.' }
+        & $uv run --no-sync --quiet surtitle @Arguments
         exit $LASTEXITCODE
     }
 

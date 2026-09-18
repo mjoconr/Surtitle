@@ -118,8 +118,11 @@ function New-SurtitleShortcut {
     if ($TargetArguments) { $shortcut.Arguments = ($TargetArguments -join ' ') }
     $shortcut.WorkingDirectory = $ProjectDir
     $shortcut.Description = 'Surtitle - voice-first agentic workbench'
-    $iconFile = Join-Path $ProjectDir 'src\surtitle\web\surtitle.ico'
-    if (Test-Path $iconFile) { $shortcut.IconLocation = "$iconFile,0" }
+    # $iconFile is resolved once, below, by asking the interpreter where its own
+    # package lives. It is deliberately not derived from $ProjectDir here: a
+    # release archive excludes src\surtitle\web, so that path does not exist there
+    # and the shortcut silently ended up with a generic icon.
+    if ($iconFile -and (Test-Path $iconFile)) { $shortcut.IconLocation = "$iconFile,0" }
     if ($WindowStyle -ne 1) { $shortcut.WindowStyle = $WindowStyle }
     $shortcut.Save()
 }
@@ -289,6 +292,31 @@ if ((-not $isArchive) -and (-not $NoVoice) -and (-not $NoModels)) {
 $launcher = Join-Path $ProjectDir 'run.bat'
 if (-not (Test-Path $launcher)) {
     $launcher = Join-Path $ProjectDir 'scripts\run.bat'
+}
+
+# The icon ships inside the installed package, not beside the source: a release
+# archive deliberately drops src\surtitle\web (the package copy is the one that
+# travels), so asking the interpreter that runs Surtitle where it lives is the only
+# lookup that is right in both layouts.
+$iconFile = ''
+$iconPy = if ($isArchive) { Join-Path $ProjectDir 'python\python.exe' } else { $venvPy }
+if (Test-Path $iconPy) {
+    try {
+        $iconFile = & $iconPy -c "import pathlib, surtitle; p = pathlib.Path(surtitle.__file__).parent / 'web' / 'surtitle.ico'; print(p if p.is_file() else '')" 2>$null |
+            Select-Object -First 1
+    } catch {
+        $iconFile = ''
+    }
+}
+if (-not $iconFile -or -not (Test-Path $iconFile)) {
+    # An editable checkout with no interpreter to ask yet.
+    $candidate = Join-Path $ProjectDir 'src\surtitle\web\surtitle.ico'
+    if (Test-Path $candidate) { $iconFile = $candidate } else { $iconFile = '' }
+}
+if ($iconFile) {
+    Write-Info "icon:     $iconFile"
+} else {
+    Write-Warn 'could not find the application icon; shortcuts will use a generic one'
 }
 
 if (-not $NoShortcut) {

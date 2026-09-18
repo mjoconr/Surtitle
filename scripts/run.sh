@@ -103,32 +103,28 @@ if [ -z "${SURTITLE_MODELS_DIR:-}" ] && [ -d "$SCRIPT_DIR/models" ]; then
   export SURTITLE_MODELS_DIR
 fi
 
-# Not a release archive: bootstrap from source.
+# An existing environment is launched as it is. Syncing here used to happen on
+# every start, and it was wrong twice over: `uv sync` without --extra voice-local
+# uninstalls that extra even with --inexact (it is in the lock, so --inexact does
+# not protect it), so the offline engines had to be installed again after every
+# launch from a shortcut; and a warm environment that had drifted from the lock
+# was rebuilt, re-downloading Python and every dependency. Dependencies are an
+# install/update concern - Setup, the tray's update, or an explicit
+# `uv sync` - not something to redo each time the app starts.
+if [ -n "$DEV_PYTHON" ]; then
+  info "Using the existing .venv."
+  exec "$DEV_PYTHON" -m surtitle "$@"
+fi
+
+# Nothing installed yet: bootstrap once. This is the only path that touches uv,
+# and the only one where silence would look like a hang.
 if UV="$(find_uv)"; then
-  # --inexact matters: a plain `uv sync` prunes anything the lock does not name,
-  # which silently deletes the optional voice-local extra on every run. `uv run`
-  # then syncs again by default, so it has to be told not to as well.
-  #
-  # Quiet on a warm checkout, loud on a cold one: a first run pulls the whole
-  # dependency set, and several silent minutes are indistinguishable from a hang.
-  if [ -n "$DEV_PYTHON" ]; then
-    info "Syncing dependencies with uv…"
-    QUIET="--quiet"
-  else
-    info "First run: fetching Python and dependencies."
-    info "This takes a few minutes, and only happens once."
-    QUIET=""
-  fi
-  if ! "$UV" sync --inexact ${QUIET:+"$QUIET"}; then
+  info "First run: fetching Python and dependencies."
+  info "This takes a few minutes, and only happens once."
+  if ! "$UV" sync --inexact; then
     die "uv sync failed. Run 'uv sync' yourself to see the full output."
   fi
   exec "$UV" run --no-sync --quiet surtitle "$@"
-fi
-
-if [ -n "$DEV_PYTHON" ]; then
-  # An existing development venv is enough to run.
-  info "Using the existing .venv."
-  exec "$DEV_PYTHON" -m surtitle "$@"
 fi
 
 printf '%s\n' "${RED}Surtitle cannot start: no Python environment found.${RESET}" >&2

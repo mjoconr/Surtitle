@@ -322,7 +322,16 @@ LAUNCHER
   # The application's own mark, so it is recognisable in the Dock. Best effort:
   # sips and iconutil ship with macOS, but a missing icon is a cosmetic loss, not
   # a failed install.
-  png="$PROJECT_DIR/src/surtitle/web/surtitle-icon.png"
+  #
+  # The icon ships inside the installed package, and a release archive deliberately
+  # drops src/surtitle/web (the package copy is the one that travels), so asking
+  # the interpreter where its own package lives is the only lookup that is right in
+  # both layouts - the source path alone silently produced an iconless app.
+  png="$("$interpreter" -c 'import pathlib, surtitle; p = pathlib.Path(surtitle.__file__).parent / "web" / "surtitle-icon.png"; print(p if p.is_file() else "")' 2>/dev/null || true)"
+  if [ -z "$png" ] || [ ! -f "$png" ]; then
+    png="$PROJECT_DIR/src/surtitle/web/surtitle-icon.png"
+  fi
+  [ -f "$png" ] || warn "could not find the application icon; the app will use a generic one"
   if [ -f "$png" ] && command -v sips >/dev/null 2>&1 && command -v iconutil >/dev/null 2>&1; then
     iconset="$(mktemp -d)/Surtitle.iconset"
     mkdir -p "$iconset"
