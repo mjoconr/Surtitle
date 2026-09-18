@@ -93,6 +93,9 @@ class TestApply:
         monkeypatch.setattr(shell, "menu_path", lambda: menu)
         monkeypatch.setattr(shell, "startup_path", lambda: startup)
         monkeypatch.setattr(shell, "supported", lambda: True)
+        # Pinned, so the assertion below does not depend on which platform runs the
+        # suite. TestCommand covers both platforms' invocations explicitly.
+        monkeypatch.setattr(shell, "platform", lambda: "darwin")
         return menu, startup
 
     def test_adding_the_menu_entry_runs_the_installer(self, monkeypatch, tmp_path):
