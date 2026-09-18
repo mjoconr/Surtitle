@@ -18,6 +18,7 @@ from typing import Any, Literal
 
 from surtitle.tools import artifacts, documents, environment, fs_tools, shell_tools
 from surtitle.tools.fs_tools import ToolContext, ToolResult
+from surtitle.vcs.guide import DETAIL_LEVELS, detail_menu
 
 __all__ = [
     "Tool",
@@ -951,6 +952,193 @@ _SEARCH_HISTORY = Tool(
 )
 
 
+async def _vcs_status_handler(ctx: ToolContext) -> ToolResult:
+    """What version control says about this project, and what is installed here."""
+    from surtitle.vcs import provision as vcs_provision
+    from surtitle.vcs import repo as vcs_repo
+
+    rows = vcs_provision.status()
+    state = vcs_repo.detect(ctx.root)
+    return ToolResult(
+        ok=True,
+        data={
+            "tools": [row.to_dict() for row in rows],
+            "repository": state.to_dict(),
+            "summary": state.describe(),
+        },
+        display=state.describe(),
+    )
+
+
+async def _vcs_guide_handler(ctx: ToolContext, system: str = "") -> ToolResult:
+    """The usage notes for the system in play, read on demand rather than always."""
+    from surtitle.vcs import guide as vcs_guide_text
+    from surtitle.vcs import repo as vcs_repo
+
+    chosen = (system or "").strip()
+    if not chosen:
+        chosen = vcs_repo.detect(ctx.root).system
+    text = vcs_guide_text.guide_for(chosen)
+    return ToolResult(
+        ok=True,
+        data={"system": chosen or "both", "guide": text},
+        display=f"git and svn usage notes ({len(text)} characters)",
+    )
+
+
+async def _vcs_commit_handler(
+    ctx: ToolContext,
+    message: str,
+    detail: str = "summary",
+    paths: list[str] | None = None,
+    push: bool = False,
+) -> ToolResult:
+    """Commit the project, after the user has been asked.
+
+    The level of detail is checked rather than merely recorded: a body attached to
+    a message the user asked to be one line is the agent not having listened, and
+    it is cheaper to say so here than to leave a verbose entry in their history.
+    """
+    from surtitle.vcs import commit as vcs_commit
+    from surtitle.vcs import repo as vcs_repo
+
+    level = (detail or "").strip().lower()
+    if level not in DETAIL_LEVELS:
+        return ToolResult(
+            ok=False,
+            error=(
+                f"detail must be one of {', '.join(sorted(DETAIL_LEVELS))}. Ask the "
+                "user which they want before committing."
+            ),
+        )
+    text = (message or "").strip()
+    if not text:
+        return ToolResult(ok=False, error="A commit needs a message.")
+    if level == "one-line" and "\n" in text:
+        return ToolResult(
+            ok=False,
+            error=(
+                "The user asked for a one-line message but this one has a body. Send "
+                "the subject on its own, or ask whether they would rather have more."
+            ),
+        )
+
+    state = vcs_repo.detect(ctx.root)
+    if state.system == "none":
+        return ToolResult(
+            ok=False,
+            error=(
+                "This project is not under version control yet, so there is nothing "
+                "to commit into. Whether to create a repository here is the user's "
+                "decision — ask them."
+            ),
+        )
+
+    result = await asyncio.to_thread(
+        vcs_commit.commit,
+        ctx.root,
+        system=state.system,
+        message=text,
+        paths=list(paths) if paths else None,
+        include_all=not paths,
+        push=bool(push),
+    )
+    if not result.ok:
+        return ToolResult(ok=False, error=result.error or "The commit failed.")
+    trailing = f" (left out of the commit: {', '.join(result.excluded)})" if result.excluded else ""
+    return ToolResult(
+        ok=True,
+        data={**result.to_dict(), "detail": level},
+        display=(
+            f"Committed {result.revision or 'the change'} with {state.system}"
+            + (" and pushed" if result.pushed else "")
+            + trailing
+        ),
+    )
+
+
+_VCS_STATUS = Tool(
+    name="vcs_status",
+    description=(
+        "Report the project's version-control state: whether it is a git or svn "
+        "working copy, which branch or revision it is on, what is uncommitted, and "
+        "which git and svn are installed on this machine. Read it before doing "
+        "version-control work, and before telling the user there is or is not "
+        "anything to commit — do not infer any of this from file names."
+    ),
+    parameters={"type": "object", "properties": {}, "required": []},
+    handler=_vcs_status_handler,
+    approval="never",
+    summary="Show version-control state",
+)
+
+
+_VCS_GUIDE = Tool(
+    name="vcs_guide",
+    description=(
+        "Read the correct usage notes for git or svn in this environment: the "
+        "commands that matter, how to undo at each level of destruction, the rules "
+        "about what is never committed, and the commit-message levels to offer the "
+        "user. Read it once before your first version-control action in a "
+        "conversation, rather than working from memory."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "system": _string("'git', 'svn', or 'both'. Leave empty for the one this project uses.")
+        },
+        "required": [],
+    },
+    handler=_vcs_guide_handler,
+    approval="never",
+    summary="Show how to use git and svn",
+)
+
+
+_VCS_COMMIT = Tool(
+    name="vcs_commit",
+    description=(
+        "Stage and commit the project's changes with git or svn, optionally "
+        "pushing. Call this only after the user has agreed to a commit and told you "
+        "how detailed the message should be — ask first, in one short question, "
+        "once the work is done. Put the subject on the first line of `message` "
+        "(imperative, under about 72 characters) and the body, at the level they "
+        "chose, after a blank line. Surtitle's own .surtitle state is never "
+        "committed, and an empty change is refused rather than committed."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "message": _string(
+                "The commit message. First line is the subject; the rest is the body "
+                "at the level the user chose."
+            ),
+            "detail": {
+                "type": "string",
+                "enum": sorted(DETAIL_LEVELS),
+                "description": f"How much detail the user asked for: {detail_menu()}.",
+            },
+            "paths": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Specific paths to stage. Omit to include everything that changed."
+                ),
+            },
+            "push": _boolean(
+                "Also publish the commit (git push). Subversion publishes on commit.",
+                default=False,
+            ),
+        },
+        "required": ["message", "detail"],
+    },
+    handler=_vcs_commit_handler,
+    approval="ask",
+    summary="Commit the project's changes",
+    mutating=True,
+)
+
+
 def all_tools() -> list[Tool]:
     """Every tool the agent may use, including the ones declared last."""
     return [
@@ -961,4 +1149,7 @@ def all_tools() -> list[Tool]:
         _REMEMBER,
         _READ_NOTES,
         _SEARCH_HISTORY,
+        _VCS_STATUS,
+        _VCS_GUIDE,
+        _VCS_COMMIT,
     ]

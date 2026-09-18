@@ -37,6 +37,7 @@ __all__ = [
     "request_shell",
     "request_shutdown",
     "request_update",
+    "request_vcs_install",
     "request_voice_install",
     "write_instance",
 ]
@@ -192,6 +193,28 @@ def request_voice_install(url: str, *, timeout: float = _PROBE_TIMEOUT) -> dict[
     try:
         with httpx.Client(base_url=url, timeout=timeout) as client:
             response = client.post("/api/voice/install")
+    except (httpx.HTTPError, ValueError, OSError):
+        return None
+    if response.status_code not in (200, 202, 409):
+        return None
+    try:
+        payload = response.json()
+    except ValueError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def request_vcs_install(url: str, *, timeout: float = _PROBE_TIMEOUT) -> dict[str, Any] | None:
+    """Ask the server at ``url`` to download the portable git and svn.
+
+    The same shape as the voice install: the server owns the download and starts
+    it in the background, so this returns when the request is accepted. ``None``
+    means nothing answered; a 409 (already running) is passed through as a normal
+    answer with ``started`` false.
+    """
+    try:
+        with httpx.Client(base_url=url, timeout=timeout) as client:
+            response = client.post("/api/tools/vcs")
     except (httpx.HTTPError, ValueError, OSError):
         return None
     if response.status_code not in (200, 202, 409):

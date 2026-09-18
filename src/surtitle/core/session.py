@@ -135,6 +135,11 @@ class Session:
     # Process-wide usage counters, owned by the app state. Optional so a session
     # built directly in a test does not have to supply one.
     stats: RunStats | None = None
+    # The version-control section of the prompt, built once per session. Reading
+    # it means locating the tools and asking the working copy what it is, which is
+    # several subprocesses; the prompt is rebuilt every turn, so it is not
+    # something to re-derive each time. `vcs_status` is what gives the live state.
+    _vcs_section: str | None = None
 
     # --- lifecycle -------------------------------------------------------
     def rebind(
@@ -813,7 +818,63 @@ class Session:
                 "whichever is relevant:\n" + "\n".join(f"- {name}" for name in mention[:30])
             )
 
+        # What version control looks like from here. The prompt states the policy
+        # — ask before saving work — but only this can say whether git and svn
+        # actually exist on this machine, which copy is being used, and whether
+        # the project is a working copy at all. Without it the agent offers to
+        # commit into a folder that has no repository, or stays silent about
+        # version control on a machine where the tools were just installed.
+        version_control = self._version_control_section()
+        if version_control:
+            sections.append(version_control)
+
         return f"{prompt}\n\n" + "\n\n".join(sections) if sections else prompt
+
+    def _version_control_section(self) -> str:
+        """The version-control facts for this project, or "" when there are none."""
+        if self._vcs_section is not None:
+            return self._vcs_section
+
+        from surtitle.vcs import provision, repo
+
+        try:
+            rows = provision.status(self.settings, verify=False)
+            state = repo.detect(self.root, settings=self.settings)
+        except Exception:  # priming must never cost the session
+            self._vcs_section = ""
+            return ""
+
+        available = [row for row in rows if row.available]
+        missing = [row.name for row in rows if not row.available]
+        lines: list[str] = []
+
+        if available:
+            described = ", ".join(
+                " ".join(
+                    part for part in (row.name, row.version, f"({row.source}, {row.path})") if part
+                )
+                for row in available
+            )
+            lines.append(f"Installed and runnable from run_shell and run_python: {described}.")
+        if missing:
+            lines.append(
+                f"Not installed on this machine: {', '.join(missing)}. The user can "
+                "install them from the tray (or `surtitle tools install`); do not "
+                "assume they are absent from the project's history."
+            )
+        lines.append(state.describe())
+        if state.system == "none" and available:
+            lines.append(
+                "Nothing here is versioned yet. If the user wants history, ask "
+                "before initialising or checking anything out."
+            )
+        lines.append(
+            "Read `vcs_guide` before your first version-control action; use "
+            "`vcs_status` for the live state, and `vcs_commit` only after the user "
+            "has agreed to a commit and to the level of detail."
+        )
+        self._vcs_section = "## Version control\n" + "\n".join(f"- {line}" for line in lines)
+        return self._vcs_section
 
     async def _emit_or_queue(self, event: Event) -> None:
         """Send a control-flow event, mirroring only what the UI needs."""

@@ -24,6 +24,7 @@ import json
 import logging
 import os
 import re
+import sys
 import uuid
 from collections.abc import Callable
 from pathlib import Path
@@ -153,9 +154,21 @@ class AppState:
         # so it runs in a background thread and both the tray and the Settings
         # screen read this one job rather than starting their own.
         self.voice_install = InstallJob()
+        # The portable git and svn are the same shape again: a download the tray
+        # and the Settings screen both want to watch, owned here so it survives
+        # whichever one asked for it.
+        from surtitle.vcs.provision import InstallJob as VcsInstallJob
+
+        self.vcs_install = VcsInstallJob(settings=settings)
         # Pulling an update is the same shape of work: slow, network-bound, and
         # owned by the server so it survives whichever icon asked for it.
         self.update = UpdateJob(on_stop=on_shutdown)
+        # Put the portable tools on this process's PATH before anything can run a
+        # command: the agent's shell, a project environment, and the git and svn
+        # commands this app runs itself all inherit it.
+        from surtitle.vcs import provision
+
+        provision.activate(settings)
         # Re-apply stored preferences and credentials onto the live settings.
         self.settings_store.effective()
 
@@ -183,6 +196,19 @@ _LOOPBACK = {"127.0.0.1", "::1", "localhost"}
 def _is_loopback(request: Request) -> bool:
     client = request.client.host if request.client else ""
     return client in _LOOPBACK
+
+
+def _vcs_rows(settings: Settings) -> list[Any]:
+    """Which git and svn are available here, without running either one.
+
+    ``/api/status`` is polled every couple of seconds by the tray, so this
+    resolves paths and takes the pinned version of a portable copy rather than
+    spawning a process on every poll. The tray and ``surtitle tools status`` ask
+    ``/api/tools/vcs`` when they want the executed version.
+    """
+    from surtitle.vcs import provision
+
+    return provision.status(settings, verify=False)
 
 
 def _local_voice_payload(settings: Settings, job: InstallJob) -> dict[str, Any]:
@@ -291,6 +317,10 @@ def build_api(state: AppState) -> APIRouter:
             "deepgram_configured": bool(settings.deepgram_key()),
             "sessions": state.sessions.count,
             "local_voice": _local_voice_payload(settings, state.voice_install),
+            "vcs": {
+                "tools": [row.to_dict() for row in _vcs_rows(settings)],
+                "install": state.vcs_install.snapshot(),
+            },
             "shell": shell_integration.state(),
             "update": _update_payload(state.update),
             "usage": usage,
@@ -360,6 +390,40 @@ def build_api(state: AppState) -> APIRouter:
         if not state.voice_install.start(state.settings):
             return JSONResponse({"started": False, "reason": "already running"}, status_code=409)
         log.info("local voice install requested by %s", client)
+        return JSONResponse({"started": True}, status_code=202)
+
+    @api.get("/tools/vcs")
+    async def vcs_tools_status() -> dict[str, Any]:
+        """Which git and svn are available here, and how an install is going.
+
+        Cheap by design: this is polled by the tray, so it resolves paths and does
+        not run either program just to read a version.
+        """
+        from surtitle.vcs import provision
+
+        return {
+            "platform_supported": sys.platform == "win32",
+            # Asked for with verification: a human is about to read this, and the
+            # difference between "2.51.0" and "whatever is on PATH" matters here.
+            "tools": [row.to_dict() for row in provision.status(state.settings)],
+            "install": state.vcs_install.snapshot(),
+        }
+
+    @api.post("/tools/vcs")
+    async def vcs_tools_install(request: Request) -> JSONResponse:
+        """Download the portable git and svn, in the background (loopback only).
+
+        The same reasoning as the voice install: this pulls tens of megabytes onto
+        the machine, and the request must come from the machine it lands on.
+        """
+        client = request.client.host if request.client else ""
+        if client not in _LOOPBACK:
+            return _error(
+                403, "installing the version-control tools is only allowed from this machine"
+            )
+        if not state.vcs_install.start():
+            return JSONResponse({"started": False, "reason": "already running"}, status_code=409)
+        log.info("portable git/svn install requested by %s", client)
         return JSONResponse({"started": True}, status_code=202)
 
     @api.get("/update")

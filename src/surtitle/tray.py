@@ -28,6 +28,7 @@ from surtitle.local_api import (
     request_shell,
     request_shutdown,
     request_update,
+    request_vcs_install,
     request_voice_install,
 )
 from surtitle.platform_utils import human_bytes, is_windows, open_browser
@@ -69,6 +70,7 @@ ACTIONS = (
     "status",
     "usage",
     "voice",
+    "vcs",
     "update_release",
     "update_main",
     "update_page",
@@ -178,11 +180,50 @@ def menu_entries(snapshot: dict[str, Any] | None) -> list[MenuEntry]:
         MenuEntry(label="Usage…", action="usage", enabled=live),
         MenuEntry(separator=True),
         MenuEntry(**_voice_entry(snapshot if live else None)),
+        MenuEntry(**_vcs_entry(snapshot if live else None)),
         *_update_entries(snapshot if live else None),
         *_shell_entries(snapshot if live else None),
         MenuEntry(separator=True),
         MenuEntry(label="Stop Surtitle", action="stop", enabled=live),
     ]
+
+
+def _vcs_entry(snapshot: dict[str, Any] | None) -> dict[str, Any]:
+    """The version-control row: install git and svn, watch it, or say it is there.
+
+    The agent works on the user's files, and history is how that work becomes
+    recoverable — but a fresh Windows machine has neither git nor svn and
+    installing either normally needs an administrator. This is the no-admin path
+    to both, so the label doubles as the answer to "can the agent use git here?".
+    """
+    if snapshot is None:
+        return {"label": "Install git and svn…", "action": "vcs", "enabled": False}
+
+    vcs = snapshot.get("vcs") or {}
+    install = vcs.get("install") or {}
+    if install.get("running"):
+        percent = float(install.get("percent") or 0.0)
+        return {
+            "label": f"Installing git and svn… {percent:.0f}%",
+            "action": "vcs",
+            "enabled": False,
+        }
+
+    tools = {row.get("name"): row for row in vcs.get("tools") or []}
+    missing = [name for name, row in tools.items() if not row.get("available")]
+    if not tools:
+        # A server too old to report them, or a snapshot from before the first
+        # poll: the row is still worth offering on a machine that needs it.
+        return {"label": "Install git and svn…", "action": "vcs", "enabled": False}
+    if not missing:
+        sources = {row.get("source") for row in tools.values()}
+        where = "portable" if sources == {"portable"} else "on PATH"
+        return {
+            "label": f"git and svn are installed ({where})",
+            "action": "vcs",
+            "enabled": False,
+        }
+    return {"label": f"Install git and svn… (missing {', '.join(missing)})", "action": "vcs"}
 
 
 def _update_entries(snapshot: dict[str, Any] | None) -> list[MenuEntry]:
@@ -201,13 +242,16 @@ def _update_entries(snapshot: dict[str, Any] | None) -> list[MenuEntry]:
     if (update.get("job") or {}).get("running"):
         return [MenuEntry(label="Updating…", action="update_release", enabled=False)]
     if update.get("kind") == "git":
-        return [
+        rows = [
             MenuEntry(label="Update to the latest release…", action="update_release"),
             MenuEntry(label="Update to current main…", action="update_main"),
         ]
-    if update.get("self_update"):
-        return [MenuEntry(label="Update to the latest release…", action="update_release")]
-    return [MenuEntry(label="Get the latest release…", action="update_page")]
+    elif update.get("self_update"):
+        rows = [MenuEntry(label="Update to the latest release…", action="update_release")]
+    else:
+        rows = [MenuEntry(label="Get the latest release…", action="update_page")]
+
+    return rows
 
 
 def _shell_entries(snapshot: dict[str, Any] | None) -> list[MenuEntry]:
@@ -413,6 +457,8 @@ class SurtitleTray:
             self._show(format_usage, "Surtitle — usage")
         elif action == "voice":
             self._install_local_voice()
+        elif action == "vcs":
+            self._install_vcs_tools()
         elif action == "update_release":
             self._update("release")
         elif action == "update_main":
@@ -480,6 +526,54 @@ class SurtitleTray:
         self._message(
             "Installing the local speech engines in the background. The menu shows "
             "how it is going; restart Surtitle when it finishes to use them.",
+            title,
+        )
+
+    def _install_vcs_tools(self) -> None:
+        """Ask the server to fetch the portable git and svn.
+
+        Windows only: the portable builds are published for Windows, and on macOS
+        and Linux the system package manager is the right answer. Offering a
+        download the app cannot honour would be worse than saying nothing.
+        """
+        title = "Surtitle — git and svn"
+        if self.snapshot is None:
+            self._message("Surtitle is not answering on this port.", title)
+            return
+        if not is_windows():
+            self._message(
+                "Portable copies are only published for Windows.\n\n"
+                "Install git and svn with your package manager; the agent finds "
+                "them on PATH.",
+                title,
+            )
+            return
+
+        vcs = (self.snapshot or {}).get("vcs") or {}
+        rows = {row.get("name"): row for row in vcs.get("tools") or []}
+        missing = [name for name in ("git", "svn") if not (rows.get(name) or {}).get("available")]
+        if not missing:
+            self._message("git and svn are already installed.", title)
+            return
+        if not self._confirm(
+            f"Download portable {' and '.join(missing)}?\n\n"
+            "It unpacks into Surtitle's own data folder — no installer and no "
+            "administrator rights. The download runs in the background, and the "
+            "agent can use the tools as soon as it finishes.",
+            title,
+        ):
+            return
+
+        answer = request_vcs_install(self.url)
+        if answer is None:
+            self._message("Surtitle did not accept the request.", title)
+            return
+        if not answer.get("started", True):
+            self._message("An install is already running.", title)
+            return
+        self._message(
+            "Downloading git and svn in the background. The menu shows how it is "
+            "going; nothing needs restarting when it finishes.",
             title,
         )
 

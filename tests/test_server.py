@@ -893,6 +893,75 @@ class TestFolderBrowse:
         await app.state.app_state.aclose()
 
 
+class TestVersionControlTools:
+    """The portable git and svn, from the app's point of view."""
+
+    async def test_status_lists_both_tools_and_the_job(self, client):
+        body = (await client.get("/api/tools/vcs")).json()
+        assert [row["name"] for row in body["tools"]] == ["git", "svn"]
+        assert body["install"]["running"] is False
+        assert isinstance(body["platform_supported"], bool)
+
+    async def test_the_tray_status_carries_them_too(self, client):
+        """The tray reads /api/status, which must stay cheap and complete."""
+        body = (await client.get("/api/status")).json()
+        assert [row["name"] for row in body["vcs"]["tools"]] == ["git", "svn"]
+        assert body["vcs"]["install"]["running"] is False
+
+    async def test_an_install_is_accepted_and_reported(self, client, monkeypatch):
+        from surtitle.vcs import provision
+
+        monkeypatch.setattr(
+            provision,
+            "install",
+            lambda *a, **k: provision.InstallResult(
+                installed=["git"], skipped=[], failed=[], detail="installed git"
+            ),
+        )
+
+        response = await client.post("/api/tools/vcs")
+        assert response.status_code == 202
+        assert response.json()["started"] is True
+
+        body = (await client.get("/api/tools/vcs")).json()
+        for _ in range(200):
+            if not body["install"]["running"]:
+                break
+            await asyncio.sleep(0.02)
+            body = (await client.get("/api/tools/vcs")).json()
+
+        assert body["install"]["running"] is False
+        assert body["install"]["ok"] is True
+        assert "installed git" in body["install"]["message"]
+
+    async def test_a_second_request_while_one_runs_is_a_state_not_a_fault(
+        self, client, monkeypatch
+    ):
+        from surtitle.vcs import provision
+
+        release = __import__("threading").Event()
+
+        def slow(*_args, **_kwargs):
+            release.wait(5)
+            return provision.InstallResult(installed=[], skipped=[], failed=[], detail="done")
+
+        monkeypatch.setattr(provision, "install", slow)
+        assert (await client.post("/api/tools/vcs")).status_code == 202
+        second = await client.post("/api/tools/vcs")
+        assert second.status_code == 409
+        assert second.json()["started"] is False
+        release.set()
+
+    async def test_a_remote_caller_cannot_start_a_download(self, settings, monkeypatch):
+        """It would pull tens of megabytes onto a machine the caller does not own."""
+        app = create_app_for(settings)
+        transport = httpx.ASGITransport(app=app, client=("10.211.55.9", 40123))
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+            response = await http.post("/api/tools/vcs")
+        assert response.status_code == 403
+        await app.state.app_state.aclose()
+
+
 class TestShellIntegration:
     """Launcher and sign-in entries, managed from the app."""
 

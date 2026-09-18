@@ -249,6 +249,34 @@ def _check_local_voice(settings: Settings) -> list[Check]:
     return checks
 
 
+def _check_version_control(settings: Settings) -> list[Check]:
+    """Which git and svn the agent can reach, and where each came from.
+
+    Not a failure when they are missing: plenty of projects are not under version
+    control, and the app works without either. It is information the agent decides
+    with, and the one place a user can see that a portable copy is what is being
+    used rather than something else on PATH.
+    """
+    from surtitle.vcs import provision
+
+    checks: list[Check] = []
+    for row in provision.status(settings):
+        if row.available:
+            where = f"{row.source} — {row.path}"
+            if row.version:
+                where = f"{row.source} {row.version} — {row.path}"
+            checks.append(Check(f"{row.name} (version control)", CheckStatus.OK, where))
+        else:
+            checks.append(
+                Check(
+                    f"{row.name} (version control)",
+                    CheckStatus.SKIP,
+                    row.hint or "not installed",
+                )
+            )
+    return checks
+
+
 def _check_native_conflicts() -> Check:
     """Report native libraries that could shadow one the engines bundle.
 
@@ -428,6 +456,7 @@ async def run_checks(settings: Settings, *, live: bool = True) -> Report:
     checks.append(_check_data_dir(settings))
     checks.extend(_check_keys(settings))
     checks.extend(_check_local_voice(settings))
+    checks.extend(_check_version_control(settings))
     checks.append(_check_native_conflicts())
     checks.append(_check_port(settings))
 

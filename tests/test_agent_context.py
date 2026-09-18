@@ -187,8 +187,12 @@ class TestProjectInstructionsAreInjected:
         assert "AGENTS.md" in prompt
         assert "truncated; read the file for the rest" in prompt
         assert "Instructions shown in part" in prompt, "a fragment must be declared partial"
-        # The whole prompt stays bounded well below the file size.
-        assert len(prompt) < 30000, "an unbounded instruction file crowded the conversation"
+        # The file is capped at 20,000 characters, and the prompt is that plus the
+        # standing instructions and a little project context — so the total tracks
+        # the cap. The bound is loose on purpose: what it catches is an unbounded
+        # file, not a prompt that grew by a paragraph (the version-control primer
+        # added about 1,700 characters when it was introduced).
+        assert len(prompt) < 34_000, "an unbounded instruction file crowded the conversation"
 
     def test_the_base_prompt_is_always_present(self, project_session):
         session, _root = project_session

@@ -705,3 +705,120 @@ class TestShellAction:
         tray._select("shell_menu")
 
         assert shown and "did not accept" in shown[0]
+
+
+class TestVersionControlMenu:
+    """The row that answers "can the agent use git on this machine?"."""
+
+    def _entry(self, snapshot, vcs=None):
+        if vcs is not None:
+            snapshot["vcs"] = vcs
+        return next(e for e in menu_entries(snapshot) if e.action == "vcs")
+
+    def test_offers_the_download_when_both_are_missing(self, snapshot):
+        entry = self._entry(
+            snapshot,
+            {"tools": [{"name": "git", "available": False}, {"name": "svn", "available": False}]},
+        )
+        assert entry.enabled is True
+        assert "Install" in entry.label
+        assert "git" in entry.label and "svn" in entry.label
+
+    def test_names_only_what_is_missing(self, snapshot):
+        entry = self._entry(
+            snapshot,
+            {
+                "tools": [
+                    {"name": "git", "available": True, "source": "portable"},
+                    {"name": "svn", "available": False},
+                ]
+            },
+        )
+        assert "missing svn" in entry.label
+        assert "missing git" not in entry.label
+
+    def test_progress_is_in_the_label_and_a_second_click_is_refused(self, snapshot):
+        entry = self._entry(snapshot, {"install": {"running": True, "percent": 63.2}})
+        assert entry.enabled is False
+        assert "63%" in entry.label
+
+    def test_says_so_when_both_are_already_there(self, snapshot):
+        entry = self._entry(
+            snapshot,
+            {
+                "tools": [
+                    {"name": "git", "available": True, "source": "portable"},
+                    {"name": "svn", "available": True, "source": "portable"},
+                ]
+            },
+        )
+        assert entry.enabled is False
+        assert "portable" in entry.label
+
+    def test_it_is_not_actionable_when_the_server_is_gone(self):
+        entry = next(e for e in menu_entries(None) if e.action == "vcs")
+        assert entry.enabled is False
+
+    def test_a_snapshot_without_the_key_still_offers_a_disabled_row(self, snapshot):
+        """An older server, or the moment before the first poll."""
+        entry = next(e for e in menu_entries(snapshot) if e.action == "vcs")
+        assert entry.enabled is False
+
+
+class TestVersionControlAction:
+    def _tray(self, vcs) -> SurtitleTray:
+        tray = SurtitleTray("http://127.0.0.1:8765")
+        tray._snapshot = {"vcs": vcs}
+        return tray
+
+    def test_elsewhere_it_points_at_the_package_manager(self, monkeypatch):
+        """The portable builds exist for Windows; pretending otherwise is worse."""
+        monkeypatch.setattr("surtitle.tray.is_windows", lambda: False)
+        tray = self._tray({"tools": [{"name": "git", "available": False}]})
+        shown: list[str] = []
+        monkeypatch.setattr(tray, "_message", lambda text, title: shown.append(text))
+
+        tray._select("vcs")
+
+        assert shown and "only published for Windows" in shown[0]
+
+    def test_it_asks_before_downloading(self, monkeypatch):
+        monkeypatch.setattr("surtitle.tray.is_windows", lambda: True)
+        tray = self._tray({"tools": [{"name": "git", "available": False}]})
+        asked: list[str] = []
+        monkeypatch.setattr(tray, "_confirm", lambda text, title: asked.append(text) or True)
+        monkeypatch.setattr(
+            "surtitle.tray.request_vcs_install", lambda url, timeout=None: {"started": True}
+        )
+        shown: list[str] = []
+        monkeypatch.setattr(tray, "_message", lambda text, title: shown.append(text))
+
+        tray._select("vcs")
+
+        assert asked and "git" in asked[0]
+        assert shown and "background" in shown[0]
+
+    def test_a_refusal_stops_before_the_request(self, monkeypatch):
+        monkeypatch.setattr("surtitle.tray.is_windows", lambda: True)
+        tray = self._tray({"tools": [{"name": "git", "available": False}]})
+        monkeypatch.setattr(tray, "_confirm", lambda text, title: False)
+        called: list[int] = []
+        monkeypatch.setattr(
+            "surtitle.tray.request_vcs_install", lambda url, timeout=None: called.append(1)
+        )
+
+        tray._select("vcs")
+
+        assert called == []
+
+    def test_nothing_to_do_is_said_rather_than_downloaded(self, monkeypatch):
+        monkeypatch.setattr("surtitle.tray.is_windows", lambda: True)
+        tray = self._tray(
+            {"tools": [{"name": "git", "available": True}, {"name": "svn", "available": True}]}
+        )
+        shown: list[str] = []
+        monkeypatch.setattr(tray, "_message", lambda text, title: shown.append(text))
+
+        tray._select("vcs")
+
+        assert shown and "already installed" in shown[0]

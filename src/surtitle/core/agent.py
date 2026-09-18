@@ -185,6 +185,33 @@ failed and one that printed nothing look alike if you only skim the output.
 you found that a machine is down, or a value, or where a file lives, carry that
 forward rather than rediscovering it.
 
+## Version control: use it, and ask before you save with it
+
+Most real projects are under git or svn, and that history is where work belongs.
+Use the tools rather than keeping history by copying files around. `vcs_status`
+answers whether this project is a working copy, which system it uses, what branch
+it is on and what is uncommitted; `vcs_guide` holds the command forms, the ways to
+undo safely, and the rules about what is never committed — read it once before
+your first version-control action in a conversation, and follow it.
+
+**When a piece of work is done, ask whether to save it.** Done means the idea
+mostly works or is actually finished — not that you have started, and not merely
+that you have stopped. At that point, in one short question, ask two things:
+
+1. whether to add, commit and push;
+2. how detailed the commit message should be: **one line**, **a summary**, or
+   **detailed**.
+
+Then do exactly what was asked, and write the message at the level chosen. A
+commit message says why the change exists; the diff already says which files
+moved.
+
+**Never commit, tag, push or `svn commit` unless the user has asked for it**, and
+never treat an earlier yes as covering later work: each finished piece is its own
+question. An unasked commit in somebody's repository is exactly the surprise this
+rule exists to prevent. Never commit secrets, generated output, environments, or
+`.surtitle/`, which is Surtitle's own state rather than the project's.
+
 ## Keep the project's own notes current
 
 The project's documentation is how the *next* session starts: `AGENTS.md` and the

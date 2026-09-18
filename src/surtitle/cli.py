@@ -659,6 +659,99 @@ def voice_status() -> None:
         raise typer.Exit(code=1)
 
 
+# --- portable version-control tools --------------------------------------
+
+tools_app = typer.Typer(
+    name="tools",
+    help="Install the portable git and svn the agent uses (no admin needed).",
+    no_args_is_help=True,
+)
+app.add_typer(tools_app, name="tools")
+
+
+@tools_app.command("status")
+def tools_status() -> None:
+    """Report which git and svn are available, and where they came from.
+
+    Exits non-zero when either is missing, so a script can branch on it.
+    """
+    from surtitle.vcs import provision
+
+    store = _open_store()
+    assert store is not None
+    rows = provision.status(store.effective())
+
+    table = Table(box=None, show_header=True, header_style="bold")
+    table.add_column("Tool")
+    table.add_column("State")
+    table.add_column("Source")
+    table.add_column("Where")
+    for row in rows:
+        table.add_row(
+            row.name,
+            "[green]installed[/green]" if row.available else "[red]missing[/red]",
+            row.source or "—",
+            readable_path(Path(row.path)) if row.path else "—",
+        )
+    console.print(table)
+    for row in rows:
+        if not row.available and row.hint:
+            console.print(f"[dim]{row.name}: {row.hint}[/dim]")
+    if not all(row.available for row in rows):
+        raise typer.Exit(code=1)
+
+
+@tools_app.command("install")
+def tools_install(
+    yes: bool = typer.Option(False, "--yes", "-y", help="Do not ask for confirmation."),
+) -> None:
+    """Download portable git and svn into the app's data directory.
+
+    The same work the tray's "Install git and svn…" item asks the running server
+    to do, available in a terminal. Windows only, deliberately: on macOS and Linux
+    the system package manager is the right answer, and this says so rather than
+    quietly installing a second copy of git somewhere the system cannot see it.
+    """
+    from surtitle.vcs import provision
+
+    store = _open_store()
+    assert store is not None
+    settings = store.effective()
+
+    if sys.platform != "win32":
+        console.print(
+            "[yellow]Portable copies are only published for Windows.[/yellow] "
+            "Install git and svn with your package manager instead."
+        )
+        raise typer.Exit(code=1)
+
+    rows = {row.name: row for row in provision.status(settings, verify=False)}
+    todo = [name for name in provision.TOOLS if not rows[name].available]
+    if not todo:
+        console.print("git and svn are already available; nothing to download.")
+        return
+
+    sizes = ", ".join(
+        f"{name} {provision.CATALOG[name].version} ({human_bytes(provision.CATALOG[name].size)})"
+        for name in todo
+    )
+    console.print(f"Downloading {sizes} into {readable_path(provision.tools_dir(settings))}")
+    if not yes and not typer.confirm("Continue?", default=True):
+        raise typer.Exit(code=1)
+
+    with console.status("Downloading the portable tools…") as status:
+        result = provision.install(
+            settings,
+            todo,
+            progress=lambda _percent, message: status.update(message),
+        )
+
+    style = "[green]Done.[/green]" if result.ok else "[red]Failed.[/red]"
+    console.print(f"{style} {result.detail}")
+    if not result.ok:
+        raise typer.Exit(code=1)
+
+
 @app.command()
 def update(
     target: str = typer.Option(
