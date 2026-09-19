@@ -690,6 +690,31 @@ function appendLearned(turn, text) {
   scrollToBottom();
 }
 
+/**
+ * "No result" — the closing section for a turn that ended without one.
+ *
+ * A turn that stops mid-work leaves the transcript looking merely unfinished:
+ * the last thing on screen is a Think block, which reads as "still going". The
+ * banner above the composer says what happened, but the transcript is what a
+ * reopened conversation shows and where the eye already is, so the ending is
+ * written into it as well. Without this, a conversation whose last turn produced
+ * no answer simply stops — reported as "there is no closing section for a result".
+ */
+function appendNoAnswer(turn, detail) {
+  const block = node("div", "noresult");
+  block.append(node("div", "noresult__title", "No result — the turn ended here"));
+  block.append(
+    node(
+      "div",
+      "noresult__text",
+      detail ||
+        "It stopped without answering. The work it did is above; continue to let it carry on.",
+    ),
+  );
+  turn.root.append(block);
+  scrollToBottom();
+}
+
 function appendSaid(turn, text) {
   if (!text) return;
   turn.saidText += (turn.saidText ? " " : "") + text;
@@ -1912,7 +1937,16 @@ function handleEvent(event) {
       // with an empty turn, no error, and no way to know an answer existed, so
       // they asked again. The answer is in the store, so fetch it and show it.
       if (!data.failed && !turnHasVisibleText(finished)) {
-        recoverMissingAnswer(finished);
+        recoverMissingAnswer(finished).then((found) => {
+          // Nothing was recovered either, so the transcript would simply stop —
+          // which reads as "still working" to anyone who came back to it.
+          if (!found) appendNoAnswer(finished, data.detail);
+        });
+      } else if (!turnHasVisibleText(finished)) {
+        // A turn that failed or ran out of steps has no answer to recover. The
+        // banner above the composer says why; this is the same ending written
+        // where the conversation actually is.
+        appendNoAnswer(finished, data.reason === "failed" ? "" : data.detail);
       }
       break;
     }
@@ -2059,19 +2093,19 @@ function continueLastTurn() {
  * no visible reason is as confusing as one that never appears.
  */
 async function recoverMissingAnswer(turn) {
-  if (!state.session) return;
+  if (!state.session) return false;
   try {
     const session = await api(`/api/sessions/${state.session.id}`);
     const messages = session.messages || [];
     const last = [...messages]
       .reverse()
       .find((message) => message.role === "assistant" && (message.content || message.spoken));
-    if (!last) return;
+    if (!last) return false;
     // Only recover an answer to the question that was just asked. Showing a stale
     // reply from an earlier turn would be worse than showing nothing, because it
     // reads as a real answer.
     const lastUser = [...messages].reverse().find((message) => message.role === "user");
-    if (lastUser && last.id < lastUser.id) return;
+    if (lastUser && last.id < lastUser.id) return false;
 
     if (last.spoken && last.spoken.trim()) appendSaid(turn, last.spoken);
     if (last.content && last.content.trim() !== (last.spoken || "").trim()) {
@@ -2084,8 +2118,10 @@ async function recoverMissingAnswer(turn) {
     renderRightbar();
     scrollToBottom(true);
     toast("Recovered the reply that did not come through.", "error");
+    return true;
   } catch {
-    // Leave the turn as it is: a failed recovery must not add noise.
+    // A failed recovery must not add noise; the caller reports the ending.
+    return false;
   }
 }
 
@@ -2798,6 +2834,12 @@ async function selectSession(sessionId) {
         reason: session.last_end_reason || "interrupted",
         detail: session.last_end_detail || STOPPED_WITHOUT_ANSWER,
       };
+      // And written into the transcript, not only into the banner: a reopened
+      // conversation is read from the top, and one whose last turn produced no
+      // answer must not simply stop at a Think block.
+      const replayed = view() ? [...view().turns.values()] : [];
+      const lastTurn = replayed.reverse().find((item) => item.kind === "assistant");
+      appendNoAnswer(lastTurn || beginTurn("assistant"), session.last_end_detail || "");
     }
     state.currentTurn = null;
   });

@@ -724,6 +724,40 @@ class TestTheContextMeter:
         assert "modelBadge" not in block, "the badge keeps the model; the numbers go to the meter"
 
 
+class TestATurnEndsWithAClosingSection:
+    """A turn must not simply stop at a Think block.
+
+    Reported from a real 0.8.1 session: the last turn neither spoke nor showed a
+    result, and the transcript ended on "thinking…" with nothing to say it was
+    over. The banner above the composer explains the ending, but the transcript is
+    what a reopened conversation shows and where the eye already is.
+    """
+
+    def test_a_turn_with_no_answer_says_so_where_it_ended(self, script):
+        assert "function appendNoAnswer(" in script
+        block = script[script.index('case "done": {') :]
+        block = block[: block.index("break;")]
+        assert "appendNoAnswer(finished" in block, (
+            "the ending belongs in the transcript, not only in the banner"
+        )
+
+    def test_the_store_is_asked_before_concluding_there_was_no_answer(self, script):
+        """A lost event stream is not the same as a turn that produced nothing."""
+        block = script[script.index('case "done": {') :]
+        block = block[: block.index("break;")]
+        assert "recoverMissingAnswer(finished).then(" in block
+        assert "if (!found) appendNoAnswer(" in block, (
+            "only report the ending once recovery has come back empty"
+        )
+
+    def test_a_reopened_conversation_shows_the_ending_too(self, script):
+        block = script[script.index("if (lastAskedAt > lastAnsweredAt)") :]
+        block = block[: block.index("\n    }")]
+        assert "appendNoAnswer(" in block, (
+            "a conversation that stops mid-process must not end on a Think block"
+        )
+
+
 class TestStepGrouping:
     """A turn's process must be grouped by the step that produced it.
 

@@ -68,6 +68,20 @@ def thinking_script(text: str, *, call: tuple[str, dict[str, Any]] | None = None
     return events
 
 
+def speaking_script(text: str, *, call: tuple[str, dict[str, Any]]) -> list[StreamEvent]:
+    """A round that says something aloud and then calls a tool."""
+    name, arguments = call
+    return [
+        StreamEvent(kind="text", text=f"<say>{text}</say>"),
+        StreamEvent(
+            kind="tool_call",
+            tool_call=ToolCallDelta(index=0, id="c1", name=name, arguments=json.dumps(arguments)),
+        ),
+        StreamEvent(kind="done", finish_reason="tool_calls"),
+        StreamEvent(kind="usage", usage=Usage()),
+    ]
+
+
 @pytest.fixture
 def settings(tmp_path):
     return Settings(
@@ -506,6 +520,75 @@ class TestANoAnswerTurn:
         done = next(e for e in events if e.kind is EventKind.DONE)
         assert done.data.get("reason") == "complete"
         assert len(client.calls) == 1
+
+    async def test_a_silent_closing_round_after_speech_is_asked_to_wrap_up(
+        self, settings, tmp_path, stored
+    ):
+        """Reported from a real 0.8.1 session, and reproduced here.
+
+        The turn opened with a spoken preamble — "let me read the precedent sim's
+        harness, then write the sim" — worked four rounds and nine calls, and then
+        finished on a round that produced nothing at all: no `<say>`, no
+        `<display>`, no call. The wrap-up was decided on the *turn* ("has this turn
+        produced anything"), and the opening preamble satisfied it, so the turn was
+        stored as a success and the user got a preamble and then silence.
+        """
+        store, session_id = stored
+        registry = ToolRegistry([t for t in default_tool_list() if t.name == "list_dir"])
+        client = FakeClient(
+            [
+                speaking_script("Let me read the harness.", call=("list_dir", {"path": "."})),
+                # Nothing at all: no speech, no display, no call.
+                [StreamEvent(kind="done", finish_reason="stop")],
+                thinking_script("Here is what I found."),
+            ]
+        )
+        loop = make_loop(
+            settings, tmp_path, client, store=store, session_id=session_id, registry=registry
+        )
+
+        events = await collect(loop)
+
+        assert len(client.calls) == 3, "a silent closing round must be asked to wrap up"
+        assert "Stop calling tools" in client.calls[2]["messages"][-1]["content"], (
+            "the round after the silence must be told to answer"
+        )
+        done = next(e for e in events if e.kind is EventKind.DONE)
+        assert done.data.get("reason") == "complete"
+
+    async def test_speech_then_silence_is_reported_not_stored_as_a_success(
+        self, settings, tmp_path, stored
+    ):
+        """Asked once, it still produced nothing — so the turn says so.
+
+        This is the whole of the 0.8.1 report: a preamble, real work, and a
+        closing round with nothing in it. A quiet `complete` is indistinguishable
+        from the agent having stopped, so the failure is named, stored and spoken.
+        """
+        store, session_id = stored
+        registry = ToolRegistry([t for t in default_tool_list() if t.name == "list_dir"])
+        empty = [StreamEvent(kind="done", finish_reason="stop")]
+        client = FakeClient(
+            [
+                speaking_script("Let me read the harness.", call=("list_dir", {"path": "."})),
+                empty,
+                empty,
+            ]
+        )
+        loop = make_loop(
+            settings, tmp_path, client, store=store, session_id=session_id, registry=registry
+        )
+
+        events = await collect(loop)
+
+        done = next(e for e in events if e.kind is EventKind.DONE)
+        assert done.data.get("reason") == "no_answer"
+        assert done.data.get("failed") is True
+        assert done.data.get("detail"), "the stop banner needs something to say"
+        stored_tail = [m for m in store.list_messages(session_id) if m.role == "assistant"][-1]
+        assert "without producing an answer" in stored_tail.content, (
+            "a reopened conversation must show why it is empty"
+        )
 
     def test_the_failure_is_spoken(self):
         import inspect

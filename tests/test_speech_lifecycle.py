@@ -27,7 +27,6 @@ import contextlib
 import json
 import logging
 import time
-from types import SimpleNamespace
 
 import pytest
 
@@ -790,16 +789,39 @@ class TestTheTurnEndingIsRecorded:
         session._turn_started_at = time.time() - 5
         session._turn_prompt_tokens = 1200
         session._turn_completion_tokens = 300
+        session._turn_spoken_chars = 84
 
         with caplog.at_level(logging.INFO):
             await session._record_turn_end(
-                {"reason": "no_answer", "steps": 7, "detail": "No reply."},
-                SimpleNamespace(partial_spoken="I looked."),
+                {"reason": "no_answer", "steps": 7, "detail": "No reply."}
             )
 
         assert "reason=no_answer" in caplog.text
         assert "steps=7" in caplog.text
+        assert "spoken=84" in caplog.text, "the reader needs to know whether anything was heard"
         assert "tokens=1200/300" in caplog.text, "a turn's size is part of why it ended"
+
+    async def test_what_is_counted_as_spoken_is_what_was_synthesised(self, wired):
+        """The loop's own field misses the repaired closing line, so it is not used."""
+        from surtitle.core.speak import Chunk, ChunkKind
+
+        session, _tts, _stt = wired
+        spoken: list[str] = []
+
+        class Recorder:
+            is_speaking = False
+
+            def speak(self, text, *, final=False):
+                spoken.append(text)
+
+        session.tts = Recorder()  # type: ignore[assignment]
+        session._turn_spoken_chars = 0
+
+        await session._speak_chunk(Chunk(ChunkKind.SAY, "I looked, and here is what I found."))
+        await session._speak_chunk(Chunk(ChunkKind.DISPLAY, "code that is never spoken"))
+
+        assert session._turn_spoken_chars == len("I looked, and here is what I found.")
+        assert spoken == ["I looked, and here is what I found."]
 
     async def test_usage_is_counted_per_turn_without_the_run_counters(self, wired):
         """The record is written even where no run-wide stats object is wired up."""

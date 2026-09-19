@@ -170,6 +170,9 @@ class Session:
     _turn_started_at: float = 0.0
     _turn_prompt_tokens: int = 0
     _turn_completion_tokens: int = 0
+    # Characters actually handed to the synthesiser this turn, which is the only
+    # honest answer to "did the user hear anything".
+    _turn_spoken_chars: int = 0
     registry: Any = None
     mcp_manager: Any = None
     project_config: Any = None
@@ -718,6 +721,7 @@ class Session:
         self._turn_started_at = time.time()
         self._turn_prompt_tokens = 0
         self._turn_completion_tokens = 0
+        self._turn_spoken_chars = 0
         if self.store and self.session_id:
             with contextlib.suppress(Exception):
                 # The previous turn's ending is no longer the answer to "why does
@@ -749,7 +753,7 @@ class Session:
                     # Written down before it is spoken: the record is what a
                     # reload and the next investigation read, and speaking can
                     # fail on its own.
-                    await self._record_turn_end(event.data, loop)
+                    await self._record_turn_end(event.data)
                     if event.data.get("reason") not in (None, "complete"):
                         # A turn that ends for any reason other than finishing says so
                         # aloud, in the same sentence the transcript shows. A turn cut
@@ -1177,7 +1181,7 @@ class Session:
         else:
             self.stats.record_event(event.kind)
 
-    async def _record_turn_end(self, data: dict[str, Any], loop: AgentLoop) -> None:
+    async def _record_turn_end(self, data: dict[str, Any]) -> None:
         """Write down why the turn ended, and say so in the log.
 
         Both halves were missing, and for the same reason: a turn that stopped
@@ -1195,7 +1199,7 @@ class Session:
             reason,
             steps,
             elapsed,
-            len(loop.partial_spoken or ""),
+            self._turn_spoken_chars,
             self._turn_prompt_tokens,
             self._turn_completion_tokens,
             f" -- {detail}" if detail else "",
@@ -1246,6 +1250,12 @@ class Session:
             return
         if not chunk.text.strip():
             return
+        # Counted here rather than from the loop's own partial text: the loop
+        # finishes the turn with a repaired closing line when the model left the
+        # last round silent, and that line is synthesised without touching the
+        # loop's field. Counting what is actually sent to the synthesiser is the
+        # only version of "did the user hear anything" that is true.
+        self._turn_spoken_chars += len(chunk.text.strip())
         self.tts.speak(chunk.text, final=chunk.final)
 
     # --- speaking / barge-in --------------------------------------------

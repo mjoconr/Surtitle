@@ -790,7 +790,17 @@ class AgentLoop:
                 # So a turn that did work must produce something. One wrap-up round
                 # is asked for, and if that also comes back empty, the failure is
                 # reported rather than stored as a silent success.
-                if not state.assistant_text and not state.spoken_text:
+                #
+                # The question is asked of *this round*, not of the turn. Asked of
+                # the turn, it was satisfied by an opening preamble, and a real
+                # 0.8.1 turn slipped through: it opened with "Let me read the
+                # precedent sim's harness, then write the sim", worked four rounds
+                # and nine calls, and finished on a round that produced nothing at
+                # all. It was stored as a success — `reason=complete` — and the user
+                # heard the preamble and then silence, which is exactly the failure
+                # the turn-level check was added to prevent. The closing round is
+                # the one that has to say something.
+                if not (assistant_message.get("content") or "").strip():
                     if state.actions and not state.wrapped_up:
                         state.wrapped_up = True
                         state.messages.append(

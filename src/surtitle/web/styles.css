@@ -632,6 +632,31 @@ button, input, textarea, select {
   word-break: break-word;
 }
 
+/* The closing section for a turn that produced no answer.
+ *
+ * A turn that stops mid-work ended on a Think block, which reads as "still
+ * going". This is the full stop, and it is quieter than an error because nothing
+ * necessarily went wrong — the agent simply did not finish. */
+.noresult {
+  margin-top: 8px;
+  padding: 8px 12px;
+  border: 0.5px dashed var(--dsw-alias-border-l1);
+  border-radius: 12px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.noresult__title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.noresult__text {
+  margin-top: 2px;
+  font-size: 12px;
+  line-height: 18px;
+}
+
 .shown {
   font-size: var(--dsh-content-font-size-secondary);
   color: var(--dsw-alias-label-secondary);
