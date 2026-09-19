@@ -1341,6 +1341,17 @@ class Session:
                 f"Top level: {', '.join(listing)}"
             )
 
+        # What this project can teach, named but not loaded. The alternative to a
+        # catalogue here is a system prompt holding every procedure, which spends
+        # every turn's context on the ones nobody is using — or no catalogue at all,
+        # which leaves the agent guessing at what it cannot see.
+        from surtitle.tools import skills as skills_module
+
+        known = skills_module.discover(self.root, personal_dir=skills_module.personal_dir(self))
+        catalogue = skills_module.catalogue(known)
+        if catalogue:
+            sections.append(catalogue)
+
         # What the conversation is for, before the plan that serves it. Given first
         # because it is the broader statement: a plan can be entirely ticked and the
         # thing the user asked for still not done.

@@ -1422,6 +1422,7 @@ class AgentLoop:
                         # or not at all.
                         subagent=self._spawn_subagent,
                         jobs=self.jobs,
+                        settings=self.settings,
                     ),
                     arguments,
                 )

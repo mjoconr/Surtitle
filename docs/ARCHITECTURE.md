@@ -157,6 +157,15 @@ The assistant's notebook (`.surtitle/notes.md`) is injected the same way, but it
 is app-local and unshared, so it is for scratch notes. Anything affecting future
 work belongs in the project's Markdown, where it is reviewable and committed.
 
+**Procedures the project writes down are named, not loaded.** A `skills/`
+directory — in the project, or in the user's own `$SURTITLE_HOME` — holds one
+`SKILL.md` per procedure, and each turn the agent is given their names and a line
+about each. The bodies stay on disk until a task matches one and the agent reads it
+with the `skill` tool. The catalogue goes in the per-turn notes rather than the
+system prompt: a procedure in the system prompt spends the context of every turn on
+the ones nobody is using, and naming them without a way to read them would leave the
+agent guessing at what it cannot see. See [`TOOLS.md`](TOOLS.md#skills).
+
 **The primary instruction file is never dropped.** Other oversized documents are
 named rather than included, because a document cut to a tenth of itself reads as
 the whole thing. The first one is the exception: it carries the project's

@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A project can write down how it wants things done, and the agent will read it
+  when the job matches.** A skill is a directory with a `SKILL.md` in it, in the
+  project's `skills/` or in your own `$SURTITLE_HOME/skills/` — how releases are cut
+  here, the house style, the checks wanted before a commit. Each turn the agent is
+  given their names and one line about each, and nothing more; when a task matches
+  one it reads the whole thing with the `skill` tool and follows it. Splitting the
+  catalogue from the bodies is the point: every procedure in the system prompt spends
+  every turn's context on the ones nobody is using, and naming them without a way to
+  read them leaves the agent guessing at what it cannot see. A project skill wins a
+  name it shares with a personal one, front matter is optional (the directory names
+  it, its first sentence describes it), and the name is pattern-checked and then
+  confined to the skills root — a skill called `../../.ssh` is not a skill. Reading
+  one changes nothing, so it needs no approval, and a sub-agent may read them too.
+  The sample project carries one, and the committed example task
+  `example-follow-the-house-skill` measures the whole path: found in the catalogue,
+  read, and followed rather than guessed at.
+
 - **A conversation can have a goal, and keeps working toward it.** The plan says what
   is being done; `goal_write` records what it is *for*, in one sentence, and whether
   it has been reached. It is the broader of the two — every plan item can be ticked

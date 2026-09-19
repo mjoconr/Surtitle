@@ -68,8 +68,10 @@ class TestReadOnlyByConstruction:
     user heard only the parent. It is powerless by policy, not by instruction."""
 
     def test_the_child_gets_the_tools_that_look_and_nothing_else(self):
+        """`skill` is here on purpose: following the project's written-down procedure
+        is what a delegated reader should do, and reading one changes nothing."""
         child = ToolRegistry(default_tool_list()).read_only()
-        assert child.names() == ["list_dir", "read_file", "search_files"]
+        assert child.names() == ["list_dir", "read_file", "search_files", "skill"]
 
     def test_a_tool_that_writes_is_not_offered_even_if_it_needs_no_approval(self):
         from surtitle.tools.registry import Tool

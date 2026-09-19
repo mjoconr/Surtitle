@@ -23,6 +23,7 @@ from surtitle.tools import (
     fs_tools,
     jobs,
     shell_tools,
+    skills,
     web_tools,
 )
 from surtitle.tools.fs_tools import ToolContext, ToolResult
@@ -30,6 +31,7 @@ from surtitle.vcs.guide import DETAIL_LEVELS, detail_menu
 
 __all__ = [
     "GOAL_TOOL",
+    "SKILL_TOOL",
     "SUBAGENT_TOOL",
     "TODO_TOOL",
     "WEB_FETCH_TOOL",
@@ -616,6 +618,7 @@ class ToolRegistry:
 TODO_TOOL = "todo_write"
 GOAL_TOOL = "goal_write"
 SUBAGENT_TOOL = "subagent"
+SKILL_TOOL = "skill"
 WEB_FETCH_TOOL = "web_fetch"
 
 # How much of a fetched page the model is given. A page is mostly navigation, and
@@ -967,6 +970,55 @@ _GOAL_WRITE = Tool(
 )
 
 
+def _skill_handler(ctx: ToolContext, name: str = "", **_ignored: Any) -> ToolResult:
+    """Read one of the project's written-down procedures, in full."""
+    personal = skills.personal_dir(ctx)
+    found = skills.read_skill(str(name), ctx.root, personal_dir=personal)
+    if found is None:
+        available = (
+            ", ".join(item.name for item in skills.discover(ctx.root, personal_dir=personal))
+            or "none"
+        )
+        return ToolResult(
+            ok=False,
+            error=f"There is no skill called {name!r} here. Available: {available}.",
+        )
+    skill, body, companions = found
+    return ToolResult(
+        ok=True,
+        data={
+            "name": skill.name,
+            "description": skill.description,
+            "source": skill.source,
+            "body": body,
+            "files": companions,
+        },
+        display=f"skill {skill.name}: {len(body)} characters"
+        + (f", {len(companions)} file(s) beside it" if companions else ""),
+    )
+
+
+_SKILL = Tool(
+    name=SKILL_TOOL,
+    description=(
+        "Read one of this project's skills in full — a procedure somebody wrote down "
+        "for work like this. The notes you are given each turn list them with a line "
+        "about each; when a task matches one, read it before you start and follow it "
+        "rather than improvising. A skill may have files beside it (a template, a "
+        "script); those are named in the result, and read_file reaches them. This "
+        "tool only reads: it does not do what the skill describes."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {"name": _string("The skill's name, exactly as it is listed in your notes.")},
+        "required": ["name"],
+    },
+    handler=_skill_handler,
+    approval="never",
+    summary="Read a project skill",
+)
+
+
 def default_tool_list() -> list[Tool]:
     """Every tool the agent may use."""
     return [
@@ -988,6 +1040,7 @@ def default_tool_list() -> list[Tool]:
         _TODO_WRITE,
         _GOAL_WRITE,
         _SUBAGENT,
+        _SKILL,
     ]
 
 

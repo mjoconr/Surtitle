@@ -115,6 +115,10 @@ class ToolContext:
     # The conversation's background commands, supplied by the session. Owned above
     # the turn on purpose: a job started in one turn is still there in the next.
     jobs: Any = None
+    # The settings, when the caller has them. Tools that read something outside the
+    # project — the user's own skills, say — need the data directory, and most tools
+    # do not, which is why it is optional.
+    settings: Any = None
 
 
 @dataclass(slots=True)

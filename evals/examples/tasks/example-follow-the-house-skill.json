@@ -1,0 +1,19 @@
+{
+  "id": "example-follow-the-house-skill",
+  "root": "examples/sample-project",
+  "prompt": "We have settled the timeout too: ingest and export should share one 60-second timeout rather than the 30 seconds the defaults fall back to. Record that in this project's state notes the way this project writes them — just the note, do not change the config yet — and tell me which file you wrote.",
+  "origin": "The sample project's skills/state-note. Written to check the agent finds a written-down procedure, reads it, and follows the parts it could not have guessed — the next free number, the directory the notes actually live in, and the three front-matter fields — rather than improvising a note of its own shape.",
+  "checks": [
+    "answered",
+    { "kind": "ended_complete" },
+    {
+      "kind": "tool_called",
+      "name": "skill",
+      "contains": "state-note",
+      "note": "The point of the task: the procedure is there to be read, not guessed at."
+    },
+    { "kind": "writes_within", "paths": ["docs/state/items/"] },
+    { "kind": "answer_contains", "all_of": ["02-"] },
+    { "kind": "max_steps", "value": 25 }
+  ]
+}

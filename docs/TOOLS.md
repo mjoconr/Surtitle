@@ -23,6 +23,7 @@ asks about packages the project has not already approved.
 | `todo_write` | never | no |
 | `goal_write` | never | no |
 | `subagent` | never | no |
+| `skill` | never | no |
 | `web_fetch` | ask | no |
 | `write_file`, `edit_file` | ask | yes |
 | `run_python`, `run_shell` | ask | yes |
@@ -385,8 +386,10 @@ The child is a second `AgentLoop` with the same project, the same model and none
 the conversation: no history, no store, and `ToolRegistry.read_only()` for tools —
 the `never`/non-mutating rows of the table above, minus anything that needs a
 conversation (`todo_write`, `search_history`) and minus `subagent` itself, so one
-level of delegation rather than a tree. It also gets a fresh `RepeatCallGuard`: the
-parent having read a file is no reason for the child to be refused the same file.
+level of delegation rather than a tree. `skill` is kept: a child following the
+project's written-down procedure is the point of having one. It also gets a fresh
+`RepeatCallGuard`: the parent having read a file is no reason for the child to be
+refused the same file.
 
 What the child produces is an answer and a list of files; a child that finishes
 without one is reported to the parent as a failed call, with the reason (`no_answer`,
@@ -402,6 +405,53 @@ advance no steps at all and the turn would fall silent — the failure the progr
 narration exists to prevent. The session says one line naming what is being looked
 into, and only if the agent has not already spoken; the child is never spoken
 itself, and its reasoning is discarded.
+
+## Skills
+
+A skill is a procedure written down for the agent — how releases are cut here, what
+the house style is, which checks this project wants run before a commit. It is a
+directory holding a `SKILL.md`, in the project's `skills/` or in the user's own
+`$SURTITLE_HOME/skills/`. A project skill wins a name it shares with a personal one:
+it is the more specific statement of how work is done *here*.
+
+The file may open with front matter naming it and describing it in a line:
+
+```markdown
+---
+name: release-notes
+description: How a changelog entry is written in this project.
+---
+
+Read `CHANGELOG.md`...
+```
+
+Front matter is optional — the directory names the skill and its first real sentence
+describes it — and it is deliberately not parsed as YAML. Two strings do not justify
+a dependency, and a project should not need one to describe a procedure.
+
+What the agent is given each turn is the **catalogue**: every skill's name and that
+one line, in the same transient notes block the plan lives in. What it is not given
+is the bodies. That split is the whole design. Putting every procedure in the system
+prompt spends the context of every turn on the ones nobody is using; naming them
+without a way to read them leaves the agent guessing at what it cannot see. So the
+catalogue is short, and `skill` reads one in full when the task matches — the body
+alone, without the front matter, plus the names of any files beside it (a template, a
+script) that `read_file` can then reach.
+
+Two rules, both about the name being the only thing the model supplies:
+
+- **A name is a name.** It is matched against a pattern rather than treated as a
+  path, and the directory it resolves to is then proved to be inside the skills root.
+  A skill called `../../.ssh` is not a skill. A name that fails either check is not
+  listed either, because listing something the agent can never load is worse than
+  saying nothing.
+- **A body has a limit**, 20,000 characters, and a body that hits it says so. A skill
+  silently halved reads as the whole procedure, and the file is on disk and readable.
+
+The tool only reads. It does not do what the skill describes, and it takes no
+approval for the same reason the plan does not: it changes nothing. Absent a
+`skills/` directory the section is absent, and the agent is told nothing about
+skills at all.
 
 ## Adding a tool
 
