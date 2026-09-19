@@ -245,6 +245,55 @@ class TestSuppressionIsReleasedAfterATurn:
         )
 
 
+class TestALongThinkDoesNotLookLikeStaleSuppression:
+    """Suppression must not lift the instant a reply starts.
+
+    The watchdog measures silence against the last audio frame *sent*. During a
+    think — or simply between turns — that timestamp is minutes old, so its next
+    tick saw a huge gap, declared suppression stale, and lifted it about 0.2s into
+    the reply. The microphone was then live for the whole of it, which is the
+    opposite of what suppression is for. The log said so plainly: "echo
+    suppression had outlived the agent's audio by 115.6s (0 transcript(s) were
+    discarded while it was on)" — the counter was zero precisely because
+    suppression had not been doing anything.
+    """
+
+    async def test_the_silence_clock_starts_when_speaking_starts(self, wired):
+        session, _tts, _stt = wired
+        session._last_audio_out_at = asyncio.get_running_loop().time() - 120.0
+        session._last_audio_out_seconds = 0.5
+
+        await session._on_speaking_started()
+
+        silent_for = asyncio.get_running_loop().time() - session._last_audio_out_at
+        assert silent_for < 1.0, (
+            "the clock is still reading the think that preceded the reply, so the "
+            "watchdog will call live suppression stale"
+        )
+
+    async def test_the_watchdog_does_not_lift_suppression_during_that_gap(self, wired):
+        session, _tts, stt = wired
+        session._last_audio_out_at = asyncio.get_running_loop().time() - 120.0
+        session._last_audio_out_seconds = 0.5
+        await session._on_speaking_started()
+        stt.suppression.clear()
+
+        task = asyncio.create_task(session._watch_echo_suppression())
+        try:
+            # Longer than one tick of the watchdog's 0.5s loop.
+            await asyncio.sleep(0.7)
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+        assert stt.suppression == [], (
+            "suppression was lifted while the agent was still speaking, so its own "
+            "voice reaches the recogniser"
+        )
+        assert session._suppression_released is False
+
+
 class TestFailuresAreSpoken:
     """A voice-first user is listening, not reading.
 

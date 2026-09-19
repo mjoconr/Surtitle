@@ -307,6 +307,46 @@ class TestCaptureWorkletWiring:
         assert "capture-worklet.js?v=" in audio
 
 
+class TestCapturedAudioReachesTheConversation:
+    """Guards the call site that made the microphone look dead.
+
+    When several conversations were allowed at once, the module-level
+    `connection` singleton was deleted and replaced by a map keyed by
+    conversation. Most call sites were rebound; the capture callback was not, and
+    it was left calling `sendAudio` on the removed name. That does not throw a
+    ReferenceError in a browser — a bare `connection` resolves to the element with
+    `id="connection"` — so every captured frame threw `sendAudio is not a
+    function` and was dropped.
+
+    Nothing reported it. Capture reported success, the level meter moved, the
+    device was named, and the server saw nothing at all:
+
+        microphone closed (#2); received 0 frame(s), 0.00s of audio, peak 0.000
+        no audio arrived for this listening session -- the problem is in the
+        browser's capture, not recognition
+
+    The server's message is a diagnosis of the wrong end, which is why this is a
+    static check over the source rather than a behavioural one.
+    """
+
+    def test_nothing_uses_the_removed_single_connection(self, script):
+        stale = re.findall(r"(?<![\w.$])connection\.(?!js\b)", script)
+        assert not stale, (
+            "a bare `connection.` is not the per-conversation socket — it resolves "
+            "to the #connection element and silently drops every audio frame "
+            f"({len(stale)} left)"
+        )
+
+    def test_captured_frames_are_routed_by_conversation(self, script):
+        capture = script[script.index("const capture = new Capture(") :]
+        capture = capture[: capture.index("\n});")]
+        assert "sendAudioFrame" in capture, (
+            "capture must resolve the socket for the conversation on screen"
+        )
+        assert not re.search(r"connection\.sendAudio", capture)
+        assert "connections.get" in script, "the per-conversation map must be the route"
+
+
 class TestMissingReplyRecovery:
     """A completed turn that showed nothing must be recovered from the store.
 

@@ -1256,6 +1256,19 @@ class Session:
         self._set_state(SessionState.SPEAKING)
         self._speaking = True
         self._speech_since_playback = False
+        # Start the staleness clock at the moment speech begins.
+        #
+        # The watchdog below measures silence against the last audio frame *sent*,
+        # and during a long think — or simply between turns — that timestamp is
+        # minutes old. Without this the watchdog's next tick saw that ancient gap,
+        # declared suppression stale, and lifted it about 0.2s after the reply
+        # started, leaving the microphone live for the whole of it. The symptom in
+        # the log was a warning that suppression "had outlived the agent's audio by
+        # 115.6s (0 transcripts were discarded)" — the counter was zero because
+        # suppression had not actually been doing anything.
+        self._last_audio_out_at = asyncio.get_running_loop().time()
+        self._last_audio_out_seconds = 0.0
+        self._suppression_released = False
 
         # Anything the user said while the previous turn was finishing must be
         # handed over BEFORE suppression starts. Suppression exists to stop the

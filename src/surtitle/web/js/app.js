@@ -1898,7 +1898,15 @@ const capture = new Capture({
   // Honour a previously chosen input, so the browser's default is only used
   // until the user says otherwise.
   deviceId: savedMicrophone(),
-  onAudio: (frame) => connection.sendAudio(frame),
+  // Resolved per frame: the microphone follows the conversation on screen, and
+  // there is no longer a single socket to hold. This used to call sendAudio on
+  // the singleton connection that this file stopped defining when each
+  // conversation got its own socket. A bare `connection` still resolves in a
+  // browser — to the element with `id="connection"` — so every captured frame
+  // threw `sendAudio is not a function` and was dropped. Capture looked
+  // perfectly healthy: the level meter moved, the device was named, and the
+  // server received nothing at all.
+  onAudio: (frame) => sendAudioFrame(frame),
   onBackendChange: (backend) => {
     // A backend switch is a degraded mode, not a normal event: the user should
     // know their audio is being captured by the fallback path.
@@ -1985,6 +1993,19 @@ const playback = new Playback({
  * deleted), not when you look away from it.
  */
 const connections = new Map();
+
+/**
+ * Send one captured frame to the conversation on screen.
+ *
+ * Capture is a single global stream that follows the conversation, so the socket
+ * is looked up per frame rather than captured once.
+ */
+function sendAudioFrame(frame) {
+  const session = state.session;
+  if (!session) return;
+  const socket = connections.get(session.id);
+  if (socket) socket.sendAudio(frame);
+}
 
 function connectionFor(sessionId) {
   const existing = connections.get(sessionId);
@@ -3241,7 +3262,7 @@ async function main() {
 }
 
 window.addEventListener("beforeunload", () => {
-  connection.close();
+  for (const socket of connections.values()) socket.close();
   capture.dispose().catch(() => {});
   playback.close().catch(() => {});
 });
