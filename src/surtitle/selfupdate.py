@@ -180,7 +180,17 @@ def asset_for(
     """
     tag = str(payload.get("tag_name") or "").strip()
     here = platform or sys.platform
-    machine_arch = ((machine or os.uname().machine) if hasattr(os, "uname") else "").lower()
+    # A machine that was passed in is authoritative; `os.uname` is only how one is
+    # discovered. Gating the *argument* on `hasattr(os, "uname")` — which Windows
+    # does not have — threw away the machine on exactly the platform whose archive
+    # names are hardest to read (`AMD64`), and every Windows update then found no
+    # asset at all.
+    if machine:
+        machine_arch = machine.lower()
+    elif hasattr(os, "uname"):
+        machine_arch = os.uname().machine.lower()
+    else:  # pragma: no cover - a platform with neither; treat as architecture-free
+        machine_arch = ""
     wanted_suffix = ".zip" if here == "win32" else ".tar.gz"
     wanted_platform = "win32" if here == "win32" else ("darwin" if here == "darwin" else "linux")
     wanted_arch = _ARCH_TOKENS.get(machine_arch, ())

@@ -49,6 +49,22 @@ class TestAssetSelection:
         }
         assert selfupdate.asset_for(payload, platform="win32", machine="AMD64").url == "win"
 
+    def test_a_platform_without_uname_still_uses_the_machine_it_was_given(self, monkeypatch):
+        """Windows has no `os.uname`, and the machine must not evaporate with it.
+
+        Reproduced from CI, which is the only place it shows: every other test here
+        runs on a machine where `os.uname` exists, so an implementation that asked
+        `hasattr(os, "uname")` about the *argument* looked correct. On Windows it
+        discarded the machine, matched no asset, and offered no update at all.
+        """
+        monkeypatch.delattr(selfupdate.os, "uname", raising=False)
+        payload = {
+            "tag_name": "v1",
+            "assets": [{"name": "surtitle-1-win32-AMD64.zip", "browser_download_url": "win"}],
+        }
+
+        assert selfupdate.asset_for(payload, platform="win32", machine="AMD64").url == "win"
+
     def test_macos_takes_the_tarball_for_its_architecture(self):
         payload = {
             "tag_name": "v1",
