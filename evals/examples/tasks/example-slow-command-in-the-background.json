@@ -1,0 +1,19 @@
+{
+  "id": "example-slow-command-in-the-background",
+  "root": "..",
+  "prompt": "Start a command that takes about forty seconds and prints the word finished when it is done, wait for it to finish, and tell me that it did. Do not hold everything up while it runs.",
+  "origin": "Written to check one thing: that the agent reaches for run_background and job_output when a command is slow, rather than blocking the turn on run_shell with a long timeout. A tool the prompt describes but the agent never picks is not a capability, and this is the cheapest way to find out which it is.",
+  "checks": [
+    "answered",
+    { "kind": "ended_complete" },
+    {
+      "kind": "tool_called",
+      "name": "run_background",
+      "note": "The point of the task: the slow command belongs in a job."
+    },
+    { "kind": "tool_called", "name": "job_output" },
+    { "kind": "answer_contains", "all_of": ["finished"] },
+    { "kind": "writes_within", "paths": [] },
+    { "kind": "max_steps", "value": 20 }
+  ]
+}

@@ -37,6 +37,29 @@ def ctx(tmp_path, registry):
     return ToolContext(root=tmp_path, jobs=registry)
 
 
+@pytest.fixture
+def wired(tmp_path):
+    """A real session, because jobs belong to one and closing it must stop them."""
+    store = Store(tmp_path / "db.sqlite")
+    project = store.create_project("P", tmp_path)
+    record = store.create_session(project.id)
+
+    async def noop(*_args, **_kwargs):
+        return None
+
+    return Session(
+        session_id=record.id,
+        project_id=project.id,
+        root=tmp_path,
+        settings=Settings(DEEPSEEK_API_KEY="k", SURTITLE_HOME=str(tmp_path)),
+        store=store,
+        deepseek=None,
+        send=noop,
+        send_audio=noop,
+        registry=ToolRegistry(default_tool_list()),
+    )
+
+
 class TestStartingAJob:
     async def test_it_returns_at_once_and_names_the_job(self, ctx):
         result = await run_background(ctx, command=python("import time; time.sleep(5)"))
@@ -174,7 +197,39 @@ class TestStoppingJobs:
         await registry.kill_all()
 
         assert registry.jobs() == []
-        assert not registry.directory.exists(), "a job's log does not outlive its session"
+        assert registry.directory is None, "a job's log does not outlive its session"
+
+
+class TestItLeavesNothingBehindWhenUnused:
+    """Every conversation builds one of these; almost none of them run a job.
+
+    Found by counting temp directories after a test run: 169 of them, one per
+    `Session` ever constructed, because the registry made its directory in the
+    constructor and most sessions are never closed.
+    """
+
+    def test_building_one_makes_no_directory(self):
+        registry = JobRegistry()
+
+        assert registry.directory is None
+
+    async def test_a_started_job_makes_exactly_one(self, tmp_path):
+        registry = JobRegistry(directory=tmp_path / "jobs")
+        ctx = ToolContext(root=tmp_path, jobs=registry)
+
+        await run_background(ctx, command="echo hi")
+
+        assert registry.directory == tmp_path / "jobs"
+        assert len(list(registry.directory.glob("*.log"))) == 1
+        await registry.kill_all()
+
+    async def test_a_session_that_never_runs_a_job_removes_nothing(self, wired):
+        """Closing it must not fail on a directory that was never made."""
+        assert wired.jobs.directory is None
+
+        await wired.close()
+
+        assert wired.jobs.directory is None
 
 
 class TestTheRegistryIsNotUnbounded:
@@ -194,27 +249,6 @@ class TestTheRegistryIsNotUnbounded:
 
 class TestTheyBelongToTheSession:
     """Started in one turn, still there in the next; killed when the window closes."""
-
-    @pytest.fixture
-    def wired(self, tmp_path):
-        store = Store(tmp_path / "db.sqlite")
-        project = store.create_project("P", tmp_path)
-        record = store.create_session(project.id)
-
-        async def noop(*_args, **_kwargs):
-            return None
-
-        return Session(
-            session_id=record.id,
-            project_id=project.id,
-            root=tmp_path,
-            settings=Settings(DEEPSEEK_API_KEY="k", SURTITLE_HOME=str(tmp_path)),
-            store=store,
-            deepseek=None,
-            send=noop,
-            send_audio=noop,
-            registry=ToolRegistry(default_tool_list()),
-        )
 
     async def test_the_registry_outlives_a_turn(self, wired):
         """The loop is built per turn; the registry is built with the session."""

@@ -75,14 +75,24 @@ class JobRegistry:
     """The background commands of one conversation."""
 
     def __init__(self, *, directory: Path | None = None, limit: int = MAX_JOBS) -> None:
-        self._directory = directory or Path(tempfile.mkdtemp(prefix="surtitle-jobs-"))
-        self._directory.mkdir(parents=True, exist_ok=True)
+        # No directory is made until a job exists. Every conversation constructs one
+        # of these, and almost none of them run a background command — a temp
+        # directory per session is a leak measured in the hundreds after a test run,
+        # and an empty one per conversation in the wild.
+        self._directory = directory
         self._jobs: dict[str, Job] = {}
         self._next = 1
         self._limit = limit
 
     @property
-    def directory(self) -> Path:
+    def directory(self) -> Path | None:
+        """Where job logs live, or ``None`` while no job has been started."""
+        return self._directory
+
+    def _root(self) -> Path:
+        if self._directory is None:
+            self._directory = Path(tempfile.mkdtemp(prefix="surtitle-jobs-"))
+        self._directory.mkdir(parents=True, exist_ok=True)
         return self._directory
 
     def get(self, job_id: str) -> Job | None:
@@ -111,7 +121,7 @@ class JobRegistry:
 
         job_id = f"job-{self._next}"
         self._next += 1
-        log_path = self._directory / f"{job_id}.log"
+        log_path = self._root() / f"{job_id}.log"
 
         self._make_room()
         # The file is opened for the child rather than piped to us: nothing has to
@@ -196,8 +206,10 @@ class JobRegistry:
             with contextlib.suppress(Exception):
                 await self.kill(job)
         self._jobs.clear()
-        with contextlib.suppress(OSError):
-            shutil.rmtree(self._directory, ignore_errors=True)
+        if self._directory is not None:
+            with contextlib.suppress(OSError):
+                shutil.rmtree(self._directory, ignore_errors=True)
+            self._directory = None
 
     async def wait(self, job: Job, seconds: float) -> None:
         """Wait for a job to finish, or for the clock to run out — whichever first."""
