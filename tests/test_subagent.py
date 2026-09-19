@@ -21,7 +21,7 @@ from surtitle.core.agent import AgentLoop
 from surtitle.core.events import EventKind
 from surtitle.core.session import Session
 from surtitle.core.speak import Chunk, ChunkKind
-from surtitle.llm.deepseek import StreamEvent, ToolCallDelta, Usage
+from surtitle.llm.chat import StreamEvent, ToolCallDelta, Usage
 from surtitle.store.db import Store
 from surtitle.tools.registry import SUBAGENT_TOOL, ToolRegistry, default_tool_list
 

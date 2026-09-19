@@ -1,13 +1,20 @@
-"""Streaming DeepSeek client.
+"""Streaming chat client, for any OpenAI-compatible model API.
 
-DeepSeek's API is OpenAI-compatible, but two details are not, and both matter:
+The wire format is OpenAI's, and every provider this talks to speaks it. Two
+details of it are not universal, and both matter:
 
-* ``reasoning_content`` carries the thinking stream in a separate field. It must
-  be shown in the UI for transparency and must *never* be spoken.
+* ``reasoning_content`` carries DeepSeek's thinking stream in a separate field. It
+  must be shown in the UI for transparency and must *never* be spoken. A provider
+  that does not send it simply does not send it.
 * Tool calls arrive as fragments spread across many deltas, correlated by
   ``index``. They have to be accumulated before they can be executed; treating a
   single delta as a complete call is the classic cause of "arguments is not valid
   JSON" bugs.
+
+Which endpoint, model and key to use is resolved from the selected provider
+(``surtitle.llm.providers``), and the DeepSeek-only request fields are sent only to
+DeepSeek — a provider sent a field it does not know rejects the request, which is
+how "the model does not work" usually presents itself.
 
 We talk raw HTTP rather than using an SDK, so the request shape is visible and
 the wire format can be replayed in tests.
@@ -28,8 +35,8 @@ import httpx
 from surtitle.config import Settings
 
 __all__ = [
+    "ChatClient",
     "ChatMessage",
-    "DeepSeekClient",
     "StreamEvent",
     "ToolCallDelta",
     "Usage",
@@ -42,7 +49,7 @@ _MAX_RETRIES = 4
 _BACKOFF = (1.0, 2.0, 4.0, 8.0)
 
 
-class DeepSeekError(RuntimeError):
+class ChatError(RuntimeError):
     """Raised when the model API cannot be used."""
 
     def __init__(self, message: str, *, status: int | None = None, retryable: bool = False) -> None:
@@ -131,7 +138,7 @@ class _Accumulator:
     finish_reason: str | None = None
 
 
-class DeepSeekClient:
+class ChatClient:
     """Async client for DeepSeek chat completions."""
 
     def __init__(self, settings: Settings, *, client: httpx.AsyncClient | None = None) -> None:
@@ -146,7 +153,7 @@ class DeepSeekClient:
         if self._owns_client:
             await self._client.aclose()
 
-    async def __aenter__(self) -> DeepSeekClient:
+    async def __aenter__(self) -> ChatClient:
         return self
 
     async def __aexit__(self, *exc: object) -> None:
@@ -182,7 +189,7 @@ class DeepSeekClient:
     def _headers(self) -> dict[str, str]:
         key = self.settings.deepseek_key()
         if not key:
-            raise DeepSeekError(
+            raise ChatError(
                 "DEEPSEEK_API_KEY is not configured. Add it in Settings or in your .env file."
             )
         return {
@@ -222,13 +229,13 @@ class DeepSeekClient:
                         produced = True
                         yield event
                     return
-            except DeepSeekError as exc:
+            except ChatError as exc:
                 if not exc.retryable or produced or attempt == _MAX_RETRIES - 1:
                     raise
                 last_error = exc
             except (httpx.HTTPError, httpx.StreamError) as exc:
                 if produced or attempt == _MAX_RETRIES - 1:
-                    raise DeepSeekError(
+                    raise ChatError(
                         f"Lost connection to the model API: {type(exc).__name__}: {exc}",
                         retryable=True,
                     ) from exc
@@ -241,10 +248,10 @@ class DeepSeekClient:
             except asyncio.CancelledError:
                 raise
 
-        raise DeepSeekError(f"Request failed after {_MAX_RETRIES} attempts: {last_error}")
+        raise ChatError(f"Request failed after {_MAX_RETRIES} attempts: {last_error}")
 
     @staticmethod
-    def _http_error(status: int, body: bytes) -> DeepSeekError:
+    def _http_error(status: int, body: bytes) -> ChatError:
         detail = ""
         with contextlib.suppress(Exception):
             parsed = json.loads(body)
@@ -276,7 +283,7 @@ class DeepSeekClient:
         else:
             message = f"DeepSeek API error {status}: {detail}"
 
-        return DeepSeekError(message, status=status, retryable=status in _RETRY_STATUS)
+        return ChatError(message, status=status, retryable=status in _RETRY_STATUS)
 
     async def _iter_sse(self, response: httpx.Response) -> AsyncIterator[StreamEvent]:
         """Parse a server-sent-events body into :class:`StreamEvent` objects."""

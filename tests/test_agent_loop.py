@@ -18,7 +18,7 @@ from surtitle.config import Settings
 from surtitle.core.agent import AgentLoop, ApprovalBroker, _title_from, build_system_prompt
 from surtitle.core.events import EventKind
 from surtitle.core.speak import Chunk, ChunkKind
-from surtitle.llm.deepseek import DeepSeekError, StreamEvent, ToolCallDelta, Usage
+from surtitle.llm.chat import ChatError, StreamEvent, ToolCallDelta, Usage
 from surtitle.tools.artifacts import make_spreadsheet
 from surtitle.tools.fs_tools import ToolResult, list_dir, read_file
 from surtitle.tools.registry import Tool, ToolRegistry
@@ -488,7 +488,7 @@ class TestFailureHandling:
     async def test_model_error_is_reported_and_turn_ends(self, settings, tmp_path):
         class FailingClient:
             async def stream(self, messages, *, tools=None):
-                raise DeepSeekError("The DeepSeek API rejected the key.")
+                raise ChatError("The DeepSeek API rejected the key.")
                 yield  # pragma: no cover - makes this an async generator
 
             async def aclose(self) -> None:

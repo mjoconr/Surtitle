@@ -14,7 +14,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from surtitle.config import Settings
-from surtitle.llm.deepseek import StreamEvent, Usage
+from surtitle.llm.chat import StreamEvent, Usage
 from surtitle.server import create_app_for
 
 
@@ -247,9 +247,9 @@ class TestConversation:
 
         class Broken:
             async def stream(self, messages, *, tools=None):
-                from surtitle.llm.deepseek import DeepSeekError
+                from surtitle.llm.chat import ChatError
 
-                raise DeepSeekError("The DeepSeek API rejected the key.")
+                raise ChatError("The DeepSeek API rejected the key.")
                 yield  # pragma: no cover
 
             async def aclose(self):

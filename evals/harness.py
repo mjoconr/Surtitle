@@ -45,7 +45,7 @@ from typing import Any
 from surtitle.config import Settings
 from surtitle.core.agent import ApprovalBroker
 from surtitle.core.session import Session
-from surtitle.llm.deepseek import DeepSeekClient
+from surtitle.llm.chat import ChatClient
 from surtitle.store.db import Store
 from surtitle.tools.project_config import load_project_config
 from surtitle.tools.registry import ToolRegistry, default_tool_list
@@ -301,7 +301,7 @@ async def _run_task_in(
     store = Store(workdir / "eval.sqlite")
     project = store.create_project(root.name, work_root)
     record = store.create_session(project.id)
-    client = DeepSeekClient(settings)
+    client = ChatClient(settings)
     tools = default_tool_list()
     approvals = ApprovalBroker()
     # Nothing in the harness can answer an approval prompt, so every built-in tool

@@ -596,7 +596,7 @@ class TestGuardIsWiredIntoTheLoop:
         from surtitle.config import Settings
         from surtitle.core.agent import AgentLoop
         from surtitle.core.events import EventKind
-        from surtitle.llm.deepseek import StreamEvent, ToolCallDelta
+        from surtitle.llm.chat import StreamEvent, ToolCallDelta
         from surtitle.tools.registry import Tool, ToolRegistry
 
         calls: list[str] = []
@@ -722,7 +722,7 @@ class TestStoredToolCallKeepsItsOutput:
         import json as jsonlib
 
         from surtitle.core.agent import AgentLoop
-        from surtitle.llm.deepseek import StreamEvent, ToolCallDelta
+        from surtitle.llm.chat import StreamEvent, ToolCallDelta
         from surtitle.tools.registry import Tool, ToolRegistry
 
         store = Store(tmp_path / "db.sqlite")
@@ -794,7 +794,7 @@ class TestStoredToolCallKeepsItsOutput:
         import json as jsonlib
 
         from surtitle.core.agent import AgentLoop
-        from surtitle.llm.deepseek import StreamEvent, ToolCallDelta
+        from surtitle.llm.chat import StreamEvent, ToolCallDelta
         from surtitle.tools.registry import Tool, ToolRegistry
 
         store = Store(tmp_path / "db.sqlite")

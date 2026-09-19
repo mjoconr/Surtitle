@@ -23,7 +23,7 @@ from surtitle.config import Settings
 from surtitle.core.agent import PROGRESS_STEPS, AgentLoop, age_work_log
 from surtitle.core.events import EventKind
 from surtitle.core.session import Session
-from surtitle.llm.deepseek import StreamEvent, ToolCallDelta, Usage
+from surtitle.llm.chat import StreamEvent, ToolCallDelta, Usage
 from surtitle.store.db import REASONING_ROLE, Store
 from surtitle.tools.fs_tools import ToolContext
 from surtitle.tools.registry import TODO_TOOL, ToolRegistry, default_tool_list
@@ -305,11 +305,11 @@ class TestStopping:
         assert done.data.get("truncated") is True
 
     async def test_a_failed_turn_says_so(self, tmp_path):
-        from surtitle.llm.deepseek import DeepSeekError
+        from surtitle.llm.chat import ChatError
 
         class Failing(FakeClient):
             async def stream(self, messages, *, tools=None):
-                raise DeepSeekError("connection reset")
+                raise ChatError("connection reset")
                 yield  # pragma: no cover - makes this a generator
 
         settings = Settings(DEEPSEEK_API_KEY="test-key", DEEPGRAM_API_KEY="test-key", max_steps=2)

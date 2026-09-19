@@ -50,7 +50,7 @@ from surtitle import __version__, dialogs, folder_browse, shell_integration
 from surtitle.config import Settings, get_settings, setup_logging
 from surtitle.core.events import ClientCommand, CommandKind, EventKind
 from surtitle.core.session import Session, SessionManager, decode_client_frame
-from surtitle.llm.deepseek import DeepSeekClient
+from surtitle.llm.chat import ChatClient
 from surtitle.releases import ReleaseWatcher
 from surtitle.stats import RunStats
 from surtitle.store.db import Store
@@ -141,7 +141,7 @@ class AppState:
         self.settings = settings
         self.store = Store(settings.db_path)
         self.settings_store = SettingsStore(settings)
-        self.deepseek = DeepSeekClient(settings)
+        self.deepseek = ChatClient(settings)
         self.sessions = SessionManager()
         # Usage counters for this process. Owned here rather than by a session
         # because they outlive any one conversation and are what ``/api/status``

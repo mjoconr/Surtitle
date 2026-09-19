@@ -33,7 +33,7 @@ from typing import Any
 from surtitle.config import Settings
 from surtitle.core.events import Event, EventKind, SessionState
 from surtitle.core.speak import Chunk, ChunkKind, SpeakParser, repair_fallback
-from surtitle.llm.deepseek import ChatMessage, DeepSeekClient, DeepSeekError, ToolCallDelta
+from surtitle.llm.chat import ChatClient, ChatError, ChatMessage, ToolCallDelta
 from surtitle.store.db import REASONING_ROLE, Store
 from surtitle.tools import environment
 from surtitle.tools.fs_tools import ToolContext, ToolResult
@@ -769,7 +769,7 @@ class AgentLoop:
         store: Store | None = None,
         registry: ToolRegistry | None = None,
         approvals: ApprovalBroker | None = None,
-        client: DeepSeekClient | None = None,
+        client: ChatClient | None = None,
         system_prompt: str | None = None,
         context_note: str = "",
         repeat_guard: RepeatCallGuard | None = None,
@@ -825,9 +825,9 @@ class AgentLoop:
     def cancelled(self) -> bool:
         return self._cancelled.is_set()
 
-    async def _client_or_create(self) -> DeepSeekClient:
+    async def _client_or_create(self) -> ChatClient:
         if self._client is None:
-            self._client = DeepSeekClient(self.settings)
+            self._client = ChatClient(self.settings)
         return self._client
 
     async def aclose(self) -> None:
@@ -1096,7 +1096,7 @@ class AgentLoop:
                 detail=(f"Stopped after {self.settings.max_steps} steps with work still to do."),
             )
 
-        except DeepSeekError as exc:
+        except ChatError as exc:
             yield self._event(EventKind.ERROR, message=str(exc), kind_detail="llm")
             yield self._event(
                 EventKind.DONE, steps=state.step, failed=True, reason="failed", detail=str(exc)
@@ -1121,7 +1121,7 @@ class AgentLoop:
     # --- one completion --------------------------------------------------
     async def _stream_completion(
         self,
-        client: DeepSeekClient,
+        client: ChatClient,
         state: _TurnState,
         *,
         on_chunk: Callable[[Chunk], Awaitable[None]] | None,

@@ -36,7 +36,7 @@ from surtitle.core.agent import (
 )
 from surtitle.core.events import Event, EventKind, SessionState
 from surtitle.core.speak import Chunk, ChunkKind
-from surtitle.llm.deepseek import ChatMessage, DeepSeekClient
+from surtitle.llm.chat import ChatClient, ChatMessage
 from surtitle.stats import RunStats, context_window, is_peak, resolve_price
 from surtitle.store.db import Store
 from surtitle.tools.environment import environment_summary
@@ -198,7 +198,7 @@ class Session:
     root: Path
     settings: Settings
     store: Store
-    deepseek: DeepSeekClient
+    deepseek: ChatClient
     send: Callable[[dict[str, Any]], Awaitable[None]]
     send_audio: Callable[[bytes], Awaitable[None]]
 

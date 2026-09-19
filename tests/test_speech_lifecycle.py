@@ -31,7 +31,7 @@ import time
 import pytest
 
 from surtitle.config import Settings
-from surtitle.llm.deepseek import StreamEvent, ToolCallDelta, Usage
+from surtitle.llm.chat import StreamEvent, ToolCallDelta, Usage
 from surtitle.tools.registry import ToolRegistry, default_tool_list
 from surtitle.voice import stt as stt_module
 from surtitle.voice.stt import SpeechToText
