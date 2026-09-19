@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **The agent can read a page from the internet.** `web_fetch` returns a URL's
+  readable text — documentation, a changelog, a release note, an error page — for
+  the questions the project's own files cannot answer. It reads only `http` and
+  `https`, only from public addresses, re-checks every redirect instead of trusting
+  the first URL, takes only text, and cuts a page that is too long. That matters
+  more than the feature: the app's own API at `127.0.0.1:8765` and a cloud host's
+  metadata endpoint at `169.254.169.254` are both refused, because the address is
+  what is checked rather than the name. It asks for your approval each time unless
+  you trust it for the project — reading a page is harmless, but the URL is the part
+  of a request that can carry something out. There is no search yet: it needs a URL.
+
 ## [0.11.0] - 2026-09-19
 
 ### Added

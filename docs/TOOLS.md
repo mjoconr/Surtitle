@@ -22,6 +22,7 @@ asks about packages the project has not already approved.
 | `environment_info`, `search_packages` | never | no |
 | `todo_write` | never | no |
 | `subagent` | never | no |
+| `web_fetch` | ask | no |
 | `write_file`, `edit_file` | ask | yes |
 | `run_python`, `run_shell` | ask | yes |
 | `make_pdf`, `make_spreadsheet`, `make_chart` | ask | yes |
@@ -85,6 +86,41 @@ line delta.
 **`edit_file`** — exact string replacement that **requires uniqueness** unless
 `replace_all` is set. An ambiguous match is refused and the file is left untouched, which
 is what stops a plausible-looking edit from corrupting the wrong part of a file.
+
+## Web
+
+`web_fetch` reads one URL and returns the page as text. The calls it makes look
+ordinary — a documentation page, a changelog, an error string — so the feature is
+what it refuses:
+
+- **Only `http` and `https`.** `file:///etc/passwd` is not a URL this tool knows
+  about.
+- **Only public addresses**, and the *resolved address* is what is checked rather
+  than the name. So `localhost`, a private IP, and a harmless-looking domain that
+  someone has pointed at `10.0.0.1` are refused alike — as are
+  `169.254.169.254`, which is the metadata endpoint on a cloud host, and
+  `127.0.0.1:8765`, which is this application's own API.
+- **Redirects are followed by hand**, one hop at a time, with every hop checked
+  again. `follow_redirects=True` would make the address check advisory, and a public
+  URL that 302s to the local network is exactly the way in.
+- **Only text.** A PDF or an image is reported rather than fetched and guessed at,
+  and a body over 2 MB is cut — the model is told it was cut, and the returned text
+  is capped again at `_WEB_FETCH_CHARS`.
+- **URLs carrying a username or password are refused**, because the approval prompt
+  shows the URL, and a credential in one would read as an ordinary address.
+
+Approval is `ask` rather than `never`. Reading a page is harmless; *requesting* one
+is not — the URL is the part of a request that can carry project data out, and it is
+the part the prompt shows. `run_shell` has always been gated for the same reason,
+and a project that trusts this tool stops being asked.
+
+Not covered: the address is validated and then the connection is made by hostname,
+so a name server that answers differently in between could still land on a private
+address. Pinning the validated address would close that and break virtual hosting
+and TLS verification. This is a single-user tool on the user's own machine.
+
+There is no search. The agent needs a URL, or one it can build from something it has
+read.
 
 ## Execution
 

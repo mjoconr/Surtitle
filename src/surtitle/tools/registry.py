@@ -16,13 +16,14 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from surtitle.tools import artifacts, documents, environment, fs_tools, shell_tools
+from surtitle.tools import artifacts, documents, environment, fs_tools, shell_tools, web_tools
 from surtitle.tools.fs_tools import ToolContext, ToolResult
 from surtitle.vcs.guide import DETAIL_LEVELS, detail_menu
 
 __all__ = [
     "SUBAGENT_TOOL",
     "TODO_TOOL",
+    "WEB_FETCH_TOOL",
     "Tool",
     "ToolRegistry",
     "build_registry_for_project",
@@ -600,6 +601,12 @@ class ToolRegistry:
 
 TODO_TOOL = "todo_write"
 SUBAGENT_TOOL = "subagent"
+WEB_FETCH_TOOL = "web_fetch"
+
+# How much of a fetched page the model is given. A page is mostly navigation, and
+# the answer to a question about one is usually near the top; the rest is said to
+# have been left out rather than silently dropped.
+_WEB_FETCH_CHARS = 12_000
 
 # Read-only tools that are still not for a sub-agent. Two need the conversation
 # they belong to — `todo_write` writes its plan, `search_history` reads other
@@ -695,6 +702,45 @@ _TODO_WRITE = Tool(
 )
 
 
+def _web_fetch_handler(ctx: ToolContext, url: str = "", **_ignored: Any) -> ToolResult:
+    """Fetch a page and hand back its readable text.
+
+    Everything that makes this safe lives in `tools/web_tools.py` — the address
+    checks, the manual redirects, the size and content-type limits — so that the
+    same guards apply to any caller and can be tested without a tool dispatch. What
+    is here is the part that belongs to a tool: turning a failure into something the
+    model can act on, because a raised exception would end the turn.
+    """
+    if not str(url or "").strip():
+        return ToolResult(ok=False, error="Give the URL to fetch.")
+    try:
+        page = web_tools.fetch_page(str(url))
+    except web_tools.FetchError as exc:
+        return ToolResult(ok=False, error=str(exc))
+    except Exception as exc:  # a broken site must not break the turn
+        return ToolResult(ok=False, error=f"Could not fetch {url}: {type(exc).__name__}: {exc}")
+
+    text = page.text
+    clipped = len(text) > _WEB_FETCH_CHARS
+    if clipped:
+        text = text[:_WEB_FETCH_CHARS]
+    if page.truncated or clipped:
+        text += (
+            f"\n\n[This is the beginning of {page.url}. Fetch a more specific page if "
+            "what you need is further down.]"
+        )
+    return ToolResult(
+        ok=True,
+        data={
+            "url": page.url,
+            "status": page.status,
+            "content_type": page.content_type,
+            "text": text,
+        },
+        display=f"fetched {page.url} ({page.status}, {len(text)} chars)",
+    )
+
+
 async def _subagent_handler(
     ctx: ToolContext, task: str = "", label: str = "", **_ignored: Any
 ) -> ToolResult:
@@ -749,12 +795,39 @@ _SUBAGENT = Tool(
 )
 
 
+_WEB_FETCH = Tool(
+    name=WEB_FETCH_TOOL,
+    description=(
+        "Fetch a URL and read it — documentation, a changelog, a release note, an "
+        "error page, a specification. Use it when the answer is published somewhere "
+        "and this project does not contain it; do not use it for anything the "
+        "project's own files answer, because reading them is free and this is not. "
+        "It reads http and https, follows redirects, refuses addresses on the local "
+        "network, and returns the beginning of a long page. It cannot search: you "
+        "need the URL, or one you can construct from something you have read."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {"url": _string("The full URL to fetch, including the scheme.")},
+        "required": ["url"],
+    },
+    handler=_web_fetch_handler,
+    # Not `never`: reading a page is harmless, *requesting* one is not. The URL is
+    # the part of a request that can carry project data out, and it is what the
+    # approval prompt shows. `run_shell` is gated for the same reason — it could
+    # always have done this — and a project that trusts this tool stops being asked.
+    approval="ask",
+    summary="Fetch a page from the internet",
+)
+
+
 def default_tool_list() -> list[Tool]:
     """Every tool the agent may use."""
     return [
         _LIST_DIR,
         _READ_FILE,
         _SEARCH_FILES,
+        _WEB_FETCH,
         _WRITE_FILE,
         _EDIT_FILE,
         _RUN_PYTHON,
