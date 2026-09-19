@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **An eval harness, and the first tasks for it.** `python -m evals` runs real
+  questions — the work recorded in an agent session, and this project's own
+  history — through the shipped turn path, and scores the result on objective
+  checks: which tools were called, whether the turn finished, and what the answer
+  had to contain. Until now every change to the prompt, the model settings or the
+  tools was a coin flip, because there was nothing to compare against. Results are
+  written to `evals/runs/` for exactly that comparison. Tasks of your own live in
+  the gitignored `evals/tasks/`, because a task names a real project; what is
+  committed is the harness and a sample project it can run against.
+  `evals/README.md` says how to add a task; `tests/test_eval_harness.py` covers the
+  harness itself offline.
+
 ## [0.9.2] - 2026-09-19
 
 ### Fixed

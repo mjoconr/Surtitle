@@ -1,0 +1,17 @@
+{
+  "id": "example-session-note",
+  "root": "examples/sample-project",
+  "prompt": "If I change behaviour in this project, where does the record of that go, and what do I run before committing?",
+  "origin": "The sample project's own AGENTS.md, so the task rewards reading the project's instructions rather than guessing.",
+  "checks": [
+    "answered",
+    { "kind": "ended_complete" },
+    {
+      "kind": "answer_contains",
+      "all_of": ["run-checks.sh"],
+      "any_of": ["docs/state", "state note"]
+    },
+    { "kind": "writes_within", "paths": ["docs/state/"] },
+    { "kind": "max_steps", "value": 25 }
+  ]
+}

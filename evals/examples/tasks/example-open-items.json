@@ -1,0 +1,13 @@
+{
+  "id": "example-open-items",
+  "root": "examples/sample-project",
+  "prompt": "What is open on this project right now?",
+  "origin": "docs/state/items in the sample project. Checks the rendered summary is read as generated rather than as the source.",
+  "checks": [
+    "answered",
+    { "kind": "ended_complete" },
+    { "kind": "answer_contains", "all_of": ["batch"], "any_of": ["250", "100"] },
+    { "kind": "writes_within", "paths": ["docs/state/"] },
+    { "kind": "max_steps", "value": 25 }
+  ]
+}

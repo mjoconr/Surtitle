@@ -1,0 +1,13 @@
+{
+  "id": "example-retry-limit",
+  "root": "examples/sample-project",
+  "prompt": "What is the retry limit for ingest here, and where is it set?",
+  "origin": "The sample project in evals/examples. Written to exercise answer_contains and writes_within without depending on anybody's real work.",
+  "checks": [
+    "answered",
+    { "kind": "ended_complete" },
+    { "kind": "answer_contains", "all_of": ["5"], "any_of": ["service.ini", "max_attempts"] },
+    { "kind": "writes_within", "paths": ["docs/state/"] },
+    { "kind": "max_steps", "value": 25 }
+  ]
+}

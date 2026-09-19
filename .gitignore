@@ -47,3 +47,11 @@ Thumbs.db
 .idea/
 .vscode/
 *.swp
+
+# Eval results are a measurement of one moment, kept for comparison and never
+# part of the repository.
+evals/runs/
+# Eval tasks name a real project to run against, so the question, the expected
+# answer and the checkout it lives in are all project data — and often a client's.
+# What is committed is the harness and the sample project under evals/examples/.
+evals/tasks/
