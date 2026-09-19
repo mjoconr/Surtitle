@@ -17,6 +17,7 @@ import array
 import asyncio
 import base64
 import contextlib
+import json
 import logging
 import time
 from collections.abc import Awaitable, Callable
@@ -68,6 +69,28 @@ _HISTORY_LIMIT = 40
 # worth. See `Session._age_work_logs`.
 _AGED_WORK_KEEP_TURNS = 6
 
+# The most recent turns whose tool exchanges are replayed as they happened — the
+# call, its result, then the answer — rather than as a line of prose summarising
+# them.
+#
+# A work-log line keeps 320 characters of an outcome; the stored result holds up
+# to 4,000. That difference is the whole reason a turn could read a file, and a
+# later turn in the same conversation could not remember what it said and read it
+# again. Two turns is where the fidelity is worth its tokens: the turn just
+# finished is what the next one builds on, and the one before it is what "did I
+# already do this?" is usually asking about. Older turns keep the prose log, which
+# still names the tool and its target — re-reading a file is cheap, re-deriving
+# what a command printed is not.
+_REPLAY_TURNS = 2
+
+# A cap per replayed result, so one enormous command output cannot crowd out the
+# conversation. The result is already bounded at storage time; this bounds it
+# again for the request, where it is multiplied by every call in the turn.
+_REPLAY_RESULT_CHARS = 1500
+
+# The boundary between a stored answer and the work log under it.
+_WORK_LOG_MARKER = "[work this turn]"
+
 # A session whose connection left mid-turn is kept for a reload to reclaim, then
 # swept. The grace period bounds how long a turn that never finishes can hold its
 # sockets open.
@@ -98,6 +121,52 @@ def _peak_level(frame: bytes) -> float:
     if not samples:
         return 0.0
     return max(max(samples), -min(samples)) / 32768.0
+
+
+def _replay_turn(answer_with_log: str, calls: list[Any]) -> list[ChatMessage]:
+    """One stored turn, put back as the exchanges that produced it.
+
+    The stored assistant message holds the turn's answer *and* a prose summary of
+    its work. Replayed, the summary is dropped and the work is restored: an
+    assistant message carrying the calls, one tool message per result, then the
+    answer. That is the difference between the model being told "read_file(x) ->
+    320 characters of it" and the model having the result.
+    """
+    answer = answer_with_log.partition(_WORK_LOG_MARKER)[0].strip()
+    replayed: list[ChatMessage] = [
+        {"role": "assistant", "content": "", "tool_calls": [_replayed_call(call) for call in calls]}
+    ]
+    replayed.extend(_replayed_result(call) for call in calls)
+    if answer:
+        replayed.append({"role": "assistant", "content": answer})
+    return replayed
+
+
+def _replayed_call(call: Any) -> dict[str, Any]:
+    """A stored call, in the shape the provider expects on the wire.
+
+    The id is derived from the row rather than generated: it has to match between
+    the call and its result on every request, and a fresh id would rewrite the
+    request body — and with it the cached prefix — on every turn.
+    """
+    return {
+        "id": f"call_{call.id}",
+        "type": "function",
+        "function": {
+            "name": call.name,
+            "arguments": json.dumps(call.arguments, ensure_ascii=False),
+        },
+    }
+
+
+def _replayed_result(call: Any) -> ChatMessage:
+    """A stored result as a tool message, with the failure the log would state."""
+    text = " ".join((call.result or "").split())
+    if len(text) > _REPLAY_RESULT_CHARS:
+        text = f"{text[: _REPLAY_RESULT_CHARS - 24]} … [truncated]"
+    if call.ok is False:
+        text = f"FAILED: {text}"
+    return {"role": "tool", "tool_call_id": f"call_{call.id}", "content": text or "ok"}
 
 
 @dataclass(slots=True)
@@ -1403,11 +1472,17 @@ class Session:
         messages = self.store.list_messages(
             self.session_id, limit=_HISTORY_LIMIT, roles=("user", "assistant")
         )
-        history: list[ChatMessage] = [
-            {"role": message.role, "content": message.replay}
-            for message in messages
-            if message.replay
-        ]
+        calls_by_turn = self._recent_tool_calls()
+        history: list[ChatMessage] = []
+        for message in messages:
+            text = message.replay
+            if not text:
+                continue
+            calls = calls_by_turn.get(message.turn) if message.role == "assistant" else None
+            if calls:
+                history.extend(_replay_turn(text, calls))
+                continue
+            history.append({"role": message.role, "content": text})
         if self._rolled_back:
             self._rolled_back = False
             return history
@@ -1416,6 +1491,28 @@ class Session:
         if history and history[-1]["role"] == "user":
             history.pop()
         return history
+
+    def _recent_tool_calls(self) -> dict[int, list[Any]]:
+        """The tool calls of the turns recent enough to replay in full, by turn.
+
+        Eligibility is "within the last ``_REPLAY_TURNS``", which is monotonic: a
+        turn is replayed while it is recent and then keeps its prose form for
+        good. A budget that moved the boundary back and forth would rewrite the
+        middle of the history on later turns, and the provider's cache is matched
+        on prefixes — so the change would land exactly where it costs most.
+        """
+        if self.store is None:
+            return {}
+        record = self.store.get_session(self.session_id)
+        newest = record.turn_seq if record is not None else 0
+        if newest <= 0:
+            return {}
+        oldest = newest - _REPLAY_TURNS + 1
+        grouped: dict[int, list[Any]] = {}
+        for call in self.store.list_tool_calls(self.session_id):
+            if call.turn is not None and call.turn >= oldest:
+                grouped.setdefault(call.turn, []).append(call)
+        return grouped
 
     async def _speak_chunk(self, chunk: Chunk) -> None:
         """Forward a completed sentence to text-to-speech immediately."""

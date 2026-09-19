@@ -23,6 +23,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A recent turn is replayed to the model as it happened, not as a summary of
+  itself.** On later turns every tool call used to arrive as one line of prose
+  keeping 320 characters of its outcome, while the stored result holds up to four
+  thousand — so a turn could read a file and the next turn could not remember what
+  it said, and read it again. The two most recent turns now replay as the
+  exchanges that produced them: the call, its result, then the answer, with a
+  failed call still saying so. Older turns keep the summary, which names the tool
+  and its target, and a result too large to replay whole says where it was cut.
+  An existing database gains what it needs on open.
+
 - **The agent thinks harder before it acts: reasoning effort is now `high`, and a
   single response may run to 32,768 tokens.** The defaults were `low` and 4,096,
   and that pair is the largest single reason a Surtitle turn looked less capable

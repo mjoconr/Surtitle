@@ -73,7 +73,12 @@ CREATE TABLE IF NOT EXISTS sessions (
     last_end_reason TEXT,
     last_end_detail TEXT,
     last_end_steps  INTEGER,
-    last_end_at     REAL
+    last_end_at     REAL,
+    -- Counts turns in this conversation. Every message and tool call of a turn
+    -- carries it, which is what lets the model be shown a turn as it actually
+    -- happened — the call, its result, then the answer — instead of a summary of
+    -- it. See `Session._build_history`.
+    turn_seq        INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id, updated_at DESC);
@@ -94,6 +99,8 @@ CREATE TABLE IF NOT EXISTS messages (
     -- fifty times the cost. Written once, the shortened form replays identically
     -- from then on, and the user's own transcript keeps the full text.
     model_content TEXT,
+    -- Which turn of the conversation wrote this row. See `sessions.turn_seq`.
+    turn        INTEGER,
     created_at  REAL NOT NULL
 );
 
@@ -106,6 +113,8 @@ CREATE TABLE IF NOT EXISTS tool_calls (
     name          TEXT NOT NULL,
     arguments     TEXT NOT NULL,
     result        TEXT,
+    -- Which turn made this call. See `sessions.turn_seq`.
+    turn          INTEGER,
     ok            INTEGER,
     approved      INTEGER,
     duration_ms   INTEGER,
@@ -178,6 +187,8 @@ class Session:
     last_end_detail: str | None = None
     last_end_steps: int | None = None
     last_end_at: float | None = None
+    # How many turns this conversation has had. See `start_turn`.
+    turn_seq: int = 0
 
     @property
     def archived(self) -> bool:
@@ -214,6 +225,9 @@ class Message:
     # The model-facing form, when ageing has shortened it. `content` is what the
     # user sees and is never rewritten.
     model_content: str | None = None
+    # Which turn wrote this row: one message per role per turn, plus the reasoning
+    # rows, which is what makes a turn replayable as it happened.
+    turn: int | None = None
 
     @property
     def replay(self) -> str:
@@ -245,6 +259,9 @@ class ToolCallRecord:
     approved: bool | None
     duration_ms: int | None
     created_at: float
+    # Which turn made this call, so its exchange can be replayed with the answer
+    # it belongs to rather than as a line in a summary.
+    turn: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -258,6 +275,7 @@ class ToolCallRecord:
             "approved": self.approved,
             "duration_ms": self.duration_ms,
             "created_at": self.created_at,
+            "turn": self.turn,
         }
 
 
@@ -322,8 +340,10 @@ class Store:
                 "last_end_detail": "TEXT",
                 "last_end_steps": "INTEGER",
                 "last_end_at": "REAL",
+                "turn_seq": "INTEGER NOT NULL DEFAULT 0",
             },
-            "messages": {"model_content": "TEXT"},
+            "messages": {"model_content": "TEXT", "turn": "INTEGER"},
+            "tool_calls": {"turn": "INTEGER"},
         }
         for table, columns in additions.items():
             existing = {
@@ -604,20 +624,28 @@ class Store:
             rows = self._conn.execute(sql, (project_id, limit)).fetchall()
         return [self._row_to_session(r) for r in rows]
 
-    def start_turn(self, session_id: str) -> None:
-        """Clear the previous turn's ending, now that a new one is under way.
+    def start_turn(self, session_id: str) -> int:
+        """Begin a turn: clear the previous ending, and count this one.
 
         Kept on the session row rather than appended to, because the only
-        question it answers is "why does this conversation look stopped *now*".
-        A stale reason left in place during the next turn would answer it with
-        the wrong turn's ending.
+        question the ending answers is "why does this conversation look stopped
+        *now*". A stale reason left in place during the next turn would answer it
+        with the wrong turn's ending.
+
+        The count is what every row written during the turn is stamped with, so a
+        turn can be replayed as it happened. Returns the new turn's number.
         """
         with self._lock, self._conn:
             self._conn.execute(
                 "UPDATE sessions SET last_end_reason = NULL, last_end_detail = NULL,"
-                " last_end_steps = NULL, last_end_at = NULL WHERE id = ?",
+                " last_end_steps = NULL, last_end_at = NULL,"
+                " turn_seq = COALESCE(turn_seq, 0) + 1 WHERE id = ?",
                 (session_id,),
             )
+            row = self._conn.execute(
+                "SELECT turn_seq FROM sessions WHERE id = ?", (session_id,)
+            ).fetchone()
+        return int(row["turn_seq"]) if row is not None and row["turn_seq"] else 0
 
     def record_turn_end(
         self, session_id: str, *, reason: str, detail: str = "", steps: int = 0
@@ -718,6 +746,7 @@ class Store:
             last_end_detail=row["last_end_detail"] if "last_end_detail" in keys else None,
             last_end_steps=row["last_end_steps"] if "last_end_steps" in keys else None,
             last_end_at=row["last_end_at"] if "last_end_at" in keys else None,
+            turn_seq=(row["turn_seq"] if "turn_seq" in keys else 0) or 0,
         )
 
     # --- messages --------------------------------------------------------
@@ -726,10 +755,14 @@ class Store:
     ) -> Message:
         now = time.time()
         with self._lock, self._conn:
+            # The turn is read from the session row rather than passed in, so no
+            # caller can forget it — a message that cannot say which turn wrote it
+            # is a message the replay has to guess about.
+            turn = self._current_turn(session_id)
             cursor = self._conn.execute(
-                "INSERT INTO messages (session_id, role, content, spoken, created_at)"
-                " VALUES (?, ?, ?, ?, ?)",
-                (session_id, role, content, spoken, now),
+                "INSERT INTO messages (session_id, role, content, spoken, created_at, turn)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (session_id, role, content, spoken, now, turn),
             )
             self._conn.execute("UPDATE sessions SET updated_at = ? WHERE id = ?", (now, session_id))
             message_id = int(cursor.lastrowid or 0)
@@ -741,7 +774,17 @@ class Store:
             content=content,
             spoken=spoken,
             created_at=now,
+            turn=turn,
         )
+
+    def _current_turn(self, session_id: str) -> int | None:
+        """The turn in progress for a session, or ``None`` before the first one."""
+        row = self._conn.execute(
+            "SELECT turn_seq FROM sessions WHERE id = ?", (session_id,)
+        ).fetchone()
+        if row is None or not row["turn_seq"]:
+            return None
+        return int(row["turn_seq"])
 
     def list_messages(
         self,
@@ -790,6 +833,7 @@ class Store:
                 # *values*, so `"model_content" in r` is False on a row that has
                 # the column — which silently made every message look unaged.
                 model_content=r["model_content"] if "model_content" in r.keys() else None,  # noqa: SIM118
+                turn=r["turn"] if "turn" in r.keys() else None,  # noqa: SIM118
             )
             for r in rows
         ]
@@ -822,11 +866,12 @@ class Store:
     ) -> ToolCallRecord:
         now = time.time()
         with self._lock, self._conn:
+            turn = self._current_turn(session_id)
             cursor = self._conn.execute(
                 "INSERT INTO tool_calls"
                 " (session_id, step, name, arguments, result, ok, approved,"
-                " duration_ms, created_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " duration_ms, created_at, turn)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     session_id,
                     step,
@@ -837,6 +882,7 @@ class Store:
                     None if approved is None else int(approved),
                     duration_ms,
                     now,
+                    turn,
                 ),
             )
             record_id = int(cursor.lastrowid or 0)
@@ -851,6 +897,7 @@ class Store:
             approved=approved,
             duration_ms=duration_ms,
             created_at=now,
+            turn=turn,
         )
 
     def list_tool_calls(self, session_id: str, *, limit: int = 200) -> list[ToolCallRecord]:
@@ -886,6 +933,7 @@ class Store:
                     approved=None if row["approved"] is None else bool(row["approved"]),
                     duration_ms=row["duration_ms"],
                     created_at=row["created_at"],
+                    turn=row["turn"] if "turn" in row.keys() else None,  # noqa: SIM118
                 )
             )
         return records

@@ -13,6 +13,7 @@ the wire contract the browser needs to group any of it.
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 from typing import Any
 
@@ -1005,6 +1006,179 @@ class TestTheTranscriptWindowKeepsTheEnd:
         kept = store.list_messages(record.id, limit=5, roles=("user", "assistant"))
 
         assert [m.content for m in kept] == ["the question"]
+
+
+class TestTheReplayedTurn:
+    """A recent turn is replayed as it happened, not as a summary of itself.
+
+    The prose work log keeps 320 characters of each outcome; the stored result
+    holds up to 4,000. A model told only `read_file(x) -> 320 characters of it`
+    reads the file again on the next turn, which is the amnesia this exists to
+    stop: the record was there, and the reply was not.
+    """
+
+    @staticmethod
+    def _session(store, record, root):
+        async def noop(*_args, **_kwargs):
+            return None
+
+        return Session(
+            session_id=record.id,
+            project_id=record.project_id,
+            root=root,
+            settings=Settings(DEEPSEEK_API_KEY="k", SURTITLE_HOME=str(root)),
+            store=store,
+            deepseek=None,
+            send=noop,
+            send_audio=noop,
+        )
+
+    def test_a_recent_turn_replays_its_calls_and_their_results(self, tmp_path):
+        store = Store(tmp_path / "db.sqlite")
+        project = store.create_project("P", tmp_path)
+        record = store.create_session(project.id)
+        store.start_turn(record.id)
+        store.add_message(record.id, "user", "what is the batch size?")
+        store.add_tool_call(
+            record.id,
+            "read_file",
+            {"path": "config.ini"},
+            result="batch_size = 250; " * 40,
+            ok=True,
+            step=1,
+        )
+        store.add_message(
+            record.id,
+            "assistant",
+            "The batch size is 250.\n\n[work this turn]\n- read_file(config.ini) -> batch_size = 250",
+        )
+        session = self._session(store, record, tmp_path)
+
+        history = session._build_history()
+
+        assert [message["role"] for message in history] == [
+            "user",
+            "assistant",
+            "tool",
+            "assistant",
+        ]
+        call = history[1]["tool_calls"][0]
+        assert call["function"]["name"] == "read_file"
+        assert json.loads(call["function"]["arguments"]) == {"path": "config.ini"}
+        assert history[2]["tool_call_id"] == call["id"], "the result must match its call"
+        assert history[2]["content"].startswith("batch_size = 250")
+        assert len(history[2]["content"]) > 320, "the stored result, not the log's line about it"
+        assert history[3]["content"] == "The batch size is 250.", "the answer stands alone"
+        assert "[work this turn]" not in json.dumps(history), (
+            "the summary is replaced by the thing it summarised, not kept beside it"
+        )
+
+    def test_a_turn_past_the_window_keeps_its_prose_log(self, tmp_path):
+        """Fidelity is spent on the recent turns; the rest keep the summary."""
+        store = Store(tmp_path / "db.sqlite")
+        project = store.create_project("P", tmp_path)
+        record = store.create_session(project.id)
+        for turn in range(1, 6):
+            store.start_turn(record.id)
+            store.add_message(record.id, "user", f"question {turn}")
+            store.add_tool_call(
+                record.id, "read_file", {"path": f"f{turn}.ini"}, result="r" * 400, ok=True
+            )
+            store.add_message(
+                record.id,
+                "assistant",
+                f"answer {turn}\n\n[work this turn]\n- read_file(f{turn}.ini) -> rrr",
+            )
+        session = self._session(store, record, tmp_path)
+
+        history = session._build_history()
+
+        old = next(m for m in history if (m.get("content") or "").startswith("answer 1"))
+        assert "[work this turn]" in old["content"], "an old turn keeps the prose log"
+        assert len([m for m in history if m["role"] == "tool"]) == 2, (
+            "only the two most recent turns replay structurally"
+        )
+
+    def test_a_failed_call_says_so_in_the_replay(self, tmp_path):
+        """The log line said FAILED; the replayed result has to as well."""
+        store = Store(tmp_path / "db.sqlite")
+        project = store.create_project("P", tmp_path)
+        record = store.create_session(project.id)
+        store.start_turn(record.id)
+        store.add_message(record.id, "user", "run it")
+        store.add_tool_call(record.id, "run_shell", {"command": "false"}, result="exit 1", ok=False)
+        store.add_message(
+            record.id, "assistant", "It failed.\n\n[work this turn]\n- run_shell(false) -> FAILED"
+        )
+        session = self._session(store, record, tmp_path)
+
+        history = session._build_history()
+
+        tool = next(m for m in history if m["role"] == "tool")
+        assert tool["content"].startswith("FAILED:")
+
+    def test_a_turn_stamps_every_row_it_writes(self, tmp_path):
+        """Without this the replay has to guess which call belongs to which answer."""
+        store = Store(tmp_path / "db.sqlite")
+        project = store.create_project("P", tmp_path)
+        record = store.create_session(project.id)
+
+        assert store.start_turn(record.id) == 1
+        store.add_message(record.id, "user", "one")
+        store.add_tool_call(record.id, "list_dir", {"path": "."})
+        assert store.start_turn(record.id) == 2
+        store.add_message(record.id, "user", "two")
+
+        assert [m.turn for m in store.list_messages(record.id)] == [1, 2]
+        assert [c.turn for c in store.list_tool_calls(record.id)] == [1]
+
+    def test_an_older_database_gains_the_turn_columns(self, tmp_path):
+        """A database written before the columns existed must still open.
+
+        The tables are built here in the shape they had before the turn columns,
+        which is the only way to exercise the upgrade rather than the fresh schema:
+        ``CREATE TABLE IF NOT EXISTS`` does nothing to a table that already exists,
+        so a column added to the schema alone would never reach an install.
+        """
+        path = tmp_path / "db.sqlite"
+        conn = sqlite3.connect(path)
+        conn.executescript(
+            """
+            CREATE TABLE projects (id TEXT PRIMARY KEY, name TEXT NOT NULL, root TEXT NOT NULL,
+                created_at REAL NOT NULL, last_opened_at REAL NOT NULL,
+                auto_approved TEXT NOT NULL DEFAULT '[]');
+            CREATE TABLE sessions (id TEXT PRIMARY KEY, project_id TEXT NOT NULL,
+                title TEXT NOT NULL DEFAULT 'New conversation', created_at REAL NOT NULL,
+                updated_at REAL NOT NULL, archived_at REAL, last_end_reason TEXT,
+                last_end_detail TEXT, last_end_steps INTEGER, last_end_at REAL);
+            CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL,
+                role TEXT NOT NULL, content TEXT NOT NULL, spoken TEXT, created_at REAL NOT NULL);
+            CREATE TABLE tool_calls (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL,
+                step INTEGER NOT NULL DEFAULT 0, name TEXT NOT NULL, arguments TEXT NOT NULL,
+                result TEXT, ok INTEGER, approved INTEGER, duration_ms INTEGER,
+                created_at REAL NOT NULL);
+            """
+        )
+        conn.execute(
+            "INSERT INTO projects (id, name, root, created_at, last_opened_at)"
+            " VALUES ('p1', 'P', ?, 1.0, 1.0)",
+            (str(tmp_path),),
+        )
+        conn.execute(
+            "INSERT INTO sessions (id, project_id, title, created_at, updated_at)"
+            " VALUES ('s1', 'p1', 'Old conversation', 1.0, 1.0)"
+        )
+        conn.commit()
+        conn.close()
+
+        store = Store(path)  # migrates on open
+        assert store.start_turn("s1") == 1
+        store.add_message("s1", "user", "one")
+        store.add_tool_call("s1", "list_dir", {"path": "."})
+
+        assert store.list_messages("s1")[-1].turn == 1
+        assert store.list_tool_calls("s1")[-1].turn == 1
+        assert store.get_session("s1").turn_seq == 1
 
 
 class TestTheSessionEndpoint:
