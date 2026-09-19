@@ -108,6 +108,10 @@ class ToolContext:
     # Provided so tools can consult durable state (past conversations). Optional
     # because most tools are pure filesystem and need nothing but the root.
     store: Any = None
+    # Supplied by the agent loop so the `subagent` tool can run one, and left None
+    # everywhere else — a tool must not be able to start an agent, only the loop
+    # that owns the conversation can.
+    subagent: Any = None
 
 
 @dataclass(slots=True)

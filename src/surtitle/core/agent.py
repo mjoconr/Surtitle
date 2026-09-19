@@ -37,7 +37,7 @@ from surtitle.llm.deepseek import ChatMessage, DeepSeekClient, DeepSeekError, To
 from surtitle.store.db import REASONING_ROLE, Store
 from surtitle.tools import environment
 from surtitle.tools.fs_tools import ToolContext, ToolResult
-from surtitle.tools.registry import TODO_TOOL, ToolRegistry, default_registry
+from surtitle.tools.registry import SUBAGENT_TOOL, TODO_TOOL, ToolRegistry, default_registry
 
 __all__ = ["AgentLoop", "ApprovalBroker", "RepeatCallGuard", "build_system_prompt"]
 
@@ -83,6 +83,32 @@ _REASONING_STORED_CHARS = 20000
 # either a finish or a prompt to continue, instead of watching it go quiet.
 PROGRESS_STEPS = (5, 15, 40, 90)
 NEAR_BUDGET_FRACTION = 0.9
+
+# A sub-agent's step budget. Smaller than the parent's on purpose: a delegation
+# that needs two hundred steps is not a delegation, it is the task, and it should
+# have been done as one.
+_SUBAGENT_MAX_STEPS = 24
+
+
+def _label_from(task: str, limit: int = 60) -> str:
+    """A few words naming a piece of delegated work, when the model gave no label."""
+    words = " ".join(task.split())
+    return words if len(words) <= limit else f"{words[: limit - 1]}…"
+
+
+def _under_subagent(event: Event, label: str, offset: int) -> Event:
+    """A child's event, marked with whose work it is and numbered after the parent.
+
+    The conversation shows one call and one result; the steps in between happened
+    in the child. Marking them is the difference between "something is happening
+    under this turn" and steps that appear to belong to the parent and make no
+    sense beside it.
+    """
+    data = {**event.data, "subagent": label}
+    if isinstance(data.get("step"), int):
+        data["step"] = offset + data["step"]
+    return Event(kind=event.kind, data=data)
+
 
 # Asked for when a turn's model round produced no text at all, after the turn has
 # already done work. Phrased as a last round rather than a summary so a model that
@@ -300,6 +326,16 @@ question, the answer is the result, not the intention to find it.
 
 Do not narrate this as a plan and then skip it. Two or three tool calls that
 establish the facts beat ten that circle around them.
+
+**Hand out reading that does not have to come back to you.** When answering needs
+several files read, or the question has parts that do not depend on each other,
+give that reading to a sub-agent: it works in its own context and returns what it
+found, so this conversation keeps the answer rather than the pages it came from.
+Say what you are having looked into before you hand it over — the user hears one
+line from you and then the answer — and make several calls in the same round when
+the parts are independent, because they run at the same time. Keep for yourself
+what the sub-agent cannot do: it cannot write, run a command, or ask the user
+anything, so work needing those is yours.
 
 **Write the plan down when the work is bigger than a couple of steps.** The user
 can see your plan while you work, which is the difference between watching
@@ -721,6 +757,9 @@ class AgentLoop:
         # Side-channel emitter for events that are informative rather than
         # control-flow (thinking, usage). Set by the session.
         self._emitter: Callable[[Event], Awaitable[None]] | None = None
+        # The round this loop is on, so a sub-agent's steps can be numbered after
+        # the parent's rather than restarting from one in the middle of a turn.
+        self._step: int = 0
 
     # --- event plumbing --------------------------------------------------
     def _event(self, kind: EventKind, **data: Any) -> Event:
@@ -814,6 +853,7 @@ class AgentLoop:
                     return
 
                 state.step += 1
+                self._step = state.step
                 yield self._event(
                     EventKind.STATE, state=SessionState.THINKING.value, step=state.step
                 )
@@ -1128,6 +1168,46 @@ class AgentLoop:
         on_chunk: Callable[[Chunk], Awaitable[None]] | None,
     ) -> AsyncIterator[Event]:
         """Execute tool calls, honouring the approval gate."""
+        # Delegations start together and are awaited in turn, so the agent gets
+        # several investigations for one round's latency — the difference between
+        # splitting a survey four ways and doing it four times over.
+        #
+        # It is a prefetch rather than a rewrite of this loop on purpose: each call
+        # is still announced, stored and answered in the order the model made them,
+        # so nothing about the event stream or the transcript changes. Only the
+        # waiting is shared. Sub-agents are approval-free and read-only by
+        # construction, which is what makes starting them early safe.
+        started_early: dict[str, asyncio.Task[ToolResult]] = {}
+        for call in calls:
+            if call.name != SUBAGENT_TOOL:
+                continue
+            arguments, parse_error = call.parsed_arguments()
+            if parse_error is not None or not isinstance(arguments, dict):
+                continue
+            started_early[self._call_id(call)] = asyncio.create_task(
+                self._spawn_subagent(
+                    str(arguments.get("task") or ""), str(arguments.get("label") or "")
+                ),
+                name=f"subagent-{self._call_id(call)}",
+            )
+        try:
+            async for event in self._run_tool_calls(calls, state, on_chunk, started_early):
+                yield event
+        finally:
+            # A turn can end before every prefetched child is reached — a stop, or
+            # a repeated call refused ahead of it. Nothing may outlive the turn that
+            # started it.
+            for task in started_early.values():
+                if not task.done():
+                    task.cancel()
+
+    async def _run_tool_calls(
+        self,
+        calls: list[ToolCallDelta],
+        state: _TurnState,
+        on_chunk: Callable[[Chunk], Awaitable[None]] | None,
+        started_early: dict[str, asyncio.Task[ToolResult]],
+    ) -> AsyncIterator[Event]:
         for call in calls:
             if self._cancelled.is_set():
                 return
@@ -1254,16 +1334,25 @@ class AgentLoop:
             yield self._event(EventKind.STATE, state=SessionState.TOOL.value, tool=call.name)
 
             started = time.monotonic()
-            result = await self.registry.dispatch(
-                call.name,
-                ToolContext(
-                    root=self.root,
-                    session_id=self.session_id,
-                    project_id=self.project_id,
-                    store=self.store,
-                ),
-                arguments,
-            )
+            early = started_early.pop(self._call_id(call), None)
+            if early is not None:
+                # Already running, started with the other delegations in this round.
+                result = await early
+            else:
+                result = await self.registry.dispatch(
+                    call.name,
+                    ToolContext(
+                        root=self.root,
+                        session_id=self.session_id,
+                        project_id=self.project_id,
+                        store=self.store,
+                        # The only place an agent can be started from: the loop owns
+                        # the conversation, so a tool reaches a sub-agent through it
+                        # or not at all.
+                        subagent=self._spawn_subagent,
+                    ),
+                    arguments,
+                )
             duration_ms = int((time.monotonic() - started) * 1000)
 
             if self.store and self.session_id:
@@ -1338,6 +1427,113 @@ class AgentLoop:
         if not self.registry.requires_approval(tool_name, arguments):
             return False
         return not self.approvals.is_trusted(tool_name)
+
+    async def _spawn_subagent(self, task: str, label: str) -> ToolResult:
+        """Run one delegated investigation and return what it found.
+
+        The child is a second :class:`AgentLoop` with the same project, the same
+        model and none of the conversation: no history, no store, and only the
+        tools that read. Its work is not spoken — that is the point of delegating
+        it — so its steps are re-emitted on the parent's side channel, where the
+        session narrates progress once and the process view shows the work
+        happening underneath this turn.
+        """
+        from surtitle.core.subagent import SubagentOutcome, build_subagent_prompt
+
+        registry = self.registry.read_only()
+        if not registry.names():
+            return ToolResult(
+                ok=False,
+                error="There is nothing a sub-agent could use here; do it yourself.",
+            )
+
+        child = AgentLoop(
+            self.settings.model_copy(update={"max_steps": _SUBAGENT_MAX_STEPS}),
+            root=self.root,
+            # No session id: nothing a sub-agent does is stored. It is work, not a
+            # conversation, and a transcript that remembered it would be a
+            # transcript of the wrong conversation.
+            session_id="",
+            client=await self._client_or_create(),
+            registry=registry,
+            approvals=ApprovalBroker(),
+            system_prompt=build_subagent_prompt(self.root.name),
+            # A fresh guard, deliberately: the parent having read a file is no
+            # reason for the child to be refused the same file.
+            repeat_guard=RepeatCallGuard(),
+        )
+
+        outcome = SubagentOutcome()
+        files: list[str] = []
+        answer_parts: list[str] = []
+        try:
+            async for event in child.run([], task):
+                kind = event.kind
+                if kind is EventKind.STATE:
+                    step = int(event.data.get("step") or 0)
+                    outcome.steps = max(outcome.steps, step)
+                    await self._emit(
+                        Event(
+                            kind=EventKind.STATE,
+                            data={
+                                # The child's own state, so a child running a tool
+                                # reads as work rather than as more thinking.
+                                "state": str(
+                                    event.data.get("state") or SessionState.THINKING.value
+                                ),
+                                # Numbered after the parent's round: a parent blocked
+                                # here takes no steps of its own, so without the
+                                # offset a long investigation would be minutes of
+                                # silence — the failure this narration exists to stop.
+                                "step": self._step + outcome.steps,
+                                # Only what the model actually named. The session
+                                # says "looking into that now" when it named
+                                # nothing, which reads better than a truncated task.
+                                "subagent": label,
+                            },
+                        )
+                    )
+                elif kind is EventKind.DONE:
+                    outcome.reason = str(event.data.get("reason") or "")
+                elif kind is EventKind.TOOL_CALL:
+                    name = str(event.data.get("name") or "")
+                    path = str((event.data.get("arguments") or {}).get("path") or "")
+                    if name == "read_file" and path:
+                        files.append(path)
+                    await self._emit(_under_subagent(event, label, self._step))
+                elif kind is EventKind.TOOL_RESULT:
+                    await self._emit(_under_subagent(event, label, self._step))
+                elif kind in (EventKind.SAY, EventKind.AGENT_TEXT):
+                    answer_parts.append(str(event.data.get("text") or ""))
+        except asyncio.CancelledError:
+            # Stopping the parent stops what it started. The reason is recorded so
+            # the parent's tool result says the work was interrupted rather than
+            # reporting an empty answer as a finding.
+            outcome.reason = "cancelled"
+            raise
+        except Exception as exc:
+            log.exception("sub-agent failed")
+            return ToolResult(ok=False, error=f"The sub-agent failed: {type(exc).__name__}: {exc}")
+
+        outcome.answer = "".join(answer_parts).strip() or child.partial_text.strip()
+        outcome.files = sorted(dict.fromkeys(files))[:20]
+        if not outcome.answer:
+            return ToolResult(
+                ok=False,
+                error=(
+                    "The sub-agent finished without an answer"
+                    + (f" (it stopped: {outcome.reason})" if outcome.reason else "")
+                    + ". Do that part yourself, or ask it again with a narrower task."
+                ),
+            )
+        return ToolResult(
+            ok=True,
+            data=outcome.as_data(),
+            display=(
+                f"sub-agent: {label or _label_from(task)} — {outcome.steps} step(s), "
+                f"{len(outcome.files)} file(s)"
+            ),
+        )
 
     @staticmethod
     def _call_id(call: ToolCallDelta) -> str:

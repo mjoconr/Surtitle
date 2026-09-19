@@ -210,6 +210,12 @@ class Session:
     _drainer: asyncio.Task[None] | None = None
     _closed: bool = False
     _state: _SessionState = field(default_factory=_SessionState)
+    # Per-turn narration state. Fields rather than locals of `_run_turn` because a
+    # sub-agent's progress arrives on the side channel, from inside a tool call —
+    # see `_narrate_step`.
+    _announced_steps: set[int] = field(default_factory=set)
+    _spoke_this_turn: bool = False
+    _subagent_announced: bool = False
     _audio_seconds: float = 0.0
     # Diagnostics: how much audio this listening session actually delivered, and
     # how many times the microphone has been opened.
@@ -857,6 +863,36 @@ class Session:
                 Chunk(ChunkKind.SAY, f"Still working on this, about {step} steps in.", final=False)
             )
 
+    async def _narrate_step(self, step: int, *, subagent: str = "") -> None:
+        """Say something when a working turn would otherwise be silent.
+
+        Two callers, because a turn goes quiet in two ways: the model is working
+        through steps of its own, or it has handed the work to a sub-agent and is
+        blocked waiting for it. The second advances none of the parent's steps, so
+        without this a three-minute investigation would be three minutes of
+        nothing — which is the failure this narration exists to prevent.
+
+        The rule is the same for both: only while the agent has not said anything
+        of its own. A turn that opened with "let me have that looked into" has
+        already told the user what is happening, and saying it again is the noise
+        this is meant to avoid.
+        """
+        if self.tts is None or self._spoke_this_turn:
+            return
+        if subagent and not self._subagent_announced:
+            self._subagent_announced = True
+            line = f"Looking into {subagent} now."
+            with contextlib.suppress(Exception):
+                await self._speak_chunk(Chunk(ChunkKind.SAY, line, final=False))
+            return
+        due = next(
+            (n for n in PROGRESS_STEPS if n <= step and n not in self._announced_steps), None
+        )
+        if due is None:
+            return
+        self._announced_steps.add(due)
+        await self._speak_progress(step)
+
     async def _speak_budget(self, step: int, budget: int) -> None:
         """Warn, once, that the step budget for this turn is nearly spent.
 
@@ -919,16 +955,20 @@ class Session:
         # Progress narration: a long tool-using turn is otherwise silent, and
         # silence reads as "it stopped". Announced at increasing step counts, and
         # only while the agent has not said anything of its own.
-        announced: set[int] = set()
-        spoke = False
+        #
+        # State rather than locals, because a sub-agent's steps arrive on the side
+        # channel while the parent is blocked inside a tool call — see
+        # `_narrate_step`, which is the one place that decides to speak.
+        self._announced_steps = set()
+        self._spoke_this_turn = False
+        self._subagent_announced = False
         # Set once the near-budget warning has been spoken, so it is said once per
         # turn rather than at every step past the threshold.
         warned_budget = False
 
         async def on_chunk(chunk: Chunk) -> None:
-            nonlocal spoke
             if chunk.kind is ChunkKind.SAY and chunk.text.strip():
-                spoke = True
+                self._spoke_this_turn = True
             await self._speak_chunk(chunk)
 
         try:
@@ -949,15 +989,9 @@ class Session:
                         # nothing distinguished "done" from "gave up", so the only way
                         # to find out was to ask again.
                         await self._speak_problem(event.data)
-                elif event.kind is EventKind.STATE and not spoke:
+                elif event.kind is EventKind.STATE and not self._spoke_this_turn:
                     current = int(event.data.get("step") or 0)
-                    due = next(
-                        (n for n in _PROGRESS_STEPS if n <= current and n not in announced),
-                        None,
-                    )
-                    if due is not None:
-                        announced.add(due)
-                        await self._speak_progress(current)
+                    await self._narrate_step(current)
                     # Approaching the budget is the one moment where going quiet is
                     # worst: the turn is about to stop with work outstanding, and
                     # the user has no way to know whether to wait or to speak. Say
@@ -1391,7 +1425,13 @@ class Session:
         await self._outbox.put(event)
 
     async def _emit_side_channel(self, event: Event) -> None:
-        """Receive thinking and usage events that are not part of the turn stream."""
+        """Receive thinking, usage and sub-agent events that are not part of the turn stream."""
+        if event.kind is EventKind.STATE and event.data.get("subagent") is not None:
+            # A parent blocked on a sub-agent produces no steps of its own, so this
+            # is the only place that can break the silence while a delegation runs.
+            await self._narrate_step(
+                int(event.data.get("step") or 0), subagent=str(event.data.get("subagent") or "")
+            )
         self._count(event)
         self.events += 1
         event.seq = self.events

@@ -21,6 +21,7 @@ from surtitle.tools.fs_tools import ToolContext, ToolResult
 from surtitle.vcs.guide import DETAIL_LEVELS, detail_menu
 
 __all__ = [
+    "SUBAGENT_TOOL",
     "TODO_TOOL",
     "Tool",
     "ToolRegistry",
@@ -502,6 +503,29 @@ class ToolRegistry:
     def names(self) -> list[str]:
         return sorted(self._tools)
 
+    def read_only(self) -> ToolRegistry:
+        """The tools that can look but not change: no side effects, no approvals.
+
+        Taken from this registry's own policy rather than from a list of names, so
+        a tool that later gains a way to write drops out of a sub-agent's reach
+        without anyone having to remember to remove it here.
+
+        A tool that needs the conversation's own state is excluded as well: a
+        sub-agent has no conversation — nothing it did is stored — so a plan it
+        tried to write would have nowhere to go, and a search of past
+        conversations would be a search of somebody else's. So is the tool that
+        starts a sub-agent: one level of delegation, not a tree.
+        """
+        return ToolRegistry(
+            [
+                tool
+                for tool in self._tools.values()
+                if not tool.mutating
+                and tool.approval == "never"
+                and tool.name not in _NOT_FOR_A_SUBAGENT
+            ]
+        )
+
     def to_openai_tools(self) -> list[dict[str, Any]]:
         """All tool schemas, for the ``tools`` field of a chat completion."""
         return [tool.to_openai_schema() for tool in self._tools.values()]
@@ -575,6 +599,13 @@ class ToolRegistry:
 
 
 TODO_TOOL = "todo_write"
+SUBAGENT_TOOL = "subagent"
+
+# Read-only tools that are still not for a sub-agent. Two need the conversation
+# they belong to — `todo_write` writes its plan, `search_history` reads other
+# conversations, and a sub-agent has neither — and the third starts another
+# sub-agent, which is how a delegation becomes a fork bomb.
+_NOT_FOR_A_SUBAGENT = frozenset({TODO_TOOL, "search_history", SUBAGENT_TOOL})
 
 
 def _todo_write_handler(ctx: ToolContext, todos: list[dict[str, Any]] | None = None) -> ToolResult:
@@ -664,6 +695,60 @@ _TODO_WRITE = Tool(
 )
 
 
+async def _subagent_handler(
+    ctx: ToolContext, task: str = "", label: str = "", **_ignored: Any
+) -> ToolResult:
+    """Hand one part of the work to an agent that only reads.
+
+    Answering a question is mostly reading, and reading is what fills a
+    conversation with detail that has already been used and will never be needed
+    again. A sub-agent does that reading in its own context and returns the answer,
+    so the conversation keeps the answer and loses the archaeology.
+    """
+    if ctx.subagent is None:
+        return ToolResult(
+            ok=False,
+            error="Sub-agents are not available in this session; do this part yourself.",
+        )
+    if not str(task or "").strip():
+        return ToolResult(ok=False, error="Give the sub-agent the task to carry out.")
+    return await ctx.subagent(str(task), str(label or ""))
+
+
+_SUBAGENT = Tool(
+    name=SUBAGENT_TOOL,
+    description=(
+        "Hand one self-contained piece of reading to a sub-agent and get back what "
+        "it found. Use it when answering needs several files read, or when there "
+        "are independent questions that can be looked into at once: the reading "
+        "happens in the sub-agent's own context, so it does not fill this "
+        "conversation. The sub-agent can read, list and search, and nothing else — "
+        "it cannot write, run commands, install, or ask the user anything — so work "
+        "needing those is yours. Put everything it needs in the task: it has no "
+        "memory of this conversation and cannot ask you a follow-up question. "
+        "Several calls in one turn run at the same time."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "task": _string(
+                "The whole question, self-contained: what to find out and what to "
+                "report back. Include the file names or areas you already suspect, "
+                "and say what would settle it."
+            ),
+            "label": _string(
+                "A few words naming this part of the work, for the user to hear — "
+                "'the retry configuration'. Short: it is spoken aloud."
+            ),
+        },
+        "required": ["task"],
+    },
+    handler=_subagent_handler,
+    approval="never",
+    summary="Read files in the background",
+)
+
+
 def default_tool_list() -> list[Tool]:
     """Every tool the agent may use."""
     return [
@@ -679,6 +764,7 @@ def default_tool_list() -> list[Tool]:
         _MAKE_CHART,
         _CONVERT_DOCUMENT,
         _TODO_WRITE,
+        _SUBAGENT,
     ]
 
 

@@ -21,6 +21,7 @@ asks about packages the project has not already approved.
 | `list_dir`, `read_file`, `search_files` | never | no |
 | `environment_info`, `search_packages` | never | no |
 | `todo_write` | never | no |
+| `subagent` | never | no |
 | `write_file`, `edit_file` | ask | yes |
 | `run_python`, `run_shell` | ask | yes |
 | `make_pdf`, `make_spreadsheet`, `make_chart` | ask | yes |
@@ -30,6 +31,13 @@ asks about packages the project has not already approved.
 
 `todo_write` writes no file, so it never asks: it records the plan the user watches
 while the agent works. See [The plan](#the-plan).
+
+`subagent` asks for nothing because it cannot do anything: the child it starts gets
+`ToolRegistry.read_only()`, which is this table's `never`/non-mutating rows and
+nothing else, minus the tools that need a conversation to belong to and minus
+itself. A delegated agent that could write would be editing the project while the
+user heard only the parent, so it is powerless by construction rather than by
+instruction. See [Sub-agents](#sub-agents).
 
 ## Confinement
 
@@ -270,6 +278,37 @@ Stored reasoning is the other half of the same picture, and is deliberately *not
 searchable: it is a private brainstorm full of self-corrections and of guesses the
 model declined to act on, and returning one later as "what you did before" would put
 a discarded idea back in front of the model as though it were a finding.
+
+## Sub-agents
+
+`subagent` hands one self-contained piece of reading to a second agent and returns
+what it found. The reason is context: the reading that answers a question is usually
+several times larger than the answer, and in the parent's transcript it would stay
+there for the rest of the conversation. A child spends its own context on it and
+hands back the answer, plus the files it read so the parent can go straight to the
+source.
+
+The child is a second `AgentLoop` with the same project, the same model and none of
+the conversation: no history, no store, and `ToolRegistry.read_only()` for tools —
+the `never`/non-mutating rows of the table above, minus anything that needs a
+conversation (`todo_write`, `search_history`) and minus `subagent` itself, so one
+level of delegation rather than a tree. It also gets a fresh `RepeatCallGuard`: the
+parent having read a file is no reason for the child to be refused the same file.
+
+What the child produces is an answer and a list of files; a child that finishes
+without one is reported to the parent as a failed call, with the reason (`no_answer`,
+`step_limit`, `cancelled`), rather than as an empty finding. Its budget is its own
+and smaller — `_SUBAGENT_MAX_STEPS`, 24 — because a delegation that needs two hundred
+steps is the task, and should have been done as one.
+
+Nothing the child does is stored, so the conversation records one call and one
+result. Its steps are re-emitted on the parent's side channel marked with
+`subagent`, and numbered after the parent's round: the parent is blocked inside a
+tool call while a child runs, so without that offset a long investigation would
+advance no steps at all and the turn would fall silent — the failure the progress
+narration exists to prevent. The session says one line naming what is being looked
+into, and only if the agent has not already spoken; the child is never spoken
+itself, and its reasoning is discarded.
 
 ## Adding a tool
 

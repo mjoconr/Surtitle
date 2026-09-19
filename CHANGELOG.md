@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **The agent can hand a piece of reading to a sub-agent.** Answering a question is
+  mostly reading, and the reading is usually several times larger than the answer —
+  in the conversation it would sit there for the rest of it. `subagent` starts a
+  second agent with the same project and none of the conversation, which works in
+  its own context and returns what it found plus the files it read. The child is
+  read-only by construction: it gets the tools that look and nothing that writes,
+  runs or installs, and it cannot delegate again. It is never spoken — you hear one
+  line naming what is being looked into, then the parent's answer — and its work
+  appears under the turn rather than in the conversation. Independent parts can be
+  handed over in the same round and are looked into at the same time.
+
 ### Fixed
 
 - **There is a macOS build for Intel Macs, and the updater will no longer install
