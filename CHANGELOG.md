@@ -7,6 +7,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-19
+
+### Fixed
+
+- **The agent no longer loses what it found, and does the work again.** Every turn
+  records the work it did under `[work this turn]`, and the agent is instructed to
+  reuse those results — but the line recorded for a command held only its status
+  ("finished in 146 ms") and never its output, so there was nothing to reuse. In one
+  session it checked `import sherpa_onnx`, saw the module was missing, re-ran the
+  same check on the next turn, and then asked the user to confirm a fact it had
+  already established. A result now carries a bounded excerpt of what it printed,
+  and the guard that refuses a repeated call belongs to the conversation rather than
+  to a single turn.
+- **An approval prompt no longer vanishes before it can be answered.** The agent
+  says what it is about to do before doing it, so a request to approve a file edit
+  could arrive while the reply was still being spoken. When the reply finished, that
+  state change cleared the prompt from the screen while the server carried on
+  waiting for an answer — 637 ms after it appeared, in the log this was found in.
+  The prompt now survives the reply ending, and a question still open when the page
+  reloads is asked again.
+- **Reloading the page no longer throws away a running turn.** A reload disconnects
+  before it reconnects, and the disconnect closed the conversation, cancelling
+  whatever the agent was doing — so reloading while it was working lost the work.
+  A conversation with work in flight now waits for the browser to come back, and is
+  closed if it does not.
+- **Changing a setting no longer breaks the conversation you are in.** Saving any
+  preference closed the DeepSeek client and installed a replacement that live
+  conversations could not see, so the next thing said failed with "Cannot send a
+  request, as the client has been closed". Switching the voice engine was enough to
+  trigger it, and every later turn in that conversation failed the same way.
+- **A local turn ends when you finish, not when a timer expires.** Local
+  recognition put a hard 20-second ceiling on an utterance and applied it whether or
+  not anyone was still talking: an explanation was cut off mid-word at 20.16 s and
+  the agent began work on half a problem statement. The timer is now graded by what
+  the transcript looks like — a trailing "and" or "the" earns a longer wait, and
+  anything that cannot be shown to be finished gets part of one — and the ceiling is
+  a backstop that may only close a turn once you have actually paused.
+- **`surtitle doctor` says when it skipped the local voice check.** It reported
+  nothing at all unless a local engine was selected, and a missing line is
+  indistinguishable from a pass: a machine with the `voice-local` extra missing
+  produced a clean report, and that clean report was the reason the real cause went
+  unexamined.
+
+### Added
+
+- **`Longest single spoken turn` is now a setting.** The ceiling that ended local
+  turns was not exposed anywhere, so there was no way to work around it. It is in
+  Settings beside the other turn-detection options, and both take effect without a
+  restart.
+
+### Changed
+
+- **Local turn-taking waits longer before assuming you have finished.** The
+  ceiling moves from 20 seconds to 60, an unfinished-sounding transcript earns part
+  of the extension rather than the bare silence, and the backstop can no longer fire
+  while audio is still arriving. If you use a local engine, the agent will pause
+  longer before answering than it did — that is the intended trade, and
+  `Local end-of-turn silence` tunes it. Turn detection on the hosted engine is
+  unchanged.
+
 ## [0.5.2] - 2026-09-19
 
 ### Fixed
