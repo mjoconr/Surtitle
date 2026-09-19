@@ -17,7 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the selected provider's settings are shown — three model boxes in one section would
   leave you working out which one counts. A key that is missing, refused or rate
   limited is reported with the *provider* named, because with more than one configured
-  "the API rejected the key" sends you to whichever one you happen to think of.
+  "the API rejected the key" sends you to whichever one you happen to think of. Costs
+  are worked out for the model that actually ran: a model on this machine, or one
+  whose rates this build does not know, is reported in tokens with no money figure
+  rather than with DeepSeek's prices against it.
 
 - **Settings are organised by what you are choosing, not by who provides it.** The
   sections are now the Model, Speech to text, Text to speech and Search, and each

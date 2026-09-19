@@ -208,3 +208,41 @@ class TestTheRequestThatGoesOut:
         assert "OpenRouter" in message
         assert "OPENROUTER_API_KEY" in message
         assert "no such key" in message, "the provider's own words are kept"
+
+
+class TestUsageIsPricedForTheModelThatRan:
+    """The cost shown is for the model that actually answered.
+
+    It was priced from `deepseek_model` whatever the provider, so a model running on
+    this machine — which costs nothing — was reported with DeepSeek's rates. A wrong
+    cost is worse than an absent one, which is the rule the price table already
+    states for a model it has never heard of.
+    """
+
+    def test_deepseek_is_priced(self):
+        from surtitle.stats import resolve_price
+
+        chosen = settings(SURTITLE_LLM_PROVIDER="deepseek")
+
+        assert resolve_price(resolve_chat(chosen).model, chosen) is not None
+
+    def test_a_provider_with_no_price_table_gets_no_figure(self):
+        from surtitle.stats import resolve_price
+
+        for provider in ("openrouter", "ollama"):
+            chosen = settings(SURTITLE_LLM_PROVIDER=provider)
+
+            assert resolve_price(resolve_chat(chosen).model, chosen) is None, provider
+
+    def test_the_session_prices_the_resolved_model(self):
+        """Read as source, because the alternative is a whole session per provider
+        to make the same point: the call site must not reach for DeepSeek's name."""
+        import inspect
+        import re
+
+        from surtitle.core import session as session_module
+
+        source = inspect.getsource(session_module.Session._count)
+
+        assert "resolve_chat(self.settings).model" in source
+        assert not re.search(r"resolve_price\(\s*self\.settings\.deepseek_model", source)

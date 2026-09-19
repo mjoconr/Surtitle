@@ -37,6 +37,7 @@ from surtitle.core.agent import (
 from surtitle.core.events import Event, EventKind, SessionState
 from surtitle.core.speak import Chunk, ChunkKind
 from surtitle.llm.chat import ChatClient, ChatMessage
+from surtitle.providers import resolve_chat
 from surtitle.stats import RunStats, context_window, is_peak, resolve_price
 from surtitle.store.db import Store
 from surtitle.tools.environment import environment_summary
@@ -1502,9 +1503,13 @@ class Session:
         if self.stats is None:
             return
         if event.kind is EventKind.USAGE:
+            # Priced for the model that actually ran, which is not necessarily
+            # DeepSeek's any more. A provider whose prices this build does not know
+            # resolves to no price at all, and the numbers are then reported as
+            # tokens without a money figure — an invented cost is worse than none.
             self.stats.record_usage(
                 event.data,
-                price=resolve_price(self.settings.deepseek_model, self.settings),
+                price=resolve_price(resolve_chat(self.settings).model, self.settings),
                 peak=is_peak(),
             )
         else:
