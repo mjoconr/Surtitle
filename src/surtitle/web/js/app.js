@@ -217,7 +217,13 @@ function updateTimers() {
 function updateWorkingLine(now, anyLive) {
   const turn = state.currentTurn;
   const root = turn && turn.kind === "assistant" ? turn.root : null;
-  if (!root || !anyLive) {
+  // A turn that has ended is not working, whatever a leftover row says. Without
+  // this the line came back: `finishTimers` takes it down and then calls
+  // `updateTimers` to write the frozen durations, so an un-ended row from an
+  // earlier turn (or one replayed from the store) put "Deep diving…" straight
+  // back up — and the ticker was stopped immediately afterwards, so it sat there
+  // frozen, claiming the agent was still working after it had finished.
+  if (!root || !anyLive || turn.endedAt) {
     if (workingLine && workingLine.parentNode) workingLine.remove();
     workingLine = null;
     return;
@@ -1714,20 +1720,14 @@ function finishTimers(turn) {
  * the server sending `reason`/`detail` on the done event; a user who heard the
  * voice should find the same explanation on screen.
  *
- * `failed` and `truncated` are the two cases worth a banner. A cancellation was
- * the user's own doing and an ordinary completion needs no explanation.
+ * Only the endings that need explaining get a banner. This used to fall through
+ * to a default of `{ title: "Stopped", detail: "" }`, which meant every ordinary
+ * completion — `reason: "complete"`, the common case by far — put a bare
+ * "Stopped" on screen with nothing under it. A user reading that reasonably
+ * concludes the turn was abandoned, however well it actually went.
  */
 function showStopNote(data, turn) {
   const reason = data.reason || (data.failed ? "failed" : data.truncated ? "step_limit" : "");
-  if (!reason) {
-    hideStopNote();
-    return;
-  }
-  if (reason === "cancelled" || reason === "stopped") {
-    // The user stopped it; they already know why.
-    hideStopNote();
-    return;
-  }
   const copy = {
     step_limit: {
       title: "Stopped — the step limit was reached",
@@ -1747,8 +1747,20 @@ function showStopNote(data, turn) {
       title: "Stopped — something went wrong",
       detail: data.detail || "That turn ended with an error. The detail is in the transcript above.",
     },
-    stopped: { title: "Stopped", detail: data.detail || "" },
-  }[reason] || { title: "Stopped", detail: data.detail || "" };
+    interrupted: {
+      title: "Stopped — this turn was interrupted",
+      detail:
+        data.detail ||
+        "The conversation ends part-way through, with no answer after the last step. " +
+          "Continue to let the agent carry on from here.",
+    },
+  }[reason];
+  if (!copy) {
+    // `complete` is the ordinary finish and needs no explanation; `cancelled`
+    // and `stopped` are the user's own doing, and telling them why is noise.
+    hideStopNote();
+    return;
+  }
 
   el.stopTitle.textContent = copy.title;
   el.stopDetail.textContent = copy.detail;
@@ -1756,10 +1768,11 @@ function showStopNote(data, turn) {
   el.stopNote.dataset.reason = reason;
   // Continue is only offered when continuing can actually work: a step-limited
   // turn resumes from its stored conversation, an internal failure may not.
-  // Continue is offered for the two endings that resuming actually fixes: a turn
+  // Continue is only offered for the two endings that resuming actually fixes: a turn
   // that ran out of steps, and one that did the work but never answered. An
   // internal failure may not repeat the same way, so it gets no button.
-  const resumable = reason === "step_limit" || reason === "no_answer";
+  const resumable =
+    reason === "step_limit" || reason === "no_answer" || reason === "interrupted";
   el.stopContinue.hidden = !(resumable && Boolean(state.lastUserText));
   scrollToBottom();
 }
@@ -2432,6 +2445,11 @@ async function selectSession(sessionId) {
     const thinking = new Map();
     const tookStep = new Set();
     let looseThinking = [];
+    // Where the conversation was last spoken to, and where it was last answered.
+    // A stopped turn is one that was never answered — not merely one that did
+    // work, which is every turn.
+    let lastAskedAt = -1;
+    let lastAnsweredAt = -1;
 
     const flushThinking = (turn, step) => {
       const index = Number(step) || 1;
@@ -2452,6 +2470,7 @@ async function selectSession(sessionId) {
           const turn = beginTurn("user");
           turn.bubble.textContent = message.content;
           state.lastUserText = message.content || state.lastUserText;
+          lastAskedAt = item.at || 0;
         } else if (message.role === "reasoning") {
           looseThinking.push(message.content || "");
         } else if (message.role === "system") {
@@ -2478,6 +2497,7 @@ async function selectSession(sessionId) {
           if (message.content && message.content.trim() !== (message.spoken || "").trim()) {
             appendShown(turn, message.content);
           }
+          lastAnsweredAt = item.at || 0;
         }
       } else {
         const call = item.call;
@@ -2504,7 +2524,16 @@ async function selectSession(sessionId) {
       const turn = beginTurn("assistant");
       for (const [index, text] of thinking) addThinking(turn, text, index);
       attachLoose(turn);
-      state.pendingStopNote = { reason: "step_limit", detail: STOPPED_WITHOUT_ANSWER };
+    }
+
+    // A stopped turn is one the agent never answered. That is not the same as a
+    // turn that did work: every turn does work. This used to fire whenever the
+    // conversation contained any thinking or tool call at all, so reopening a
+    // conversation that had finished normally announced "Stopped — the step limit
+    // was reached" over a complete answer — and named a cause the browser has no
+    // way to know. It may have been a restart, a cancellation, or a crash.
+    if (lastAskedAt > lastAnsweredAt) {
+      state.pendingStopNote = { reason: "interrupted", detail: STOPPED_WITHOUT_ANSWER };
     }
     state.currentTurn = null;
   });
@@ -2516,8 +2545,8 @@ async function selectSession(sessionId) {
 
 /** The stored line shown when a conversation ends mid-process. */
 const STOPPED_WITHOUT_ANSWER =
-  "This conversation ends part-way through the work: the last thing stored is a tool call " +
-  "with no answer after it. Continue to let the agent carry on from here.";
+  "This conversation was interrupted before the agent answered — the process may have been " +
+  "restarted, or the turn cancelled. Continue to let the agent carry on from here.";
 
 /**
  * Rebuild one stored tool call as a settled row in its step.

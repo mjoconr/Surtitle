@@ -651,6 +651,50 @@ class TestProcessSurvivesReload:
         assert tool.mutating is False
 
 
+class TestTheWorkingLineClearsWhenTheTurnEnds:
+    """ "Deep diving…" must not outlive the turn it describes.
+
+    `finishTimers` takes the line down, then calls `updateTimers` to write the
+    frozen durations — and that is the same pass that puts the line up. Any row
+    left un-ended, whether from an earlier turn in the view or one replayed from
+    the store, put it straight back; the ticker was stopped immediately after, so
+    a frozen "Deep diving… 1m 11s" sat on screen claiming the agent was still
+    working. Reported as "it's stopped but there's no message to say".
+    """
+
+    def test_an_ended_turn_is_never_shown_as_working(self, script):
+        block = script[script.index("function updateWorkingLine(") :]
+        block = block[: block.index("\n}\n")]
+        assert "turn.endedAt" in block, (
+            "a turn that has ended is not working, whatever a leftover row says"
+        )
+        assert "workingLine.remove()" in block
+
+    def test_the_end_is_stamped_before_the_line_is_decided(self, script):
+        block = script[script.index("function finishTimers(") :]
+        block = block[: block.index("\n}\n")]
+        assert block.index("turn.endedAt = now") < block.index("updateTimers()"), (
+            "the end must be stamped before the pass that decides to show the line, "
+            "or that pass re-creates it"
+        )
+
+
+def _stop_note_block(script: str) -> str:
+    """The body of `showStopNote`, which is what decides whether to show a banner."""
+    block = script[script.index("function showStopNote(") :]
+    return block[: block.index("\n}\n")]
+
+
+def _stop_note_reasons(block: str) -> list[str]:
+    """The turn-end reasons the block has copy for, in source order.
+
+    Read out of the lookup object rather than by searching for the words, so the
+    assertion is about which endings get a banner and not about which strings
+    happen to appear in a comment.
+    """
+    return re.findall(r"^ {4}([a-z_]+): \{", block, re.M)
+
+
 class TestStopReasonIsVisible:
     """A turn that stops must say why, on screen and aloud.
 
@@ -705,9 +749,50 @@ class TestStopReasonIsVisible:
 
     def test_cancellation_is_not_dressed_up_as_a_problem(self, script):
         """The user stopped it; telling them why is noise."""
-        block = script[script.index("function showStopNote(") :]
-        block = block[: block.index("\n}\n")]
-        assert '"cancelled"' in block and "hideStopNote" in block
+        block = _stop_note_block(script)
+        assert "cancelled" not in _stop_note_reasons(block)
+        assert "stopped" not in _stop_note_reasons(block)
+        assert "hideStopNote" in block
+
+    def test_an_ordinary_completion_shows_no_stop_banner(self, script):
+        """A turn that simply finished must not be labelled "Stopped".
+
+        The reason lookup ended in `|| { title: "Stopped", detail: "" }`, so
+        `reason: "complete"` — the common case, every turn that goes well — put a
+        bare "Stopped" on screen with nothing under it. The user asked whether the
+        agent had finished; the banner was telling them it had stopped. Only the
+        endings that need explaining may produce copy.
+        """
+        block = _stop_note_block(script)
+        assert '|| { title: "Stopped"' not in block, (
+            "an unrecognised reason must not fall through to a Stopped banner"
+        )
+        assert "hideStopNote" in block, "there must be a path that shows nothing"
+        assert _stop_note_reasons(block) == [
+            "step_limit",
+            "no_answer",
+            "failed",
+            "interrupted",
+        ], "exactly the endings that need explaining get a banner"
+
+    def test_a_reopened_conversation_is_not_called_stopped_for_having_worked(self, script):
+        """A finished conversation must not be labelled "Stopped" on reload.
+
+        The reload path set the banner whenever the replayed transcript contained
+        any thinking or tool call — which is every turn that ever did anything.
+        Reopening a conversation that had finished normally therefore announced
+        "Stopped — the step limit was reached" over a complete answer, naming a
+        cause the browser cannot know: it may have been a restart, a cancellation,
+        or a crash.
+        """
+        block = script[script.index("if (thinking.size || looseThinking.length") :]
+        block = block[: block.index("state.currentTurn = null;")]
+        assert "lastAskedAt > lastAnsweredAt" in block, (
+            "a stopped turn is one that was never answered, not one that did work"
+        )
+        assert 'reason: "step_limit"' not in block, (
+            "the client cannot know the server hit its step limit"
+        )
 
     def test_continue_resumes_rather_than_repeating_the_question(self, script):
         block = script[script.index("function continueLastTurn(") :]

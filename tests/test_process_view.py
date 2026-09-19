@@ -313,6 +313,98 @@ class TestStopping:
         assert PROGRESS_STEPS[0] < 10, "a user waits too long for the first reassurance"
 
 
+class TestTheClosingRoundIsAudible:
+    """A turn must not end with its answer only on screen.
+
+    Reported from a real session: the turn opened with a spoken "Let me find the
+    push route used for the earlier note before I write anything", did seventeen
+    steps, and finished with the entire result — the KB note, the revision
+    number, and the question about committing — in the display channel. The
+    turn-level "must not be silent" guarantee was satisfied by the opening
+    preamble, so nothing repaired it. To a user who is listening, the agent said
+    it was going to look something up and then went quiet.
+    """
+
+    async def test_a_silent_final_round_is_given_a_voice(self, settings, tmp_path, stored):
+        store, session_id = stored
+        registry = ToolRegistry([t for t in default_tool_list() if t.name == "list_dir"])
+        client = FakeClient(
+            [
+                # Opens with speech, then does work.
+                [
+                    StreamEvent(kind="text", text="<say>Let me check the directory.</say>"),
+                    StreamEvent(
+                        kind="tool_call",
+                        tool_call=ToolCallDelta(
+                            index=0, id="c1", name="list_dir", arguments=json.dumps({"path": "."})
+                        ),
+                    ),
+                    StreamEvent(kind="done", finish_reason="tool_calls"),
+                    StreamEvent(kind="usage", usage=Usage()),
+                ],
+                # The answer, in the display channel only.
+                [
+                    StreamEvent(kind="text", text="The note is committed as r21566."),
+                    StreamEvent(kind="done", finish_reason="stop"),
+                    StreamEvent(kind="usage", usage=Usage()),
+                ],
+            ]
+        )
+        loop = make_loop(
+            settings, tmp_path, client, store=store, session_id=session_id, registry=registry
+        )
+
+        events = await collect(loop)
+
+        spoken = [e for e in events if e.kind is EventKind.SAY]
+        assert any("r21566" in (e.data.get("text") or "") for e in spoken), (
+            "the conclusion must be spoken, not only displayed"
+        )
+        answer = [m for m in store.list_messages(session_id) if m.role == "assistant"][-1]
+        assert answer.spoken and "r21566" in answer.spoken
+        assert "r21566" in answer.content, "the displayed answer is kept as it was"
+
+    async def test_a_final_round_that_speaks_is_left_alone(self, settings, tmp_path, stored):
+        """The repair must not double up on a turn that closed properly."""
+        store, session_id = stored
+        client = FakeClient(
+            [
+                [
+                    StreamEvent(kind="text", text="<say>Let me look.</say>"),
+                    StreamEvent(
+                        kind="tool_call",
+                        tool_call=ToolCallDelta(
+                            index=0, id="c1", name="list_dir", arguments=json.dumps({"path": "."})
+                        ),
+                    ),
+                    StreamEvent(kind="done", finish_reason="tool_calls"),
+                    StreamEvent(kind="usage", usage=Usage()),
+                ],
+                [
+                    StreamEvent(kind="text", text="<display>r21566</display>"),
+                    StreamEvent(kind="text", text="<say>Committed as r21566.</say>"),
+                    StreamEvent(kind="done", finish_reason="stop"),
+                    StreamEvent(kind="usage", usage=Usage()),
+                ],
+            ]
+        )
+        loop = make_loop(
+            settings,
+            tmp_path,
+            client,
+            store=store,
+            session_id=session_id,
+            registry=ToolRegistry([t for t in default_tool_list() if t.name == "list_dir"]),
+        )
+
+        events = await collect(loop)
+
+        said = [(e.data.get("text") or "") for e in events if e.kind is EventKind.SAY]
+        assert said == ["Let me look.", "Committed as r21566."], (
+            f"the closing line is spoken once, not repaired on top of: {said}"
+        )
+
+
 class TestANoAnswerTurn:
     """A turn that did work must not end with nothing to read or hear.
 

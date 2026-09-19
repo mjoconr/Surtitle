@@ -134,6 +134,15 @@ Rules for good spoken output:
 - Before a slow tool call, say what you are about to do in one short sentence.
   The user should never sit in silence wondering whether you heard them.
 - After tool results, say the conclusion. Do not narrate the steps.
+- **The last thing you say is the outcome.** A turn that opens with "let me check"
+  and then goes quiet has told a listening user nothing: they hear the intention
+  and never the answer. However many steps the turn took, it ends with one short
+  spoken sentence carrying the result — what you found, what you changed, or what
+  you need from them. "Done." is the floor, not the target.
+- **`<display>` is for the result, not a running commentary.** Do not narrate each
+  step onto the screen as you take it; the Activity panel already shows what you
+  ran. What goes in `<display>` is the evidence the answer rests on — the table,
+  the paths, the diff, the numbers — not a diary of the search.
 
 **Be brief. The default answer is one or two sentences.**
 
@@ -355,8 +364,9 @@ future work belongs in the project's Markdown, where the next session will find 
   with brief spoken updates rather than a running commentary.
 - If something fails, say so plainly in a <say> block and explain the next
   option. Do not apologise more than once.
-- Finish every turn with a <say> block, even if it is only "Done." Silence makes
-  the user think you have stopped listening.
+- Finish every turn with a <say> block carrying the outcome, even if it is only
+  "Done." A closing line that says what happened is what tells the user the turn
+  ended; silence makes them think you have stopped listening.
 
 Your project root is the current working directory for every tool call. You
 cannot read or write outside it, and you should not try: if the user asks for a
@@ -892,6 +902,9 @@ class AgentLoop:
         parser = SpeakParser()
         calls: dict[int, ToolCallDelta] = {}
         text_parts: list[str] = []
+        # How much has been said before this round, so "did this round speak?"
+        # is answerable. `spoken_text` is cumulative across the whole turn.
+        spoken_before = len(state.spoken_text)
 
         messages: list[ChatMessage] = [{"role": "system", "content": self.system_prompt}]
         messages.extend(state.messages)
@@ -928,8 +941,19 @@ class AgentLoop:
             async for event in self._handle_chunk(chunk, state, on_chunk):
                 yield event
 
-        # Guarantee the turn is not silent when the model ignored the contract.
-        if not state.spoken_text:
+        ordered = [calls[index] for index in sorted(calls)]
+
+        # Guarantee the closing round is not silent.
+        #
+        # Two cases, and the second is the one that bit. A turn that said nothing
+        # at all has always been repaired here. But a turn can also *open* with
+        # speech — "Let me find the push route before I write anything" — and then
+        # finish with its whole answer in the display channel, which satisfies the
+        # turn-level check while leaving the user, who is listening, with a
+        # preamble and then silence. The last round is the one that has to be
+        # audible, so it is checked on its own.
+        spoke_this_round = len(state.spoken_text) > spoken_before
+        if not state.spoken_text or (not ordered and not spoke_this_round):
             fallback = repair_fallback("".join(text_parts))
             if fallback:
                 state.spoken_text.append(fallback)
@@ -941,7 +965,6 @@ class AgentLoop:
             "role": "assistant",
             "content": "".join(text_parts) or None,
         }
-        ordered = [calls[index] for index in sorted(calls)]
         if ordered:
             assistant_message["tool_calls"] = [call.to_message_dict() for call in ordered]
 
