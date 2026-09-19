@@ -413,10 +413,22 @@ class TestAnOlderDatabaseIsBroughtForward:
             " updated_at REAL NOT NULL,"
             " archived_at REAL"
             ");"
+            "CREATE TABLE messages ("
+            " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            " session_id TEXT NOT NULL,"
+            " role TEXT NOT NULL,"
+            " content TEXT NOT NULL,"
+            " spoken TEXT,"
+            " created_at REAL NOT NULL"
+            ");"
         )
         con.execute(
             "INSERT INTO sessions (id, project_id, title, created_at, updated_at)"
             " VALUES ('s1', 'p1', 'old', 1.0, 2.0)"
+        )
+        con.execute(
+            "INSERT INTO messages (session_id, role, content, created_at)"
+            " VALUES ('s1', 'assistant', 'an old turn', 3.0)"
         )
         con.commit()
         con.close()
@@ -432,4 +444,12 @@ class TestAnOlderDatabaseIsBroughtForward:
 
         store.record_turn_end("s1", reason="no_answer", detail="No reply.", steps=12)
         assert store.get_session("s1").last_end_reason == "no_answer"
+
+        # The model-facing copy of a message is added the same way, and an existing
+        # message falls back to its own content until it is aged.
+        message_columns = {
+            row["name"] for row in store._conn.execute("PRAGMA table_info(messages)")
+        }
+        assert "model_content" in message_columns
+        assert store.list_messages("s1")[0].replay == "an old turn"
         store.close()

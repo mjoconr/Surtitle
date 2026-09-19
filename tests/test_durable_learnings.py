@@ -281,3 +281,63 @@ class TestTheAgentIsToldToWriteLearningsDown:
 
     def test_it_says_not_to_pad(self, prompt):
         assert "If nothing durable was learned, add nothing" in prompt
+
+
+class TestAnAgedWorkLog:
+    """A turn's work log is the model's memory of its own work, and it grows forever.
+
+    Measured on a real conversation, the work logs were 62% of the replayed
+    history. Ageing them has one constraint that shapes the whole design: the
+    provider matches whole cache prefixes, so a shortened history that changed
+    shape between requests would rewrite the middle of the request and make
+    everything after it a cache miss — fifty times the cost of a hit. It is
+    therefore written once, into a separate model-facing column, and the user's own
+    transcript keeps the full text.
+    """
+
+    @staticmethod
+    def _turn(index: int, *, lines: int = 20) -> str:
+        listing = "\n".join(f"- run_shell(cmd {index}-{n}) -> " + "x" * 300 for n in range(lines))
+        return f"Answer {index}.\n\n[work this turn]\n{listing}"
+
+    def test_only_turns_past_the_window_are_aged(self, session):
+        from surtitle.core.session import _AGED_WORK_KEEP_TURNS
+
+        for index in range(_AGED_WORK_KEEP_TURNS + 3):
+            session.store.add_message(session.session_id, "assistant", self._turn(index))
+
+        session._age_work_logs()
+
+        rows = session.store.list_messages(session.session_id, roles=("assistant",))
+        aged = [row for row in rows if row.model_content is not None]
+        assert len(aged) == 3, "the newest turns keep their log; the rest are shortened"
+        assert all("Answer 0" in row.model_content for row in aged[:1])
+
+    def test_ageing_a_turn_twice_changes_nothing(self, session):
+        """Rewriting it again would invalidate the cache from that point on."""
+        for index in range(8):
+            session.store.add_message(session.session_id, "assistant", self._turn(index))
+
+        session._age_work_logs()
+        once = [row.model_content for row in session.store.list_messages(session.session_id)]
+        session._age_work_logs()
+
+        assert [
+            row.model_content for row in session.store.list_messages(session.session_id)
+        ] == once
+
+    def test_the_aged_form_is_what_the_model_is_given(self, session):
+        for index in range(8):
+            session.store.add_message(session.session_id, "assistant", self._turn(index))
+        session.store.add_message(session.session_id, "user", "and now?")
+
+        session._age_work_logs()
+        history = session._build_history()
+
+        assert history, "there is a conversation to replay"
+        aged = [message for message in history if "…and" in message["content"]]
+        assert aged, "the model is given the shortened form"
+        rows = session.store.list_messages(session.session_id, roles=("assistant",))
+        assert all("…and" not in row.content for row in rows), (
+            "the user's own transcript keeps every action"
+        )

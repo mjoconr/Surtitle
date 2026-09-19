@@ -85,6 +85,15 @@ CREATE TABLE IF NOT EXISTS messages (
     content     TEXT NOT NULL,
     -- Spoken subset of `content`, when the model used <say> tags.
     spoken      TEXT,
+    -- What the *model* is shown, when that differs from what the user is shown.
+    --
+    -- Ageing a turn's work log has to happen once and then stay put: the provider
+    -- matches whole cache prefixes, so re-deriving a shortened version on every
+    -- request — or shortening a different amount as the window slides — rewrites
+    -- the middle of the history and makes the rest of the request a cache miss, at
+    -- fifty times the cost. Written once, the shortened form replays identically
+    -- from then on, and the user's own transcript keeps the full text.
+    model_content TEXT,
     created_at  REAL NOT NULL
 );
 
@@ -202,6 +211,14 @@ class Message:
     content: str
     spoken: str | None
     created_at: float
+    # The model-facing form, when ageing has shortened it. `content` is what the
+    # user sees and is never rewritten.
+    model_content: str | None = None
+
+    @property
+    def replay(self) -> str:
+        """What the model is given for this message."""
+        return self.model_content or self.content
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -305,7 +322,8 @@ class Store:
                 "last_end_detail": "TEXT",
                 "last_end_steps": "INTEGER",
                 "last_end_at": "REAL",
-            }
+            },
+            "messages": {"model_content": "TEXT"},
         }
         for table, columns in additions.items():
             existing = {
@@ -768,9 +786,26 @@ class Store:
                 content=r["content"],
                 spoken=r["spoken"],
                 created_at=r["created_at"],
+                # `in r.keys()`, not `in r`: a sqlite3.Row supports `in` over its
+                # *values*, so `"model_content" in r` is False on a row that has
+                # the column — which silently made every message look unaged.
+                model_content=r["model_content"] if "model_content" in r.keys() else None,  # noqa: SIM118
             )
             for r in rows
         ]
+
+    def set_model_content(self, message_id: int, text: str) -> None:
+        """Record the model-facing form of a message, once.
+
+        One-way by design: this is what keeps the replayed history byte-stable
+        after a turn has aged, which is what the provider's prefix cache needs.
+        Writing it again would change the middle of the request and invalidate the
+        cache from that point on.
+        """
+        with self._lock, self._conn:
+            self._conn.execute(
+                "UPDATE messages SET model_content = ? WHERE id = ?", (text, message_id)
+            )
 
     # --- tool calls ------------------------------------------------------
     def add_tool_call(

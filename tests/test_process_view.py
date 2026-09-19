@@ -19,7 +19,7 @@ from typing import Any
 import pytest
 
 from surtitle.config import Settings
-from surtitle.core.agent import PROGRESS_STEPS, AgentLoop
+from surtitle.core.agent import PROGRESS_STEPS, AgentLoop, age_work_log
 from surtitle.core.events import EventKind
 from surtitle.core.session import Session
 from surtitle.llm.deepseek import StreamEvent, ToolCallDelta, Usage
@@ -1046,3 +1046,68 @@ class TestTheChangingContextIsDeliveredInHistory:
 
         sent = client.calls[0]["messages"]
         assert [message["role"] for message in sent] == ["system", "user"]
+
+
+class TestAgeingAWorkLog:
+    """The shape of a shortened work log.
+
+    Every action keeps its tool and target, because "already read sim/README.md" is
+    the whole reason the log exists — it is what stops the agent re-doing work it
+    has finished. What goes is the tail of each outcome, and the actions past the
+    twelfth.
+    """
+
+    @staticmethod
+    def _content(lines: int) -> str:
+        listing = "\n".join(f"- run_shell(cmd {n}) -> " + "x" * 300 for n in range(lines))
+        return f"The pump is 4C-117.\n\n[work this turn]\n{listing}"
+
+    def test_the_answer_above_the_log_is_untouched(self):
+        aged = age_work_log(self._content(20))
+
+        assert aged.startswith("The pump is 4C-117.")
+        assert aged.count("[work this turn]") == 1
+
+    def test_every_kept_action_has_its_tool_and_target(self):
+        aged = age_work_log(self._content(20))
+
+        assert "- run_shell(cmd 0)" in aged
+        assert "- run_shell(cmd 11)" in aged, "the twelfth action is still there"
+
+    def test_what_goes_is_the_weight(self):
+        content = self._content(20)
+        aged = age_work_log(content)
+
+        assert "x" * 300 not in aged, "the tail of each outcome is what costs the most"
+        assert len(aged) < len(content)
+
+    def test_the_count_of_dropped_actions_is_stated(self):
+        aged = age_work_log(self._content(20))
+
+        assert "…and 8 more action(s)" in aged, "a silent cut reads as the whole log"
+
+    def test_a_message_with_no_log_is_left_alone(self):
+        assert age_work_log("Just an answer.") is None
+
+    def test_a_log_short_enough_to_keep_is_not_rewritten(self):
+        content = "Answer.\n\n[work this turn]\n- read_file(a.md) -> 3 lines"
+        assert age_work_log(content) is None
+
+    def test_an_empty_log_is_left_alone(self):
+        assert age_work_log("Answer.\n\n[work this turn]\n") is None
+
+    def test_the_store_keeps_both_copies(self, tmp_path):
+        """The user's transcript is never rewritten to save the model tokens."""
+        store = Store(tmp_path / "db.sqlite")
+        project = store.create_project("P", tmp_path)
+        record = store.create_session(project.id)
+        message = store.add_message(record.id, "assistant", self._content(20))
+        assert message.replay == message.content, "nothing has aged yet"
+
+        shortened = age_work_log(message.content)
+        assert shortened is not None
+        store.set_model_content(message.id, shortened)
+
+        reread = store.list_messages(record.id)[0]
+        assert reread.replay == shortened, "the model is given the shortened form"
+        assert reread.content == message.content, "the user keeps the full text"

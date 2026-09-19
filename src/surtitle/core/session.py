@@ -31,6 +31,7 @@ from surtitle.core.agent import (
     AgentLoop,
     ApprovalBroker,
     RepeatCallGuard,
+    age_work_log,
 )
 from surtitle.core.events import Event, EventKind, SessionState
 from surtitle.core.speak import Chunk, ChunkKind
@@ -60,6 +61,12 @@ _PROGRESS_STEPS = PROGRESS_STEPS
 # How many of the most recent conversational messages to replay into the model as
 # context. "Most recent" is the load-bearing part — see `_build_history`.
 _HISTORY_LIMIT = 40
+
+# How many of the most recent assistant turns keep their full work log. Inside
+# this window the log is the live record of what the turn just did; further back it
+# is a memory of work already accounted for, and its detail costs more than it is
+# worth. See `Session._age_work_logs`.
+_AGED_WORK_KEEP_TURNS = 6
 
 # A session whose connection left mid-turn is kept for a reload to reclaim, then
 # swept. The grace period bounds how long a turn that never finishes can hold its
@@ -895,8 +902,35 @@ class Session:
             # session, and clearing them here is what made a failed second attempt
             # look identical to a failed first one.
             # A request that arrived while this turn ran goes next, whatever ended
-            # this one — finished, stopped, or failed.
+            # this one — finished, stopped, or failed. Ageing runs first so the next
+            # turn's history is built from the shortened form.
+            self._age_work_logs()
             self._drain_queue()
+
+    def _age_work_logs(self) -> None:
+        """Shorten the work logs of turns that have scrolled out of the window.
+
+        Written once into the message's model-facing copy rather than derived on
+        every request. The provider matches whole cache prefixes: a shortened
+        history whose shape changed between requests would rewrite the middle of
+        the request and make everything after it a cache miss, at fifty times the
+        cost of a hit. Written once, it replays identically from then on, and the
+        user's own transcript keeps the full text.
+        """
+        if self.store is None or self._closed:
+            return
+        messages = self.store.list_messages(
+            self.session_id, limit=_HISTORY_LIMIT, roles=("assistant",)
+        )
+        if len(messages) <= _AGED_WORK_KEEP_TURNS:
+            return
+        for message in messages[:-_AGED_WORK_KEEP_TURNS]:
+            if message.model_content is not None:
+                continue
+            shortened = age_work_log(message.content)
+            if shortened is not None:
+                log.info("ageing the work log of message %s", message.id)
+                self.store.set_model_content(message.id, shortened)
 
     # Instruction files, by conventional location. Root first, then `docs/`,
     # because a project that keeps its orientation material in `docs/` was
@@ -1320,9 +1354,9 @@ class Session:
             self.session_id, limit=_HISTORY_LIMIT, roles=("user", "assistant")
         )
         history: list[ChatMessage] = [
-            {"role": message.role, "content": message.content}
+            {"role": message.role, "content": message.replay}
             for message in messages
-            if message.content
+            if message.replay
         ]
         if self._rolled_back:
             self._rolled_back = False

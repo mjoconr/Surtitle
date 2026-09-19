@@ -1347,6 +1347,43 @@ def _with_actions(text: str, actions: list[str]) -> str:
     return f"{text}\n\n{block}" if text.strip() else block
 
 
+# Ageing a turn's work log.
+#
+# The log is the model's memory of its own work — which files it read, which
+# commands it ran — and that is what stops it re-doing something it already
+# finished. The *outcome* of each action is worth much less once the turn has
+# scrolled out of the window, so an aged log keeps every action's tool and target
+# and loses the tail of each outcome. Measured on a real conversation, the logs
+# were 62% of the replayed history.
+_AGED_WORK_LINES = 12
+_AGED_WORK_LINE_CHARS = 160
+
+
+def age_work_log(content: str) -> str | None:
+    """A shorter, model-facing form of an aged turn; ``None`` if nothing to do.
+
+    Returning ``None`` rather than the original matters: the caller writes this
+    into the store, and a message that is already short enough should not be
+    rewritten at all. The answer above the log is left exactly as it is — it is the
+    conversation, and the log is the part that grows without bound.
+    """
+    marker = "[work this turn]"
+    if marker not in content:
+        return None
+    answer, _, listing = content.partition(marker)
+    lines = [line for line in listing.splitlines() if line.strip()]
+    if not lines:
+        return None
+    kept = [
+        line if len(line) <= _AGED_WORK_LINE_CHARS else f"{line[:_AGED_WORK_LINE_CHARS]}…"
+        for line in lines[:_AGED_WORK_LINES]
+    ]
+    if len(lines) > _AGED_WORK_LINES:
+        kept.append(f"- …and {len(lines) - _AGED_WORK_LINES} more action(s)")
+    aged = f"{answer.rstrip()}\n\n{marker}\n" + "\n".join(kept)
+    return aged if len(aged) < len(content) else None
+
+
 def _redact_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
     """Shrink tool arguments for display and storage.
 
