@@ -235,19 +235,24 @@ class TestProjectInstructionsAreInjected:
         The fragment-is-not-the-whole concern is met by saying so explicitly.
         """
         session, root = project_session
+        base = session._system_prompt()
         (root / "AGENTS.md").write_text("x" * 50000)
         prompt = session._system_prompt()
         assert "x" * 5000 in prompt, "the primary file must be present, if only in part"
         assert "AGENTS.md" in prompt
         assert "truncated; read the file for the rest" in prompt
         assert "Instructions shown in part" in prompt, "a fragment must be declared partial"
-        # The file is capped at 20,000 characters, and the prompt is that plus the
-        # standing instructions and a little project context — so the total tracks
-        # the cap. The bound is loose on purpose: what it catches is an unbounded
-        # file, not a prompt that grew by a paragraph (the version-control primer
-        # added about 1,700 characters when it was introduced, and the section
-        # describing the interface about 1,200).
-        assert len(prompt) < 36_000, "an unbounded instruction file crowded the conversation"
+        # What has to be bounded is the file's *contribution*, not the prompt's
+        # absolute size. The rest of the prompt varies by platform — the directory
+        # listing, and which version-control tools are installed — so an absolute
+        # bound that held on one runner failed by 39 characters on another, twice
+        # in the same release. The cap is the ceiling: an oversized file may add
+        # `_INSTRUCTION_MAX_CHARS` plus the "shown in part" notice and nothing
+        # more, and a regression that raised the cap would show as a larger delta.
+        cap = Session._INSTRUCTION_MAX_CHARS
+        assert len(prompt) - len(base) < cap + 2_000, (
+            "an unbounded instruction file crowded the conversation"
+        )
 
     def test_the_base_prompt_is_always_present(self, project_session):
         session, _root = project_session

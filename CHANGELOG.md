@@ -34,6 +34,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The Activity panel moves while the agent is thinking.** The panel builds one
+  row per step from that step's first reasoning delta, and only the create path
+  scheduled a repaint — so every delta after the first updated the row in state
+  and left it frozen on screen, and a step that thought for a minute looked
+  exactly like a step that had died. The row also gisted the *first* line, which
+  suits a finished step but stops changing within a second of a running one; a
+  live row now follows the newest line and repaints itself.
 - **A finished conversation is no longer labelled "Stopped" when you reopen it.**
   The reload path raised the banner whenever the replayed transcript contained any
   thinking or tool call — which is every turn that ever did anything — and blamed
