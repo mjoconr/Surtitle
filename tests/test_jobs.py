@@ -61,6 +61,25 @@ def wired(tmp_path):
 
 
 class TestStartingAJob:
+    async def test_the_command_reaches_the_platform_shell_whole(self, ctx, monkeypatch):
+        """Same rule as the foreground tool: a job must not build a `cmd.exe /s /c`
+        argv by hand, because that loses the quotes around an executable path on
+        Windows. See `shell_tools._execute`."""
+        quoted = '"C:\\Program Files\\Python\\python.exe" -c "print(1)"'
+        seen: dict[str, str] = {}
+
+        async def fake(command, **_kwargs):
+            seen["command"] = command
+            raise FileNotFoundError("no shell here")
+
+        monkeypatch.setattr(asyncio, "create_subprocess_shell", fake)
+
+        result = await run_background(ctx, command=quoted)
+
+        assert seen["command"] == quoted
+        assert result.ok is False
+        assert "shell" in (result.error or "")
+
     async def test_it_returns_at_once_and_names_the_job(self, ctx):
         result = await run_background(ctx, command=python("import time; time.sleep(5)"))
 

@@ -60,6 +60,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A command whose first word is a quoted path now runs on Windows.** `run_shell`
+  and `run_background` built the command line themselves as
+  `cmd.exe /d /s /c <command>`, and with `/s` `cmd.exe` drops the first quote of the
+  command *and the last quote anywhere on the line*. So
+  `"C:\Program Files\Python\python.exe" script.py` — which is what an agent writes
+  the moment it needs a particular interpreter — reached the shell as
+  `C:\Program Files\Python\python.exe" script.py` and failed with *is not recognized
+  as an internal or external command*. The command string is now handed to the
+  platform's own shell, which is what wraps it in the extra pair of quotes that
+  survives. Found by Windows CI, where five background-job tests failed.
+
 - **An eval run works in a copy of the project it measures, and cleans it up.** A
   run is allowed to write — following a project's own record-keeping is often what
   the task is testing — so it was writing into the checkout the task named. The

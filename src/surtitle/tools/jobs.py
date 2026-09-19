@@ -103,11 +103,6 @@ class JobRegistry:
 
     async def start(self, command: str, ctx: ToolContext) -> Job:
         """Start ``command`` in the project root and return the job for it."""
-        if os.name == "nt":
-            argv = [os.environ.get("COMSPEC", "cmd.exe"), "/d", "/s", "/c", command]
-        else:
-            argv = ["/bin/sh", "-c", command]
-
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
         env.setdefault("PYTHONIOENCODING", "utf-8")
@@ -128,8 +123,11 @@ class JobRegistry:
         # read it for the command to make progress.
         handle = log_path.open("wb")
         try:
-            process = await asyncio.create_subprocess_exec(
-                *argv,
+            # The platform's own shell, like the foreground tool: a hand-built
+            # `cmd.exe /s /c <command>` argv loses the quotes around an executable
+            # path on Windows. See `shell_tools._execute`.
+            process = await asyncio.create_subprocess_shell(
+                command,
                 cwd=str(ctx.root),
                 env=env,
                 stdin=asyncio.subprocess.DEVNULL,

@@ -93,14 +93,28 @@ def _kill_process_tree(process: asyncio.subprocess.Process) -> None:
 
 
 async def _execute(
-    argv: list[str],
+    target: str | list[str],
     ctx: ToolContext,
     *,
     timeout: float,
     stdin_data: str | None = None,
     label: str,
 ) -> ToolResult:
-    """Run ``argv`` in the project root with a hard timeout."""
+    """Run ``target`` in the project root with a hard timeout.
+
+    A list is an argv and is executed directly. A string is a shell command and is
+    handed to the platform's own shell — ``cmd.exe`` on Windows, ``/bin/sh``
+    elsewhere — through ``create_subprocess_shell`` rather than a hand-built
+    ``cmd.exe /s /c <command>`` argv.
+
+    That is not a style preference. With ``/s``, ``cmd.exe`` strips the first quote
+    of the command *and the last quote anywhere on the line*, so
+    ``"C:\\Program Files\\Python\\python.exe" script.py`` — what an agent writes
+    constantly on Windows — reaches the shell as ``C:\\Program Files\\Python\\python.exe"
+    script.py`` and fails with `is not recognized as an internal or external
+    command`. CPython's shell handling wraps the whole command in one more pair of
+    quotes, which is exactly what makes that case survive.
+    """
     cwd = ctx.root
     if not cwd.is_dir():
         return ToolResult(
@@ -120,21 +134,25 @@ async def _execute(
     else:
         kwargs["start_new_session"] = True
 
+    shown = target if isinstance(target, str) else target[0]
+    common: dict[str, object] = {
+        "cwd": str(cwd),
+        "env": env,
+        "stdin": asyncio.subprocess.PIPE if stdin_data is not None else asyncio.subprocess.DEVNULL,
+        "stdout": asyncio.subprocess.PIPE,
+        "stderr": asyncio.subprocess.PIPE,
+        **kwargs,
+    }
     started = time.monotonic()
     try:
-        process = await asyncio.create_subprocess_exec(
-            *argv,
-            cwd=str(cwd),
-            env=env,
-            stdin=asyncio.subprocess.PIPE if stdin_data is not None else asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            **kwargs,
-        )
+        if isinstance(target, str):
+            process = await asyncio.create_subprocess_shell(target, **common)
+        else:
+            process = await asyncio.create_subprocess_exec(*target, **common)
     except FileNotFoundError:
-        return ToolResult(ok=False, error=f"Command not found: {argv[0]}")
+        return ToolResult(ok=False, error=f"Command not found: {shown}")
     except OSError as exc:
-        return ToolResult(ok=False, error=f"Could not start {argv[0]}: {exc}")
+        return ToolResult(ok=False, error=f"Could not start {shown}: {exc}")
 
     timed_out = False
     try:
@@ -214,19 +232,16 @@ async def run_shell(
 ) -> ToolResult:
     """Run a shell command inside the project directory.
 
-    Uses ``cmd.exe`` on Windows and ``/bin/sh`` elsewhere. Shell built-ins and
-    pipes work, because this is genuinely a shell rather than an argv split.
+    Uses ``cmd.exe`` on Windows and ``/bin/sh`` elsewhere, through the platform's
+    own shell rather than a hand-split argv: shell built-ins and pipes work, because
+    this is genuinely a shell. ``_execute`` explains why the command string is not
+    wrapped in a ``cmd.exe /c`` argv by hand.
     """
     if not command.strip():
         return ToolResult(ok=False, error="command must not be empty.")
 
     bounded = max(1.0, min(float(timeout), MAX_TIMEOUT))
-    if os.name == "nt":
-        argv = [os.environ.get("COMSPEC", "cmd.exe"), "/d", "/s", "/c", command]
-    else:
-        argv = ["/bin/sh", "-c", command]
-
-    return await _execute(argv, ctx, timeout=bounded, label=f"`{command[:60]}`")
+    return await _execute(command, ctx, timeout=bounded, label=f"`{command[:60]}`")
 
 
 async def run_python(

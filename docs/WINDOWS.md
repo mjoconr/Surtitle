@@ -482,7 +482,7 @@ These are the places Windows genuinely differs, and how each is handled:
 | Long path support | The extended-length `\\?\` prefix `resolve()` adds for long and unusual paths is stripped before containment, so a long path is not mistaken for an escape |
 | Case-insensitive paths | Containment compares case-folded, so `C:\Proj` and `c:\proj` are the same directory |
 | Credential file permissions | `0600` is applied on POSIX; on Windows the file inherits the user profile ACL, so it stays per-user but is not mode-enforced |
-| Shell | `cmd.exe /d /s /c` |
+| Shell | `cmd.exe` on Windows, `/bin/sh` elsewhere, invoked through Python's own shell handling rather than a hand-built `cmd.exe /s /c` argv. With `/s`, `cmd.exe` drops the first quote of the command and the last quote anywhere on the line, so `"C:\Program Files\Python\python.exe" script.py` arrives at the shell mangled and fails as *not recognized as an internal or external command* |
 | LibreOffice (optional) | `soffice.exe`, discovered at `C:\Program Files\LibreOffice\program`. Only needed for the formats the built-in converter cannot write |
 | Virtual environment layout | `Scripts\python.exe` and `Lib\site-packages` instead of `bin/` and `lib/` |
 | Release archive layout | Installs into the bundled runtime (`python\python.exe`) rather than a virtual environment: a Windows venv's `Scripts\python.exe` is a launcher for an absolute base path in `pyvenv.cfg`, so it cannot be moved once extracted |

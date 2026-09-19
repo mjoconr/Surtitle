@@ -134,7 +134,11 @@ one exists, which is what makes `install_packages` useful, and reports `isolated
 `interpreter` in the result so a missing import is diagnosable without another round trip.
 
 **`run_shell`** — `cmd.exe` on Windows, `/bin/sh` elsewhere. A real shell, so pipes and
-built-ins work.
+built-ins work. The command string is handed to the platform's own shell rather than
+wrapped into a `cmd.exe /s /c` argv by hand: `/s` drops the first quote of the command
+and the last quote anywhere on the line, so a command whose first token is a quoted
+path — `"C:\Program Files\Python\python.exe" script.py` — would reach the shell with a
+stray quote on the executable and fail. `run_background` starts its jobs the same way.
 
 Both:
 
