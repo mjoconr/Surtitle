@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from surtitle.config import Settings
-from surtitle.core.agent import AgentLoop, ApprovalBroker
+from surtitle.core.agent import AgentLoop, ApprovalBroker, RepeatCallGuard
 from surtitle.core.events import Event, EventKind, SessionState
 from surtitle.core.speak import Chunk, ChunkKind
 from surtitle.llm.deepseek import ChatMessage, DeepSeekClient
@@ -101,6 +101,10 @@ class Session:
     send_audio: Callable[[bytes], Awaitable[None]]
 
     approvals: ApprovalBroker = field(default_factory=ApprovalBroker)
+    # Owned by the session, not by a turn: a call repeated on the *next* turn is
+    # still a repeat, and a guard rebuilt per turn cannot see one. What it hands
+    # back when it refuses is the output of the call it is remembering.
+    _repeat_guard: RepeatCallGuard = field(default_factory=RepeatCallGuard)
     stt: SttEngine | None = None
     tts: TtsEngine | None = None
     # Why voice is partly or wholly unavailable, if it is. Reported in the
@@ -541,6 +545,7 @@ class Session:
             client=self.deepseek,
             registry=self.registry,
             system_prompt=self._system_prompt(),
+            repeat_guard=self._repeat_guard,
         )
         loop.set_emitter(self._emit_side_channel)
 

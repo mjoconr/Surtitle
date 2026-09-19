@@ -39,7 +39,7 @@ from surtitle.tools import environment
 from surtitle.tools.fs_tools import ToolContext, ToolResult
 from surtitle.tools.registry import ToolRegistry, default_registry
 
-__all__ = ["AgentLoop", "ApprovalBroker", "build_system_prompt"]
+__all__ = ["AgentLoop", "ApprovalBroker", "RepeatCallGuard", "build_system_prompt"]
 
 log = logging.getLogger(__name__)
 
@@ -51,6 +51,18 @@ _COMPLETION = "_completion"
 # How many characters of a tool result are shown to the user in the transcript
 # before it is collapsed into an expandable detail.
 _DISPLAY_SUMMARY_CHARS = 160
+
+# How much of a tool's *output* survives into later turns.
+#
+# `[work this turn]` is the model's only memory of a turn it has finished, and the
+# prompt tells it to reuse "that result". Recording only the status line
+# ("finished in 146 ms") makes that instruction impossible to follow, so the model
+# re-runs the command instead and circles. Shell and Python output is the case
+# that must survive, because it cannot be recovered by looking again: a file can be
+# re-read, a command's stdout cannot.
+_ACTION_OUTPUT_CHARS = 320
+# The durable record is not replayed every turn, so it can keep more.
+_STORED_OUTPUT_CHARS = 4000
 
 
 def build_system_prompt(root_name: str) -> str:
@@ -489,6 +501,7 @@ class AgentLoop:
         approvals: ApprovalBroker | None = None,
         client: DeepSeekClient | None = None,
         system_prompt: str | None = None,
+        repeat_guard: RepeatCallGuard | None = None,
     ) -> None:
         self.settings = settings
         self.root = root
@@ -503,8 +516,11 @@ class AgentLoop:
         self._seq = 0
         self._cancelled = asyncio.Event()
         # Guards against a model that gets stuck calling the same tool with the
-        # same arguments, which cannot make progress.
-        self._repeat_guard = RepeatCallGuard()
+        # same arguments, which cannot make progress. The session owns one and
+        # passes it in, so a repeat that spans a turn boundary -- the same command
+        # re-run on the next turn because the model forgot its output -- is still
+        # caught; a guard per turn could never see it.
+        self._repeat_guard = repeat_guard or RepeatCallGuard()
         # What this turn has produced so far. The session records these when a turn
         # is interrupted, so a cancelled exchange is not lost from history.
         self.partial_text: str = ""
@@ -887,7 +903,7 @@ class AgentLoop:
                     call.name,
                     arguments,
                     step=state.step,
-                    result=(result.display or result.error or "")[:1000],
+                    result=_result_output(result, limit=_STORED_OUTPUT_CHARS),
                     ok=result.ok,
                     approved=True,
                     duration_ms=duration_ms,
@@ -895,7 +911,9 @@ class AgentLoop:
 
             state.messages.append(self._tool_message(call, result))
             state.actions.append(_action_line(call.name, arguments, result))
-            self._repeat_guard.observe_result(result.display or result.error or "")
+            self._repeat_guard.observe_result(
+                _result_output(result, limit=_REPEAT_PREVIEW_CHARS * 4)
+            )
 
             yield self._event(
                 EventKind.TOOL_RESULT,
@@ -962,8 +980,8 @@ def _action_line(name: str, arguments: dict[str, Any], result: ToolResult) -> st
 
     Deliberately terse: it is replayed into the model's context on every later
     turn, so it has to earn its tokens. The value is that the model can see it has
-    *already* looked somewhere or run something, which is what stops it repeating
-    the same reads and commands turn after turn.
+    *already* looked somewhere or run something, and — for a command, whose output
+    is gone once the turn ends — what that command said.
     """
     target = ""
     for key in ("path", "pattern", "command", "source"):
@@ -974,14 +992,37 @@ def _action_line(name: str, arguments: dict[str, Any], result: ToolResult) -> st
     if len(target) > 100:
         target = f"{target[:100]}…"
 
-    status = result.display or ("ok" if result.ok else (result.error or "failed"))
-    status = " ".join(str(status).split())
-    if len(status) > 100:
-        status = f"{status[:100]}…"
-
+    status = _result_output(result, limit=_ACTION_OUTPUT_CHARS)
     if not result.ok:
         status = f"FAILED: {status}"
     return f"{name}({target}) -> {status}" if target else f"{name} -> {status}"
+
+
+def _result_output(result: ToolResult, *, limit: int) -> str:
+    """What a tool result is worth remembering, as one bounded line.
+
+    Prefers the output streams, because that is the part a later turn cannot
+    reconstruct. A result with no output — a read, a listing, a search — falls back
+    to its own summary, which already names what was found.
+    """
+    data = result.data or {}
+    pieces = [
+        value
+        for key in ("stdout", "stderr")
+        if isinstance(value := data.get(key), str) and value.strip()
+    ]
+    if not pieces:
+        pieces.append(result.display or ("ok" if result.ok else (result.error or "failed")))
+    elif not result.ok and result.error:
+        # The exit status is worth keeping next to the output that explains it.
+        pieces.append(result.error)
+
+    text = " ".join(" ".join(pieces).split())
+    if result.truncated:
+        text = f"{text} …[truncated]"
+    if len(text) > limit:
+        text = f"{text[: limit - 1]}…"
+    return text
 
 
 def _with_actions(text: str, actions: list[str]) -> str:

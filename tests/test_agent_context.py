@@ -73,6 +73,60 @@ class TestActionLines:
         assert "list_dir" in line
         assert "31" in line
 
+    def test_a_command_keeps_the_output_it_produced(self):
+        """A command's stdout is the one thing a later turn cannot look up again.
+
+        Observed: the agent checked `import sherpa_onnx`, got ModuleNotFoundError,
+        and on the next turn re-ran the same check because the transcript recorded
+        only "finished in 146 ms". It then doubted its own finding and asked the
+        user to confirm a fact it had already established.
+        """
+        line = _action_line(
+            "run_shell",
+            {"command": "python -c 'import sherpa_onnx'"},
+            ToolResult(
+                ok=False,
+                data={"stdout": "", "stderr": "ModuleNotFoundError: No module named 'sherpa_onnx'"},
+                error="`python -c` failed (exit 1)",
+            ),
+        )
+        assert "ModuleNotFoundError" in line, f"the output was dropped: {line!r}"
+        assert "sherpa_onnx" in line
+        assert "failed" in line.lower(), "the exit status must survive too"
+
+    def test_a_successful_command_keeps_its_output(self):
+        line = _action_line(
+            "run_shell",
+            {"command": "uname -a"},
+            ToolResult(ok=True, data={"stdout": "Darwin MacBookPro 24.6.0 arm64\n" * 4}),
+        )
+        assert "Darwin MacBookPro" in line
+
+    def test_a_noisy_output_is_bounded(self):
+        """These lines are replayed every turn, so output must not be unbounded."""
+        line = _action_line(
+            "run_shell",
+            {"command": "cat big.log"},
+            ToolResult(ok=True, data={"stdout": "y" * 50000}),
+        )
+        assert len(line) < 600, f"an unbounded output reached the transcript ({len(line)} chars)"
+
+    def test_output_stays_on_one_line(self):
+        line = _action_line(
+            "run_shell",
+            {"command": "ls"},
+            ToolResult(ok=True, data={"stdout": "a\nb\nc\n"}),
+        )
+        assert "\n" not in line
+
+    def test_a_truncated_result_says_so(self):
+        line = _action_line(
+            "run_shell",
+            {"command": "find ."},
+            ToolResult(ok=True, data={"stdout": "a\nb"}, truncated=True),
+        )
+        assert "truncated" in line
+
 
 class TestWorkIsAppended:
     def test_the_answer_comes_first_and_the_work_after(self):
@@ -540,6 +594,208 @@ class TestGuardIsWiredIntoTheLoop:
         assert refused, f"a repeating model was never refused: {outcomes}"
         # The tool must not have been executed on the refused attempts.
         assert len(calls) < 8, f"the tool ran {len(calls)} times despite the guard"
+
+
+class TestGuardSpansTurns:
+    """A repeat on the *next* turn is still a repeat.
+
+    Observed: the agent verified `import sherpa_onnx` on one turn and re-ran the
+    same check on the next. A guard rebuilt per turn could never see that, which is
+    why it is owned by the session and handed to each turn.
+    """
+
+    def test_a_loop_uses_the_guard_it_is_given(self, tmp_path):
+        from surtitle.core.agent import AgentLoop, RepeatCallGuard
+
+        guard = RepeatCallGuard()
+        loop = AgentLoop(
+            Settings(DEEPSEEK_API_KEY="sk", SURTITLE_HOME=str(tmp_path)),
+            root=tmp_path,
+            repeat_guard=guard,
+        )
+        assert loop._repeat_guard is guard, "the turn made its own guard, so repeats span nothing"
+
+    def test_a_loop_without_one_still_gets_a_guard(self, tmp_path):
+        from surtitle.core.agent import AgentLoop, RepeatCallGuard
+
+        loop = AgentLoop(
+            Settings(DEEPSEEK_API_KEY="sk", SURTITLE_HOME=str(tmp_path)),
+            root=tmp_path,
+        )
+        assert isinstance(loop._repeat_guard, RepeatCallGuard)
+
+    async def test_each_turn_is_given_the_sessions_guard(self, project_session, monkeypatch):
+        session, _root = project_session
+        handed: list[object] = []
+
+        class RecordingLoop:
+            def __init__(self, *args, **kwargs):
+                handed.append(kwargs.get("repeat_guard"))
+
+            def set_emitter(self, emitter):
+                return None
+
+            async def run(self, history, user_text, *, on_chunk=None):
+                if False:  # pragma: no cover - makes this an async generator
+                    yield None
+
+            async def aclose(self):
+                return None
+
+        monkeypatch.setattr("surtitle.core.session.AgentLoop", RecordingLoop)
+
+        await session._run_turn("first")
+        await session._run_turn("second")
+
+        assert len(handed) == 2
+        assert handed[0] is session._repeat_guard
+        assert handed[0] is handed[1], "the guard was rebuilt between turns"
+
+
+class TestStoredToolCallKeepsItsOutput:
+    """The durable record is evidence, not a status line.
+
+    `tool_calls.result` used to hold "`cmd` finished in 146 ms" for every shell
+    call, which is why a past session's work could not be audited after the fact.
+    """
+
+    async def test_a_shell_call_stores_what_it_printed(self, tmp_path):
+        import json as jsonlib
+
+        from surtitle.core.agent import AgentLoop
+        from surtitle.llm.deepseek import StreamEvent, ToolCallDelta
+        from surtitle.tools.registry import Tool, ToolRegistry
+
+        store = Store(tmp_path / "db.sqlite")
+        project = store.create_project("P", tmp_path)
+        record = store.create_session(project.id)
+
+        def handler(ctx, command=""):
+            return ToolResult(
+                ok=False,
+                data={"stdout": "", "stderr": "ModuleNotFoundError: No module named 'sherpa_onnx'"},
+                error="failed (exit 1)",
+            )
+
+        registry = ToolRegistry(
+            [
+                Tool(
+                    name="run_shell",
+                    description="run",
+                    parameters={"type": "object", "properties": {}},
+                    handler=handler,
+                    approval="never",
+                )
+            ]
+        )
+
+        class OneShotModel:
+            def __init__(self):
+                self._calls = 0
+
+            async def stream(self, messages, *, tools=None):
+                self._calls += 1
+                if self._calls == 1:
+                    yield StreamEvent(
+                        kind="tool_call",
+                        tool_call=ToolCallDelta(
+                            index=0,
+                            id="c1",
+                            name="run_shell",
+                            arguments=jsonlib.dumps({"command": "python -c 'import sherpa_onnx'"}),
+                        ),
+                    )
+                    yield StreamEvent(kind="done", finish_reason="tool_calls")
+                    return
+                yield StreamEvent(kind="text", text="It is missing.")
+                yield StreamEvent(kind="done", finish_reason="stop")
+
+            async def aclose(self):
+                return None
+
+        loop = AgentLoop(
+            Settings(DEEPSEEK_API_KEY="sk", SURTITLE_HOME=str(tmp_path), thinking_enabled=False),
+            root=tmp_path,
+            store=store,
+            session_id=record.id,
+            client=OneShotModel(),
+            registry=registry,
+        )
+        async for _event in loop.run([], "why is local voice dead"):
+            pass
+
+        stored = store.list_tool_calls(record.id)
+        assert stored, "the tool call was not recorded"
+        assert "ModuleNotFoundError" in (stored[0].result or ""), (
+            f"the stored result is a status line, not evidence: {stored[0].result!r}"
+        )
+
+    async def test_the_transcript_handed_to_the_next_turn_keeps_the_output(self, tmp_path):
+        """The end-to-end guarantee: turn two can read what turn one ran."""
+        import json as jsonlib
+
+        from surtitle.core.agent import AgentLoop
+        from surtitle.llm.deepseek import StreamEvent, ToolCallDelta
+        from surtitle.tools.registry import Tool, ToolRegistry
+
+        store = Store(tmp_path / "db.sqlite")
+        project = store.create_project("P", tmp_path)
+        record = store.create_session(project.id)
+
+        registry = ToolRegistry(
+            [
+                Tool(
+                    name="run_shell",
+                    description="run",
+                    parameters={"type": "object", "properties": {}},
+                    handler=lambda ctx, command="": ToolResult(
+                        ok=True, data={"stdout": "sherpa_onnx is not installed"}
+                    ),
+                    approval="never",
+                )
+            ]
+        )
+
+        class OneShotModel:
+            def __init__(self):
+                self._calls = 0
+
+            async def stream(self, messages, *, tools=None):
+                self._calls += 1
+                if self._calls == 1:
+                    yield StreamEvent(
+                        kind="tool_call",
+                        tool_call=ToolCallDelta(
+                            index=0,
+                            id="c1",
+                            name="run_shell",
+                            arguments=jsonlib.dumps({"command": "pip list"}),
+                        ),
+                    )
+                    yield StreamEvent(kind="done", finish_reason="tool_calls")
+                    return
+                yield StreamEvent(kind="text", text="Checked.")
+                yield StreamEvent(kind="done", finish_reason="stop")
+
+            async def aclose(self):
+                return None
+
+        loop = AgentLoop(
+            Settings(DEEPSEEK_API_KEY="sk", SURTITLE_HOME=str(tmp_path), thinking_enabled=False),
+            root=tmp_path,
+            store=store,
+            session_id=record.id,
+            client=OneShotModel(),
+            registry=registry,
+        )
+        async for _event in loop.run([], "is sherpa installed"):
+            pass
+
+        assistant = [m for m in store.list_messages(record.id) if m.role == "assistant"]
+        assert assistant, "no assistant message was stored"
+        assert "sherpa_onnx is not installed" in assistant[-1].content, (
+            "the next turn cannot see what the command said, so it will re-run it"
+        )
 
 
 class TestDocumentationAwareness:
