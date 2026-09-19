@@ -21,6 +21,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `evals/README.md` says how to add a task; `tests/test_eval_harness.py` covers the
   harness itself offline.
 
+### Changed
+
+- **The agent thinks harder before it acts: reasoning effort is now `high`, and a
+  single response may run to 32,768 tokens.** The defaults were `low` and 4,096,
+  and that pair is the largest single reason a Surtitle turn looked less capable
+  than the same model in a harness that left it alone: at low effort the work was
+  never attempted rather than attempted badly, and a long plan or a large edit
+  could be cut off mid-thought. Nothing about the spoken channel changes — the
+  extra thinking is not extra talking — so lower `SURTITLE_REASONING_EFFORT` only
+  if a turn feels slow, not because the default is reckless.
+
 ## [0.9.2] - 2026-09-19
 
 ### Fixed

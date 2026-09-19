@@ -154,7 +154,9 @@ SETTINGS_FIELDS: tuple[_Field, ...] = (
         "reasoning_effort",
         str,
         "Reasoning effort",
-        "Higher effort thinks longer before acting. 'low' keeps voice turns snappy.",
+        "How long the model thinks before it acts. 'high' is the default, because "
+        "low effort costs the work rather than the speaking; lower it only if "
+        "spoken turns feel slow.",
         choices=("minimal", "low", "medium", "high"),
         section="model",
     ),

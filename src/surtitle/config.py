@@ -118,10 +118,18 @@ class Settings(BaseSettings):
     # --- models ----------------------------------------------------------
     deepseek_model: str = Field(default="deepseek-flash", alias="DEEPSEEK_MODEL")
     deepseek_base_url: str = Field(default=DEEPSEEK_BASE_URL, alias="DEEPSEEK_BASE_URL")
-    reasoning_effort: str = Field(default="low", alias="SURTITLE_REASONING_EFFORT")
+    # How long the model thinks before it acts. This was `low`, which is the single
+    # largest reason a Surtitle turn looked less capable than the same model in a
+    # harness that left it alone: the work was never attempted, not attempted badly.
+    # Nothing else in this file buys as much per line. Lower it if spoken turns
+    # start to feel slow, not because the default is cautious.
+    reasoning_effort: str = Field(default="high", alias="SURTITLE_REASONING_EFFORT")
     thinking_enabled: bool = Field(default=True, alias="SURTITLE_THINKING")
     temperature: float = Field(default=0.7, alias="SURTITLE_TEMPERATURE")
-    max_tokens: int = Field(default=4096, alias="SURTITLE_MAX_TOKENS")
+    # The cap on one model response. It was 4096, which truncates a long plan or a
+    # large edit mid-thought; the provider accepts far more, and a response only
+    # costs what it uses. Raise via SURTITLE_MAX_TOKENS if a task needs it.
+    max_tokens: int = Field(default=32768, alias="SURTITLE_MAX_TOKENS")
     # The working budget for one request, in tokens: what the browser shows a
     # turn's usage against, and what compaction will trigger on. Deliberately much
     # smaller than the model's window — `deepseek-flash` accepts a million tokens,
