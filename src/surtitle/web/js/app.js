@@ -227,6 +227,22 @@ function appendError(turn, message) {
 }
 
 function addToolRow(turn, callId, name) {
+  const existing = callId ? state.toolRows.get(callId) : null;
+  if (existing) {
+    // An approval prompt already opened a row for this call. Reuse it: appending
+    // a second row leaves the first orphaned in the transcript, still reading
+    // "awaiting approval" long after the question was answered.
+    existing.name = name;
+    existing.row.dataset.tool = name;
+    existing.row.dataset.state = "running";
+    existing.nameNode.textContent = name;
+    existing.summary.textContent = "running…";
+    existing.body.textContent = "";
+    existing.body.hidden = true;
+    state.toolRows.set(callId, existing);
+    return existing;
+  }
+
   const row = node("div", "toolrow");
   row.dataset.state = "running";
   row.dataset.tool = name;
@@ -234,7 +250,8 @@ function addToolRow(turn, callId, name) {
   const head = node("button", "toolrow__head");
   head.type = "button";
   head.append(node("span", "toolrow__dot"));
-  head.append(node("span", "toolrow__name", name));
+  const nameNode = node("span", "toolrow__name", name);
+  head.append(nameNode);
   const summary = node("span", "toolrow__summary", "running…");
   head.append(summary);
 
@@ -249,9 +266,26 @@ function addToolRow(turn, callId, name) {
   turn.tools.append(row);
   scrollToBottom();
 
-  const record = { row, summary, body, name };
+  const record = { row, summary, body, name, nameNode };
   state.toolRows.set(callId, record);
   return record;
+}
+
+/**
+ * Settle a row whose approval never resolved.
+ *
+ * A prompt that is answered, declined or cancelled always ends in a tool event
+ * that updates the row. A turn that dies while a prompt is open does not, so the
+ * row is left claiming to be waiting for an answer that can no longer arrive.
+ */
+function settlePendingApproval(note) {
+  const pending = state.pendingApproval;
+  if (!pending) return;
+  const record = state.toolRows.get(pending.call_id);
+  if (record && record.row.dataset.state === "awaiting") {
+    record.row.dataset.state = "stopped";
+    record.summary.textContent = note;
+  }
 }
 
 function scrollToBottom(force = false) {
@@ -770,10 +804,18 @@ function handleEvent(event) {
     }
     case "state": {
       if (data.state) {
-        setAgentState(data.state);
-        // A cancellation reports `idle` without ever sending `done`, so the
-        // release has to happen here too.
-        if (data.state !== "awaiting_approval") clearApproval();
+        // An open approval outranks a voice transition. The agent narrates before
+        // it calls a tool, so a prompt can arrive while the reply is still being
+        // spoken; the `speaking -> idle` that follows used to clear it about half
+        // a second later, leaving the user unable to answer a question the server
+        // was still waiting on. Only a state that means the turn moved past the
+        // decision may replace it.
+        const voiceTransition = ["speaking", "listening", "idle"].includes(data.state);
+        if (!(state.pendingApproval && voiceTransition)) setAgentState(data.state);
+        // A cancellation reports `idle` without ever sending `done`, so the release
+        // has to happen here too — but only for a real cancellation, never for an
+        // ordinary state change.
+        if (data.reason === "cancelled" || data.reason === "stopped") clearApproval();
       }
       // Deepgram refused the speed, so the server asked us to apply it here.
       if (data.speech_speed && data.kind_detail === "speed_fallback") {
@@ -826,11 +868,15 @@ function handleEvent(event) {
     case "tool_call": {
       const turn = assistantTurn();
       addToolRow(turn, data.call_id, data.name || "tool");
+      clearApprovalFor(data.call_id);
       state.activity.push({ label: `Called ${data.name}`, detail: formatArgs(data.arguments) });
       renderRightbar();
       break;
     }
     case "tool_result": {
+      // Also covers a call that was answered without the user: an auto-approved
+      // retry, a remembered tool, or one the user just declined.
+      clearApprovalFor(data.call_id);
       const record = state.toolRows.get(data.call_id);
       if (record) {
         record.row.dataset.state = data.ok ? "ok" : "error";
@@ -869,7 +915,9 @@ function handleEvent(event) {
       el.sendButton.hidden = true;
       el.approvalText.textContent = describeApproval(data);
       const turn = assistantTurn();
-      addToolRow(turn, data.call_id, `${data.name} (awaiting approval)`);
+      const record = addToolRow(turn, data.call_id, data.name || "tool");
+      record.row.dataset.state = "awaiting";
+      record.summary.textContent = "awaiting approval";
       setAgentState("awaiting_approval");
       break;
     }
@@ -888,6 +936,7 @@ function handleEvent(event) {
     case "error": {
       // An errored turn cannot still be waiting for approval, and a stuck prompt
       // is worse than no prompt: it blocks the composer indefinitely.
+      settlePendingApproval("not run — the turn failed");
       clearApproval();
       const turn = state.currentTurn || beginTurn("assistant");
       appendError(turn, data.message || "Something went wrong.");
@@ -896,6 +945,7 @@ function handleEvent(event) {
       break;
     }
     case "done": {
+      settlePendingApproval("not run");
       clearApproval();
       if (!data.failed && !data.truncated) setAgentState(state.micOpen ? "listening" : "idle");
       // A turn that produced no rendered output has no current turn at all: the
@@ -1005,6 +1055,18 @@ function clearApproval() {
   el.approvalStrip.hidden = true;
   el.approvalActions.hidden = true;
   el.sendButton.hidden = false;
+}
+
+/**
+ * Release the prompt once the call it belongs to actually proceeds.
+ *
+ * The decision is not always a click: a tool that was trusted, one whose
+ * approval arrived from elsewhere, or a declined call all end in a tool event.
+ * Matching on the call id keeps an unrelated tool's traffic from dismissing a
+ * question that is still open.
+ */
+function clearApprovalFor(callId) {
+  if (state.pendingApproval && state.pendingApproval.call_id === callId) clearApproval();
 }
 
 // -------------------------------------------------------------------- voice

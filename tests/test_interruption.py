@@ -208,6 +208,125 @@ class TestInterruptedTurnRecording:
         assert session._rolled_back is False
 
 
+def _queued(session) -> list[dict]:
+    """Drain what the session has queued for the browser."""
+    events = []
+    while not session._outbox.empty():
+        events.append(session._outbox.get_nowait().to_dict())
+    return events
+
+
+class TestApprovalSurvivesTheReplyFinishing:
+    """A prompt must not be wiped by the turn's own voice finishing.
+
+    Observed: the agent narrated its plan, then asked to edit a file. The request
+    was announced while the reply was still being spoken and, 637 ms later,
+    `speaking -> idle` was broadcast — which cleared the prompt off the screen
+    while the turn went on waiting for an answer. The session still believed it
+    was SPEAKING, because the agent's own states had never been mirrored into it.
+    """
+
+    async def test_the_session_tracks_the_state_the_turn_reports(self, live_session):
+        from surtitle.core.events import Event, EventKind, SessionState
+
+        session, _store, _record, _sent = live_session
+        session._set_state(SessionState.SPEAKING)
+
+        await session._emit_or_queue(
+            Event(kind=EventKind.STATE, data={"state": SessionState.AWAITING_APPROVAL.value})
+        )
+
+        assert session._state.state is SessionState.AWAITING_APPROVAL, (
+            "the session ignored the state the turn reported, so it stayed on SPEAKING"
+        )
+
+    async def test_finishing_the_reply_does_not_broadcast_over_an_approval(self, live_session):
+        from surtitle.core.events import Event, EventKind, SessionState
+
+        session, _store, _record, _sent = live_session
+        session._set_state(SessionState.SPEAKING)
+        await session._emit_or_queue(
+            Event(kind=EventKind.STATE, data={"state": SessionState.AWAITING_APPROVAL.value})
+        )
+        session._speaking = True
+        _queued(session)
+
+        await session._on_speaking_finished()
+
+        states = [e["data"].get("state") for e in _queued(session) if e["kind"] == "state"]
+        assert states == [], (
+            f"finishing the reply broadcast {states}, which is what dismissed the prompt"
+        )
+        assert session._state.state is SessionState.AWAITING_APPROVAL
+
+    async def test_an_ordinary_reply_finish_still_reports_idle(self, live_session):
+        """The fix must not leave the indicator stuck on SPEAKING forever."""
+        from surtitle.core.events import SessionState
+
+        session, _store, _record, _sent = live_session
+        session._set_state(SessionState.SPEAKING)
+        session._speaking = True
+        _queued(session)
+
+        await session._on_speaking_finished()
+
+        states = [e["data"].get("state") for e in _queued(session) if e["kind"] == "state"]
+        assert states == [SessionState.IDLE.value]
+
+
+class TestAPendingApprovalIsReasked:
+    """The prompt lives on screen, so a reconnect has to be asked again."""
+
+    async def test_the_payload_is_kept_while_the_question_is_open(self):
+        from surtitle.core.agent import ApprovalBroker
+
+        broker = ApprovalBroker()
+        payload = {
+            "call_id": "c1",
+            "name": "edit_file",
+            "summary": "Edit a file",
+            "arguments": {"path": "a.md"},
+            "mutating": True,
+        }
+        broker.register("c1", "edit_file", {"path": "a.md"}, announcement=payload)
+
+        assert broker.pending_announcements() == [payload]
+
+    async def test_nothing_is_reasked_once_it_is_answered(self):
+        from surtitle.core.agent import ApprovalBroker
+
+        broker = ApprovalBroker()
+        broker.register("c1", "edit_file", {}, announcement={"call_id": "c1"})
+        broker.resolve("c1", allowed=True)
+
+        assert broker.pending_announcements() == []
+
+    async def test_a_reconnect_restates_the_open_question(self, live_session):
+        from surtitle.core.events import EventKind
+
+        session, _store, _record, _sent = live_session
+        payload = {"call_id": "c1", "name": "edit_file", "arguments": {}}
+        session.approvals.register("c1", "edit_file", {}, announcement=payload)
+
+        await session.announce()
+
+        kinds = [event["kind"] for event in _queued(session)]
+        assert EventKind.READY.value in kinds
+        assert EventKind.APPROVAL_REQUEST.value in kinds, (
+            "a reconnecting browser was told the state but never asked the question"
+        )
+
+    async def test_a_reconnect_with_nothing_pending_asks_nothing(self, live_session):
+        from surtitle.core.events import EventKind
+
+        session, _store, _record, _sent = live_session
+
+        await session.announce()
+
+        kinds = [event["kind"] for event in _queued(session)]
+        assert kinds == [EventKind.READY.value]
+
+
 def _state_event():
     from surtitle.core.events import Event, EventKind
 

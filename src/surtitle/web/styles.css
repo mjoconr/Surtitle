@@ -605,6 +605,7 @@ button, input, textarea, select {
 .toolrow[data-state="error"] .toolrow__dot { background: var(--dsw-alias-state-error-primary); }
 .toolrow[data-state="stopped"] .toolrow__dot { background: var(--dsw-alias-state-warn-primary); }
 .toolrow[data-state="running"] .toolrow__dot { background: var(--dsw-alias-state-business-primary); }
+.toolrow[data-state="awaiting"] .toolrow__dot { background: var(--dsw-alias-state-warn-primary); }
 
 /* A running row sweeps, so progress is visible without a spinner. */
 .toolrow[data-state="running"]::after {

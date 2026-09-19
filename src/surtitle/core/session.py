@@ -254,6 +254,13 @@ class Session:
             resumed=True,
         )
 
+        # A prompt that is still open is re-asked, because the browser that
+        # reconnected is not the one that was shown it. The session is waiting on
+        # an answer either way, so failing to restate the question leaves the user
+        # with "needs approval", nothing to click, and a turn that never moves.
+        for request in self.approvals.pending_announcements():
+            await self.emit(EventKind.APPROVAL_REQUEST, **request)
+
     async def _build_registry(self) -> Any:
         """Assemble the tool surface, including any MCP servers for this project."""
         registry = default_registry()
@@ -885,6 +892,18 @@ class Session:
         """Send a control-flow event, mirroring only what the UI needs."""
         if event.kind.value.startswith("_"):
             return
+        # Keep the session's own idea of where it stands in step with what the
+        # turn reports. `_set_state` covers the voice transitions, but the agent's
+        # states arrived only as events, so this field went stale: the session
+        # still believed it was SPEAKING while the user was being asked to approve
+        # something, and the `speaking -> idle` transition that followed then
+        # broadcast an idle state that wiped the approval prompt off the screen
+        # while the turn went on waiting for an answer.
+        if event.kind is EventKind.STATE:
+            value = event.data.get("state")
+            if isinstance(value, str):
+                with contextlib.suppress(ValueError):
+                    self._state.state = SessionState(value)
         self._count(event)
         self.events += 1
         event.seq = self.events

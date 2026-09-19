@@ -277,6 +277,8 @@ class _PendingApproval:
     arguments: dict[str, Any]
     future: asyncio.Future[tuple[bool, bool]]
     """Resolves to (allowed, remember) — remember means trust this tool."""
+    announcement: dict[str, Any] = field(default_factory=dict)
+    """The event payload, kept so a reconnecting browser can be asked again."""
 
 
 class ApprovalBroker:
@@ -308,12 +310,21 @@ class ApprovalBroker:
         return sorted(self._auto_approved)
 
     def register(
-        self, call_id: str, tool_name: str, arguments: dict[str, Any]
+        self,
+        call_id: str,
+        tool_name: str,
+        arguments: dict[str, Any],
+        *,
+        announcement: dict[str, Any] | None = None,
     ) -> asyncio.Future[tuple[bool, bool]]:
         """Create the waiter for a request that is about to be announced."""
         future: asyncio.Future[tuple[bool, bool]] = asyncio.get_running_loop().create_future()
         self._pending[call_id] = _PendingApproval(
-            call_id=call_id, tool_name=tool_name, arguments=arguments, future=future
+            call_id=call_id,
+            tool_name=tool_name,
+            arguments=arguments,
+            future=future,
+            announcement=dict(announcement or {}),
         )
         return future
 
@@ -323,6 +334,15 @@ class ApprovalBroker:
     ) -> asyncio.Future[tuple[bool, bool]]:
         """Alias for :meth:`register`."""
         return self.register(call_id, tool_name, arguments)
+
+    def pending_announcements(self) -> list[dict[str, Any]]:
+        """The payloads of the requests still waiting for an answer.
+
+        The prompt lives on the screen, not in the session, so a browser that
+        reconnects mid-decision has to be asked again. Without this it would show
+        "needs approval" with nothing to click while the turn waited forever.
+        """
+        return [dict(item.announcement) for item in self._pending.values() if item.announcement]
 
     def resolve(self, call_id: str, *, allowed: bool, remember: bool = False) -> bool:
         """Answer a request.
@@ -822,21 +842,25 @@ class AgentLoop:
 
             if self._needs_approval(call.name, arguments):
                 call_id = self._call_id(call)
+                # Built once, so what is announced and what a reconnecting browser
+                # is re-announced are the same payload rather than two that drift.
+                announcement = {
+                    "call_id": call_id,
+                    "name": call.name,
+                    "summary": self.registry.summary_for(call.name),
+                    "arguments": _redact_arguments(arguments),
+                    "mutating": self.registry.is_mutating(call.name),
+                }
                 # Register the request BEFORE announcing it. The UI can answer as
                 # soon as it sees the event, so creating the waiter afterwards
                 # would let a fast answer arrive before anything was waiting for
                 # it, and the turn would hang forever.
-                decision = self.approvals.register(call_id, call.name, arguments)
+                decision = self.approvals.register(
+                    call_id, call.name, arguments, announcement=announcement
+                )
 
                 yield self._event(EventKind.STATE, state=SessionState.AWAITING_APPROVAL.value)
-                yield self._event(
-                    EventKind.APPROVAL_REQUEST,
-                    call_id=call_id,
-                    name=call.name,
-                    summary=self.registry.summary_for(call.name),
-                    arguments=_redact_arguments(arguments),
-                    mutating=self.registry.is_mutating(call.name),
-                )
+                yield self._event(EventKind.APPROVAL_REQUEST, **announcement)
 
                 allowed, remember = await self.approvals.decision(call_id, decision)
                 if allowed and remember and call.name == "install_packages":
