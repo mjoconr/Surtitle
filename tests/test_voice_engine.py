@@ -191,3 +191,56 @@ class TestNativeLibraryConflictCheck:
         monkeypatch.setattr("sys.platform", "darwin")
         check = doctor._check_native_conflicts()
         assert check.status is doctor.CheckStatus.SKIP
+
+
+class TestLocalVoiceCheckIsNeverSilent:
+    """A check that did not run must say so, or it reads as a pass.
+
+    Observed: local voice would not start, and `surtitle doctor` reported a clean
+    run. The check only fires while a local engine is selected, and it used to
+    return nothing at all otherwise, so switching back to a hosted engine to get
+    unblocked removed the evidence and the clean report became the reason the real
+    cause was never examined.
+    """
+
+    def test_a_hosted_selection_reports_that_it_was_skipped(self, tmp_path):
+        from surtitle import doctor
+
+        settings = make_settings(
+            tmp_path,
+            SURTITLE_STT_BACKEND="deepgram",
+            SURTITLE_TTS_BACKEND="deepgram",
+        )
+        checks = doctor._check_local_voice(settings)
+        assert checks, "the local voice check vanished from the report instead of skipping"
+
+        check = checks[0]
+        assert check.status is doctor.CheckStatus.SKIP
+        assert "deepgram" in check.detail, "the reason must name what is selected"
+        assert "not checked" in check.detail
+        assert check.ok, "a check that did not run must not fail the report"
+
+    def test_voice_switched_off_says_so(self, tmp_path):
+        from surtitle import doctor
+
+        settings = make_settings(tmp_path, SURTITLE_VOICE="false")
+        checks = doctor._check_local_voice(settings)
+        assert checks and checks[0].status is doctor.CheckStatus.SKIP
+        assert "off" in checks[0].detail
+
+    def test_a_local_selection_still_fails_without_the_extra(self, tmp_path, monkeypatch):
+        """The skip must not have displaced the failure it was hiding."""
+        from surtitle import doctor
+
+        settings = make_settings(
+            tmp_path,
+            SURTITLE_STT_BACKEND="local",
+            SURTITLE_TTS_BACKEND="local",
+        )
+        monkeypatch.setattr(doctor.importlib.util, "find_spec", lambda _name: None)
+
+        checks = doctor._check_local_voice(settings)
+        extra = [check for check in checks if check.name == "Local voice extra"]
+        assert extra, f"a local selection must be checked, got {[c.name for c in checks]}"
+        assert extra[0].status is doctor.CheckStatus.FAIL
+        assert "voice-local" in (extra[0].fix or ""), "the failure must carry the fix"

@@ -206,8 +206,30 @@ def _check_local_voice(settings: Settings) -> list[Check]:
         "stt": settings.stt_backend == "local",
         "tts": settings.tts_backend == "local",
     }
-    if not settings.voice_enabled or not any(selected.values()):
-        return checks
+    # Say so when this is not applicable, rather than returning nothing. A silent
+    # omission is indistinguishable from a pass: the report reads as complete
+    # while the question was never asked, which is how a machine with the extra
+    # missing passes a doctor run — the check is only reached while a local engine
+    # is selected, and switching back to a hosted one to get unblocked hides it
+    # again. `Optional extras` already prints a skip for exactly this reason.
+    if not settings.voice_enabled:
+        return [
+            Check(
+                "Local voice",
+                CheckStatus.SKIP,
+                "voice is switched off, so the local engine was not checked",
+            )
+        ]
+    if not any(selected.values()):
+        engines = f"stt={settings.stt_backend}, tts={settings.tts_backend}"
+        return [
+            Check(
+                "Local voice",
+                CheckStatus.SKIP,
+                f"not selected ({engines}) — the voice-local extra and the local "
+                "models were not checked",
+            )
+        ]
 
     if importlib.util.find_spec("sherpa_onnx") is None:
         checks.append(
