@@ -104,6 +104,13 @@ _NO_ANSWER_FALLBACK = (
     "'work this turn'. Ask again, or ask for a smaller piece of it."
 )
 
+# The same failure with no work behind it: the model returned nothing on its first
+# round, so there is no work log to point at and claiming one would be a lie.
+_NO_REPLY_FALLBACK = (
+    "That turn produced no answer at all — the model returned no text and ran no "
+    "commands. Ask again, or ask for a smaller piece of it."
+)
+
 
 def build_system_prompt(root_name: str) -> str:
     """The prompt that establishes the two-channel output contract.
@@ -804,8 +811,8 @@ class AgentLoop:
                 # eleven minutes, and an empty reply, which from the user's side is
                 # indistinguishable from the agent having stopped.
                 #
-                # So a turn that did work must produce something. One wrap-up round
-                # is asked for, and if that also comes back empty, the failure is
+                # So a closing round must produce something. One wrap-up round is
+                # asked for, and if that also comes back empty, the failure is
                 # reported rather than stored as a silent success.
                 #
                 # The question is asked of *this round*, not of the turn. Asked of
@@ -817,8 +824,16 @@ class AgentLoop:
                 # heard the preamble and then silence, which is exactly the failure
                 # the turn-level check was added to prevent. The closing round is
                 # the one that has to say something.
+                #
+                # It is asked even when the turn has no work behind it. It used not
+                # to be, on the reasoning that a turn which did nothing has nothing
+                # to report. The effect was two real turns on 2026-09-19 — 09:42 and
+                # 11:10 — stored as `complete` with a zero-character assistant
+                # message: nothing said, nothing on screen, no banner and no
+                # Continue button, which reads exactly like the agent having
+                # stopped, and leaves the user nothing to do but ask again.
                 if not (assistant_message.get("content") or "").strip():
-                    if state.actions and not state.wrapped_up:
+                    if not state.wrapped_up:
                         state.wrapped_up = True
                         state.messages.append(
                             {
@@ -827,31 +842,35 @@ class AgentLoop:
                             }
                         )
                         continue
-                    if state.actions:
-                        self._store_reasoning(state)
-                        if self.store and self.session_id:
-                            self.store.add_message(
-                                self.session_id,
-                                "assistant",
-                                _with_actions(_NO_ANSWER_FALLBACK, state.actions),
-                            )
-                        log.warning(
-                            "turn ended with no answer after %d step(s); storing the work log",
-                            state.step,
+                    # Asked once and still nothing. Report it, with the work log
+                    # when there is one and without the lie of "the commands it
+                    # ran" when there is not.
+                    self._store_reasoning(state)
+                    fallback = _NO_ANSWER_FALLBACK if state.actions else _NO_REPLY_FALLBACK
+                    if self.store and self.session_id:
+                        self.store.add_message(
+                            self.session_id,
+                            "assistant",
+                            _with_actions(fallback, state.actions),
                         )
-                        yield self._event(
-                            EventKind.ERROR,
-                            message=_NO_ANSWER_FALLBACK,
-                            kind_detail="no_answer",
-                        )
-                        yield self._event(
-                            EventKind.DONE,
-                            steps=state.step,
-                            failed=True,
-                            reason="no_answer",
-                            detail=_NO_ANSWER_FALLBACK,
-                        )
-                        return
+                    log.warning(
+                        "turn ended with no answer after %d step(s); "
+                        "the closing round was empty twice",
+                        state.step,
+                    )
+                    yield self._event(
+                        EventKind.ERROR,
+                        message=fallback,
+                        kind_detail="no_answer",
+                    )
+                    yield self._event(
+                        EventKind.DONE,
+                        steps=state.step,
+                        failed=True,
+                        reason="no_answer",
+                        detail=fallback,
+                    )
+                    return
 
                 self._store_reasoning(state)
                 if self.store and self.session_id:

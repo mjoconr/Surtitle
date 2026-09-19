@@ -510,16 +510,37 @@ class TestANoAnswerTurn:
 
         assert len(client.calls) == 3, "the wrap-up is asked for once, not repeatedly"
 
-    async def test_an_ordinary_empty_turn_is_untouched(self, settings, tmp_path):
-        """A turn that did nothing at all has no work to report; leave it alone."""
-        client = FakeClient([[StreamEvent(kind="done", finish_reason="stop")]])
-        loop = make_loop(settings, tmp_path, client)
+    async def test_an_empty_first_round_is_asked_and_then_reported(
+        self, settings, tmp_path, stored
+    ):
+        """A turn with no work behind it is not a silent success either.
+
+        It used to be left alone, on the reasoning that a turn which did nothing
+        has nothing to report. Two real turns on 2026-09-19 — 09:42 and 11:10 —
+        were stored as `complete` with a zero-character assistant message: the
+        model's first round returned nothing, the wrap-up was gated on the turn
+        having done work, so it was never asked, and the user got silence with no
+        banner and no Continue to press. That is the worst shape of "it stopped".
+        """
+        store, session_id = stored
+        empty = [StreamEvent(kind="done", finish_reason="stop")]
+        client = FakeClient([empty, empty])
+        loop = make_loop(settings, tmp_path, client, store=store, session_id=session_id)
 
         events = await collect(loop)
 
+        assert len(client.calls) == 2, "an empty first round is asked once, not ignored"
+        assert "Stop calling tools" in client.calls[1]["messages"][-1]["content"], (
+            "the round after the silence must be told to answer"
+        )
         done = next(e for e in events if e.kind is EventKind.DONE)
-        assert done.data.get("reason") == "complete"
-        assert len(client.calls) == 1
+        assert done.data.get("reason") == "no_answer"
+        assert done.data.get("failed") is True
+        stored_tail = [m for m in store.list_messages(session_id) if m.role == "assistant"][-1]
+        assert stored_tail.content.strip(), "an empty turn must not store an empty reply"
+        assert "ran no commands" in stored_tail.content, (
+            "with no work log there is nothing to point at, and saying there is would be a lie"
+        )
 
     async def test_a_silent_closing_round_after_speech_is_asked_to_wrap_up(
         self, settings, tmp_path, stored
