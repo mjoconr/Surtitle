@@ -646,3 +646,64 @@ class TestReadyReportsTheVoiceEngines:
         # reply is missing, and the session says so rather than going silent.
         assert ready["voice_problem"]
         assert ready["voice_backends"]["stt"] == "deepgram"
+
+
+class TestAClosedSessionDoesNotKeepItsSocket:
+    """A session that has been closed must not go on being talked to.
+
+    Reported as "I just restarted but it seems broken, text and voice", where a
+    page refresh fixed it. The session underneath had been torn down — its engines
+    stopped, and `emit` drops everything — but this connection kept dispatching
+    into the dead object, so a turn ran, stored its work, and reached neither the
+    screen nor the speaker. Nothing was logged and nothing was said.
+
+    Ending the connection is what turns that into a reconnect.
+    """
+
+    async def test_the_pump_stops_for_a_closed_session(self):
+        from surtitle.server import _pump
+
+        class Socket:
+            def __init__(self):
+                self.reads = 0
+
+            async def receive(self):
+                self.reads += 1
+                return {"type": "websocket.receive", "text": '{"kind": "ping"}'}
+
+        class Closed:
+            closed = True
+
+        socket = Socket()
+        await _pump(socket, Closed())  # type: ignore[arg-type]
+
+        assert socket.reads == 0, "a closed session must not be handed more work"
+
+    async def test_the_pump_still_runs_until_the_client_leaves(self):
+        from surtitle.server import _pump
+
+        class Socket:
+            def __init__(self):
+                self.reads = 0
+
+            async def receive(self):
+                self.reads += 1
+                return {"type": "websocket.disconnect"}
+
+        class Live:
+            closed = False
+
+        socket = Socket()
+        await _pump(socket, Live())  # type: ignore[arg-type]
+
+        assert socket.reads == 1, "an open session is served until the socket closes"
+
+    def test_closing_a_session_is_recorded(self):
+        """Two silent closes made this take reading the log by hand to place."""
+        import inspect
+
+        from surtitle.core.session import Session, SessionManager
+
+        assert "self._closed = True" in inspect.getsource(Session.close)
+        assert "session closed" in inspect.getsource(Session.close)
+        assert "closing session" in inspect.getsource(SessionManager.release)

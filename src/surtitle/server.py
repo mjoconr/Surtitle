@@ -1242,8 +1242,18 @@ async def _await_hello(websocket: WebSocket) -> dict[str, Any] | None:
 
 
 async def _pump(websocket: WebSocket, session: Session) -> None:
-    """Dispatch client commands until the socket closes."""
-    while True:
+    """Dispatch client commands until the socket closes.
+
+    It also stops when the session underneath has been closed. A closed session
+    keeps its object, its socket and its engines-in-name-only: they are stopped,
+    `emit` drops every event on the floor, and a turn started on it runs to
+    completion without reaching the screen or the speaker. Nothing said so — the
+    browser went on talking to a session that could not hear, answer or speak,
+    which reads exactly like a broken app, and a page reload fixed it by building
+    a fresh session. Ending the connection instead lets the browser reconnect on
+    its own, into a session that works.
+    """
+    while not session.closed:
         message = await websocket.receive()
         kind = message.get("type")
         if kind == "websocket.disconnect":

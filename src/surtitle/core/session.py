@@ -327,6 +327,7 @@ class Session:
     async def close(self) -> None:
         """Tear everything down, cancelling any in-flight turn."""
         self._closed = True
+        log.info("session closed: id=%s", self.session_id)
         await self.cancel_turn()
         if self.mcp_manager is not None:
             with contextlib.suppress(Exception):
@@ -1465,6 +1466,18 @@ class Session:
     def state(self) -> SessionState:
         return self._state.state
 
+    @property
+    def closed(self) -> bool:
+        """True once this session has been torn down and can no longer answer.
+
+        A closed session keeps its object and, until the connection notices, its
+        socket: its engines are stopped, `emit` drops every event, and a turn
+        started on it runs to completion without reaching the screen or the
+        speaker. Reported from a real session as "restarted and it seems broken,
+        text and voice", where a page refresh fixed it by building a fresh one.
+        """
+        return self._closed
+
 
 class SessionManager:
     """Tracks live sessions so the WebSocket route can clean up reliably."""
@@ -1531,6 +1544,10 @@ class SessionManager:
                 return
             self._sessions.pop(session_id, None)
             self._orphaned_at.pop(session_id, None)
+            # Logged because the alternative was silence: a connection that was
+            # still open went on dispatching into the closed session, and the only
+            # visible symptom was a conversation that had stopped answering.
+            log.info("closing session %s: its connection left with nothing in flight", session_id)
             await session.close()
 
     def _ensure_sweeper(self) -> None:
