@@ -687,7 +687,14 @@ Then:
 - Speech models are **not** carried over by the `.env` change alone. If you skip
   the data-directory move, run `surtitle models download` to fetch them again.
 
-[Unreleased]: https://github.com/mjoconr/Surtitle/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/mjoconr/Surtitle/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/mjoconr/Surtitle/releases/tag/v0.8.1
+[0.8.0]: https://github.com/mjoconr/Surtitle/releases/tag/v0.8.0
+[0.7.0]: https://github.com/mjoconr/Surtitle/releases/tag/v0.7.0
+[0.6.0]: https://github.com/mjoconr/Surtitle/releases/tag/v0.6.0
+[0.5.2]: https://github.com/mjoconr/Surtitle/releases/tag/v0.5.2
+[0.5.1]: https://github.com/mjoconr/Surtitle/releases/tag/v0.5.1
+[0.5.0]: https://github.com/mjoconr/Surtitle/releases/tag/v0.5.0
 [0.4.0]: https://github.com/mjoconr/Surtitle/releases/tag/v0.4.0
 [0.3.0]: https://github.com/mjoconr/Surtitle/releases/tag/v0.3.0
 [0.2.0]: https://github.com/mjoconr/Surtitle/releases/tag/v0.2.0
