@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The model can come from somewhere else.** Settings → Model now chooses the
+  provider, not just the model: DeepSeek, OpenRouter, or a model server on this
+  machine (Ollama, or anything else speaking the same API). The last one needs no key
+  and keeps the conversation on your machine, with the endpoint configurable for a
+  server that lives on another box. Each provider remembers its own model, and only
+  the selected provider's settings are shown — three model boxes in one section would
+  leave you working out which one counts. A key that is missing, refused or rate
+  limited is reported with the *provider* named, because with more than one configured
+  "the API rejected the key" sends you to whichever one you happen to think of.
+
 - **Settings are organised by what you are choosing, not by who provides it.** The
   sections are now the Model, Speech to text, Text to speech and Search, and each
   one holds everything that belongs to it: the choice, that provider's models, and

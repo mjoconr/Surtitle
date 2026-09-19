@@ -30,9 +30,17 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from surtitle.config import DEEPGRAM_STT_MODEL, DEEPGRAM_TTS_MODEL, Settings
+from surtitle.config import Settings
+from surtitle.providers import (
+    CAPABILITIES,
+    CAPABILITIES_BY_ID,
+    PROVIDER_SPECS,
+    ProviderSpec,
+)
 
 __all__ = [
+    "CAPABILITIES",
+    "CAPABILITIES_BY_ID",
     "PROVIDER_SPECS",
     "CredentialState",
     "ProviderSpec",
@@ -61,139 +69,6 @@ class SettingsValidationError(ValueError):
     def __init__(self, message: str, *, field_name: str | None = None) -> None:
         super().__init__(message)
         self.field_name = field_name
-
-
-@dataclass(slots=True, frozen=True)
-class Capability:
-    """One thing Surtitle needs a service for, and how a provider is chosen.
-
-    The unit the settings screen is built around, and the unit a person thinks in:
-    which model, which speech recognition, which voice, which search. Everything the
-    screen shows for a capability — its section, its selector, its providers, their
-    key fields, their install state — is derived from this table and
-    :data:`PROVIDER_SPECS`, so adding a provider is one entry rather than an entry
-    here, an entry there, and a page of hand-written UI.
-    """
-
-    id: str
-    label: str
-    # The preference that selects the provider, when there is a choice to make. A
-    # capability with one provider has nothing to select — the LLM has one today —
-    # and the section shows that provider's settings instead of a selector with a
-    # single option.
-    setting: str | None
-    providers: tuple[str, ...]
-    # A choice meaning "pick for me", offered first. Only search has one: the best
-    # provider there depends on whether a key is configured at all.
-    automatic: str | None = None
-
-
-# The four services, in the order they are configured. Speech to text before text
-# to speech because a voice conversation starts with the microphone.
-CAPABILITIES: tuple[Capability, ...] = (
-    Capability("llm", "Model", None, ("deepseek",)),
-    Capability("stt", "Speech to text", "stt_backend", ("deepgram", "local")),
-    Capability("tts", "Text to speech", "tts_backend", ("deepgram", "local")),
-    Capability(
-        "search",
-        "Search",
-        "search_provider",
-        ("duckduckgo", "tavily"),
-        automatic="automatic",
-    ),
-)
-
-CAPABILITIES_BY_ID = {capability.id: capability for capability in CAPABILITIES}
-
-
-@dataclass(slots=True, frozen=True)
-class ProviderSpec:
-    """How one provider is addressed: what it can do, and how to reach it.
-
-    ``api_key_env`` is a *reference* (the environment variable name), never the
-    secret itself, so provider configuration can be stored and displayed safely.
-    It is ``None`` for a provider that needs no credential — a local engine, or a
-    search that this application performs itself.
-    """
-
-    id: str
-    label: str
-    # What this provider can serve. A provider may serve more than one capability:
-    # Deepgram recognises and speaks, and the local engines do both.
-    capabilities: tuple[str, ...]
-    base_url: str = ""
-    # The environment variable that holds its key, or None when it needs none.
-    api_key_env: str | None = None
-    models: tuple[str, ...] = ()
-    default_model: str = ""
-    docs_url: str = ""
-    # ``models`` endpoint used to validate a key and refresh the model list.
-    discovery_path: str | None = "/models"
-    needs_key: bool = True
-    # "api" is somebody else's service, "local" runs on this machine and has to be
-    # installed, "builtin" is done by this application with no service at all.
-    kind: str = "api"
-    # The install action a local provider needs, if any.
-    install: str | None = None
-
-
-PROVIDER_SPECS: dict[str, ProviderSpec] = {
-    "deepseek": ProviderSpec(
-        id="deepseek",
-        label="DeepSeek",
-        capabilities=("llm",),
-        api_key_env="DEEPSEEK_API_KEY",
-        base_url="https://api.deepseek.com",
-        models=("deepseek-flash", "deepseek-v4-pro"),
-        default_model="deepseek-flash",
-        docs_url="https://platform.deepseek.com/api_keys",
-    ),
-    "deepgram": ProviderSpec(
-        id="deepgram",
-        label="Deepgram",
-        capabilities=("stt", "tts"),
-        api_key_env="DEEPGRAM_API_KEY",
-        base_url="https://api.deepgram.com",
-        models=(DEEPGRAM_STT_MODEL, DEEPGRAM_TTS_MODEL),
-        default_model=DEEPGRAM_STT_MODEL,
-        docs_url="https://console.deepgram.com/",
-        # Deepgram has no cheap unauthenticated model listing; the streaming
-        # socket probe in :mod:`surtitle.doctor` is the validation path.
-        discovery_path=None,
-    ),
-    "local": ProviderSpec(
-        id="local",
-        label="On this machine",
-        capabilities=("stt", "tts"),
-        needs_key=False,
-        kind="local",
-        # The engines and their models are hundreds of megabytes, so choosing this
-        # is not enough: the section has to say whether they are here and offer to
-        # fetch them.
-        install="voice",
-    ),
-    "duckduckgo": ProviderSpec(
-        id="duckduckgo",
-        label="This application fetches them",
-        capabilities=("search",),
-        needs_key=False,
-        kind="builtin",
-        docs_url="https://duckduckgo.com/",
-    ),
-    "tavily": ProviderSpec(
-        id="tavily",
-        label="Tavily",
-        capabilities=("search",),
-        api_key_env="TAVILY_API_KEY",
-        base_url="https://api.tavily.com",
-        docs_url="https://app.tavily.com/home",
-        # A key is validated by asking what it has used. It is a real authenticated
-        # call, it costs nothing, and it distinguishes a revoked key from a working
-        # one — which is the whole job of the Test button. Tavily has no model list,
-        # so the verifier reports the provider and an empty list of models.
-        discovery_path="/usage",
-    ),
-}
 
 
 @dataclass(slots=True)
@@ -227,9 +102,23 @@ class _Field:
     minimum: float | None = None
     maximum: float | None = None
     section: str = "general"
+    # The provider this preference belongs to, when it is one provider's setting
+    # rather than the capability's. A model name means nothing to the other
+    # providers, so the screen shows only the selected one's.
+    provider: str | None = None
 
 
 SETTINGS_FIELDS: tuple[_Field, ...] = (
+    _Field(
+        "llm_provider",
+        str,
+        "Model provider",
+        "Where the agent's turns are sent. Every provider here speaks the same API, "
+        "so this changes the endpoint, the key and the model — not what the agent can "
+        "do. A provider running on this machine keeps the conversation on it.",
+        choices=CAPABILITIES_BY_ID["llm"].providers,
+        section="llm",
+    ),
     _Field(
         "deepseek_model",
         str,
@@ -237,6 +126,33 @@ SETTINGS_FIELDS: tuple[_Field, ...] = (
         "DeepSeek model used for the agent loop.",
         choices=PROVIDER_SPECS["deepseek"].models,
         section="llm",
+        provider="deepseek",
+    ),
+    _Field(
+        "openrouter_model",
+        str,
+        "Model",
+        "Any model this key can use. Press Test on the OpenRouter card below to list "
+        "them, then put the name here.",
+        section="llm",
+        provider="openrouter",
+    ),
+    _Field(
+        "ollama_model",
+        str,
+        "Model",
+        "A model that has been pulled locally, for example llama3.2 or qwen2.5-coder.",
+        section="llm",
+        provider="ollama",
+    ),
+    _Field(
+        "ollama_base_url",
+        str,
+        "Endpoint",
+        "Where the local model server is. The default is Ollama's; llama.cpp and "
+        "others work here too if they serve the same API.",
+        section="llm",
+        provider="ollama",
     ),
     _Field(
         "reasoning_effort",
@@ -247,6 +163,7 @@ SETTINGS_FIELDS: tuple[_Field, ...] = (
         "spoken turns feel slow.",
         choices=("minimal", "low", "medium", "high"),
         section="llm",
+        provider="deepseek",
     ),
     _Field(
         "search_provider",
@@ -266,6 +183,7 @@ SETTINGS_FIELDS: tuple[_Field, ...] = (
         "Thinking mode",
         "Stream the model's reasoning to the UI. Reasoning is never spoken aloud.",
         section="llm",
+        provider="deepseek",
     ),
     _Field(
         "temperature",
@@ -732,6 +650,7 @@ class SettingsStore:
                     "value": getattr(effective, spec.name),
                     "stored": spec.name in self._stored,
                     "env_locked": _env_locked(spec.name),
+                    "provider": spec.provider,
                 }
             )
 

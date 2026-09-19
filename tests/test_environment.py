@@ -454,15 +454,23 @@ class TestEveryProvidersKeyReachesTheCodeThatUsesIt:
             assert stored.get_secret_value() == f"value-for-{spec.id}"
 
     def test_a_provider_that_needs_no_key_is_not_a_credential(self, tmp_path):
-        """A local engine and a search this application performs itself have no key,
-        and asking for one is how the keyless card came to show a blank input."""
+        """A local engine, a local model server, and a search this application
+        performs itself have no key, and asking for one is how the keyless card came
+        to show a blank input.
+
+        Asserted as the invariant rather than a list of names: a provider either
+        needs a credential or names the variable that holds it, never both and never
+        neither.
+        """
         from surtitle.store.settings_store import PROVIDER_SPECS
 
-        keyless = {spec.id for spec in PROVIDER_SPECS.values() if not spec.needs_key}
-
-        assert keyless == {"local", "duckduckgo"}
-        for provider_id in keyless:
-            assert PROVIDER_SPECS[provider_id].api_key_env is None
+        for spec in PROVIDER_SPECS.values():
+            assert (spec.api_key_env is None) == (not spec.needs_key), (
+                f"{spec.id}: needs_key={spec.needs_key} but api_key_env={spec.api_key_env}"
+            )
+        assert any(not spec.needs_key for spec in PROVIDER_SPECS.values()), (
+            "if every provider needed a key this would be vacuous"
+        )
 
     def test_the_tavily_key_in_particular(self, tmp_path):
         """The one this was found by: web search reads `settings.tavily_key()`."""

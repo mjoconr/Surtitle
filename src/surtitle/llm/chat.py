@@ -33,6 +33,7 @@ from typing import Any
 import httpx
 
 from surtitle.config import Settings
+from surtitle.providers import ChatTarget, resolve_chat
 
 __all__ = [
     "ChatClient",
@@ -139,15 +140,40 @@ class _Accumulator:
 
 
 class ChatClient:
-    """Async client for DeepSeek chat completions."""
+    """Streaming chat client for the selected model provider.
 
-    def __init__(self, settings: Settings, *, client: httpx.AsyncClient | None = None) -> None:
+    The provider is resolved once, at construction, from the settings. Nothing else
+    in here knows about DeepSeek except the two request fields only DeepSeek
+    understands, which are sent to DeepSeek alone.
+    """
+
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        client: httpx.AsyncClient | None = None,
+        target: ChatTarget | None = None,
+    ) -> None:
         self.settings = settings
+        self._target = target
         self._owns_client = client is None
         self._client = client or httpx.AsyncClient(
             timeout=httpx.Timeout(settings.request_timeout, connect=20.0),
             limits=httpx.Limits(max_connections=8, max_keepalive_connections=4),
         )
+
+    @property
+    def target(self) -> ChatTarget:
+        """Where this client would send a turn, resolved now rather than at birth.
+
+        The server builds one client at start-up and hands it to every session, so a
+        client that resolved its provider in the constructor kept using the provider
+        that was selected when the process started: choosing another one in Settings
+        changed nothing until a restart, and the failure looked like the *new*
+        provider rejecting the key. Resolution is a table lookup, so it costs
+        nothing to do per use.
+        """
+        return self._target if self._target is not None else resolve_chat(self.settings)
 
     async def aclose(self) -> None:
         if self._owns_client:
@@ -166,7 +192,7 @@ class ChatClient:
         tools: list[dict[str, Any]] | None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
-            "model": self.settings.deepseek_model,
+            "model": self.target.model,
             "messages": list(messages),
             "stream": True,
             "max_tokens": self.settings.max_tokens,
@@ -175,28 +201,36 @@ class ChatClient:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
 
-        if self.settings.thinking_enabled:
-            # DeepSeek's thinking control. Sent only when enabled so a provider
-            # that does not support it is not sent an unknown field.
+        if self.target.thinking_controls and self.settings.thinking_enabled:
+            # DeepSeek's thinking control, and only DeepSeek's: a provider handed a
+            # field it does not know rejects the whole request, which arrives as
+            # "that model does not work" rather than as a rejected field.
             payload["thinking"] = {"type": "enabled"}
             payload["reasoning_effort"] = self.settings.reasoning_effort
         else:
-            # Temperature is only meaningful with thinking off; DeepSeek ignores
-            # or rejects it otherwise, which is a common source of confusion.
+            # Temperature is only meaningful with thinking off; DeepSeek ignores or
+            # rejects it otherwise, which is a common source of confusion.
             payload["temperature"] = self.settings.temperature
         return payload
 
     def _headers(self) -> dict[str, str]:
-        key = self.settings.deepseek_key()
-        if not key:
-            raise ChatError(
-                "DEEPSEEK_API_KEY is not configured. Add it in Settings or in your .env file."
-            )
-        return {
-            "Authorization": f"Bearer {key}",
+        headers = {
             "Content-Type": "application/json",
             "Accept": "text/event-stream",
         }
+        key = self.target.api_key
+        if not key:
+            if self.target.needs_key:
+                # Named by provider: with more than one, "the API key is missing" is
+                # not an instruction anybody can follow.
+                variable = self.target.api_key_env or "an API key"
+                raise ChatError(
+                    f"{self.target.label} is selected for the model but {variable} is "
+                    "not configured. Add it in Settings, or choose another provider."
+                )
+            return headers
+        headers["Authorization"] = f"Bearer {key}"
+        return headers
 
     # --- streaming --------------------------------------------------------
     async def stream(
@@ -211,7 +245,7 @@ class ChatClient:
         been produced. Once bytes have been delivered a retry would duplicate
         output, so the error is surfaced instead.
         """
-        url = f"{self.settings.safe_base_url}/chat/completions"
+        url = f"{self.target.base_url}/chat/completions"
         payload = self._payload(messages, tools)
 
         last_error: Exception | None = None
@@ -250,8 +284,8 @@ class ChatClient:
 
         raise ChatError(f"Request failed after {_MAX_RETRIES} attempts: {last_error}")
 
-    @staticmethod
-    def _http_error(status: int, body: bytes) -> ChatError:
+    def _http_error(self, status: int, body: bytes) -> ChatError:
+        target = self.target
         detail = ""
         with contextlib.suppress(Exception):
             parsed = json.loads(body)
@@ -267,21 +301,22 @@ class ChatClient:
             detail = body.decode("utf-8", errors="replace")[:300]
 
         if status in (401, 403):
-            message = (
-                "The DeepSeek API rejected the key. Check DEEPSEEK_API_KEY in Settings. "
-                f"({status}: {detail})"
-            )
+            # Named by provider: with more than one configured, "the API rejected the
+            # key" sends the reader to whichever one they think of, and the one that
+            # answered is the only one that matters.
+            where = f" Check {target.api_key_env} in Settings." if target.api_key_env else ""
+            message = f"{target.label} rejected the key.{where} ({status}: {detail})"
         elif status == 402:
-            message = f"DeepSeek reports insufficient balance. ({detail})"
+            message = f"{target.label} reports insufficient balance. ({detail})"
         elif status == 404:
             message = (
-                f"Model {detail or 'not found'}: the configured model may not exist. "
-                "Check the model name in Settings."
+                f"{target.label} does not know the model {detail or target.model!r}: the "
+                "configured model may not exist. Check the model name in Settings."
             )
         elif status == 429:
-            message = f"DeepSeek rate limit reached. ({detail})"
+            message = f"{target.label} rate limit reached. ({detail})"
         else:
-            message = f"DeepSeek API error {status}: {detail}"
+            message = f"{target.label} API error {status}: {detail}"
 
         return ChatError(message, status=status, retryable=status in _RETRY_STATUS)
 

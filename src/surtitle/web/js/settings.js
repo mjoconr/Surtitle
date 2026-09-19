@@ -126,7 +126,7 @@ export class SettingsPanel {
     }
 
     const fields = this.described.sections[this.activeSection] || [];
-    this.renderFields(fields);
+    this.renderFields(this.activeSection, fields);
     // The provider a capability is served by, right under the choice between them:
     // its key, whether it is ready, and how to install it if it runs here.
     const capability = this.capabilityFor(this.activeSection);
@@ -532,8 +532,23 @@ export class SettingsPanel {
     }
   }
 
-  renderFields(fields) {
-    for (const field of fields) {
+  /**
+   * The fields of a section, minus the ones belonging to a provider that is not
+   * selected.
+   *
+   * A model name means nothing to the other providers, so showing all of them puts
+   * three model boxes in the Model section and leaves the reader to work out which
+   * one counts. Temperature and the section's own choices belong to no provider and
+   * are always shown.
+   */
+  visibleFields(section, fields) {
+    const capability = this.capabilityFor(section);
+    const chosen = capability && capability.setting ? this.valueOf(capability.setting) : null;
+    return fields.filter((field) => !field.provider || field.provider === chosen);
+  }
+
+  renderFields(section, fields) {
+    for (const field of this.visibleFields(section, fields)) {
       const row = document.createElement("div");
       row.className = "setting";
 

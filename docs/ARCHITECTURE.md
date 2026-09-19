@@ -182,6 +182,36 @@ stream (which Python does not allow), it yields a single `_completion` event at 
 end. `run()` consumes that event and never forwards it. This keeps everything on one
 stream, so ordering is guaranteed without correlating two channels.
 
+## Services and capabilities
+
+Which service does what is described in one place, `src/surtitle/providers.py`:
+
+- a **capability** is a thing that has to be done — run the model, recognise speech,
+  speak, search;
+- a **provider** is one way of doing it, and may serve more than one capability.
+  Deepgram recognises and speaks; so do the engines that run on this machine.
+
+Everything about choosing one is generated from those two tables rather than written
+out again: the settings sections and their order, the provider selector in each, the
+key field for the provider that needs one, the install state and install action for
+one that runs here, and the endpoint a model turn is sent to. Adding a provider is an
+entry in the table; the screen, the settings store and the chat client all pick it up.
+
+Because a provider may serve two capabilities, one key can appear under both — the
+Deepgram key is in Speech to text and in Text to speech, and it is the same key in
+both. That is the honest shape: the choice belongs to the capability, and a person
+configuring speech recognition should not have to know that the same vendor also
+sells voices.
+
+**The model provider is chosen the same way.** Every provider speaks OpenAI's wire
+format, so a turn is addressed by resolving (endpoint, key, model) from the tables —
+`resolve_chat()` — rather than by having a client per vendor. What differs is what the
+provider will accept: DeepSeek's `thinking` and `reasoning_effort` fields are sent to
+DeepSeek alone, because a provider handed a field it does not know rejects the whole
+request. The client resolves that per use rather than at construction, since the
+server builds one client at start-up and hands it to every session; resolving at
+construction pins it to whatever was selected when the process started.
+
 ## The speak layer
 
 `core/speak.py`. The most important file in the project.

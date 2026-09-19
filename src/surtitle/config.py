@@ -118,14 +118,30 @@ class Settings(BaseSettings):
     # rate-limited, and a Tavily key is the dependable route. Absent by default, and
     # never required — nothing else in the application depends on it.
     tavily_api_key: SecretStr | None = Field(default=None, alias="TAVILY_API_KEY")
+    # A second model provider. Both speak the same wire format, so this is a
+    # different endpoint and key rather than a different client.
+    openrouter_api_key: SecretStr | None = Field(default=None, alias="OPENROUTER_API_KEY")
 
     # Which provider web search uses: "automatic" (a key if there is one, otherwise
     # the keyless scrape), or one of them by name.
     search_provider: str = Field(default="automatic", alias="SURTITLE_SEARCH_PROVIDER")
 
     # --- models ----------------------------------------------------------
+    # Which provider the model turns go to, and the model for each one. The model is
+    # per provider so switching away and back does not lose the choice.
+    llm_provider: str = Field(default="deepseek", alias="SURTITLE_LLM_PROVIDER")
     deepseek_model: str = Field(default="deepseek-flash", alias="DEEPSEEK_MODEL")
     deepseek_base_url: str = Field(default=DEEPSEEK_BASE_URL, alias="DEEPSEEK_BASE_URL")
+    # OpenRouter serves hundreds of models and the list changes; the Test button
+    # lists what a key can actually use, so this is free text with a working default.
+    openrouter_model: str = Field(default="openai/gpt-4o-mini", alias="OPENROUTER_MODEL")
+    # Ollama and llama.cpp serve whatever has been pulled locally, which this cannot
+    # know, so the model is free text too.
+    ollama_model: str = Field(default="llama3.2", alias="OLLAMA_MODEL")
+    # A local endpoint can live on another machine or another port.
+    ollama_base_url: str = Field(
+        default="http://127.0.0.1:11434/v1", alias="SURTITLE_OLLAMA_BASE_URL"
+    )
     # How long the model thinks before it acts. This was `low`, which is the single
     # largest reason a Surtitle turn looked less capable than the same model in a
     # harness that left it alone: the work was never attempted, not attempted badly.
@@ -353,6 +369,22 @@ class Settings(BaseSettings):
         Unset is the normal case: the search tool falls back to the keyless scrape.
         """
         return self.tavily_api_key.get_secret_value() if self.tavily_api_key else None
+
+    def api_key_for(self, ref: str | None) -> str | None:
+        """The value of the credential named by an environment-variable reference.
+
+        The reference is the variable name — ``OPENROUTER_API_KEY`` — and the field
+        that holds it is that name lowercased, which is the same convention the
+        settings store uses to apply a saved key. One lookup serves every provider,
+        so a new one does not need a function of its own.
+        """
+        if not ref:
+            return None
+        field = getattr(self, ref.lower(), None)
+        if field is None:
+            return None
+        getter = getattr(field, "get_secret_value", None)
+        return getter() if callable(getter) else str(field)
 
     def needs_credential(self, name: str) -> bool:
         """True when ``name`` is required by the selected backends.
