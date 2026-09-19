@@ -18,6 +18,7 @@ import asyncio
 import base64
 import contextlib
 import logging
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -162,6 +163,13 @@ class Session:
     _commit_task: asyncio.Task[None] | None = None
     # Set when an interrupted turn was already written to the transcript.
     _rolled_back: bool = False
+    # Per-turn accounting, reported when the turn ends. The run-wide totals live
+    # in `RunStats`; these are what the turn-end record and its log line report,
+    # because "how big did this turn get, and what did it say" is the question a
+    # turn that stopped without explaining itself leaves behind.
+    _turn_started_at: float = 0.0
+    _turn_prompt_tokens: int = 0
+    _turn_completion_tokens: int = 0
     registry: Any = None
     mcp_manager: Any = None
     project_config: Any = None
@@ -702,6 +710,17 @@ class Session:
 
         history = self._build_history()
 
+        # Per-turn accounting, reset here rather than at the end so that a turn
+        # which dies without a `done` still reports what it actually used.
+        self._turn_started_at = time.time()
+        self._turn_prompt_tokens = 0
+        self._turn_completion_tokens = 0
+        if self.store and self.session_id:
+            with contextlib.suppress(Exception):
+                # The previous turn's ending is no longer the answer to "why does
+                # this look stopped", now that a new turn is running.
+                self.store.start_turn(self.session_id)
+
         # Progress narration: a long tool-using turn is otherwise silent, and
         # silence reads as "it stopped". Announced at increasing step counts, and
         # only while the agent has not said anything of its own.
@@ -723,16 +742,18 @@ class Session:
                     await self._on_approval_requested(event.data)
                 elif event.kind is EventKind.ERROR:
                     await self._speak_problem(event.data)
-                elif event.kind is EventKind.DONE and event.data.get("reason") not in (
-                    None,
-                    "complete",
-                ):
-                    # A turn that ends for any reason other than finishing says so
-                    # aloud, in the same sentence the transcript shows. A turn cut
-                    # short used to go quiet: the indicator slid back to "Idle" and
-                    # nothing distinguished "done" from "gave up", so the only way
-                    # to find out was to ask again.
-                    await self._speak_problem(event.data)
+                elif event.kind is EventKind.DONE:
+                    # Written down before it is spoken: the record is what a
+                    # reload and the next investigation read, and speaking can
+                    # fail on its own.
+                    await self._record_turn_end(event.data, loop)
+                    if event.data.get("reason") not in (None, "complete"):
+                        # A turn that ends for any reason other than finishing says so
+                        # aloud, in the same sentence the transcript shows. A turn cut
+                        # short used to go quiet: the indicator slid back to "Idle" and
+                        # nothing distinguished "done" from "gave up", so the only way
+                        # to find out was to ask again.
+                        await self._speak_problem(event.data)
                 elif event.kind is EventKind.STATE and not spoke:
                     current = int(event.data.get("step") or 0)
                     due = next(
@@ -777,6 +798,12 @@ class Session:
 
             with contextlib.suppress(Exception):
                 await self.emit(EventKind.STATE, state=SessionState.IDLE.value, reason="stopped")
+            if self.store and self.session_id:
+                with contextlib.suppress(Exception):
+                    # The user stopped it, so this is a fact about the record
+                    # rather than something to explain on screen: the client has
+                    # no banner for it, deliberately.
+                    self.store.record_turn_end(self.session_id, reason="cancelled")
             raise
         except Exception as exc:  # a turn failure must not kill the session
             log.exception("turn failed")
@@ -1130,6 +1157,12 @@ class Session:
         behind a second call site in a second module for no gain, and counting
         in the browser would lose a turn the user never watched.
         """
+        if event.kind is EventKind.USAGE:
+            # Accumulated whether or not the run-wide counters are wired up: the
+            # turn-end record is written for every turn, including in tests and
+            # in a session built without stats.
+            self._turn_prompt_tokens += int(event.data.get("prompt_tokens") or 0)
+            self._turn_completion_tokens += int(event.data.get("completion_tokens") or 0)
         if self.stats is None:
             return
         if event.kind is EventKind.USAGE:
@@ -1140,6 +1173,35 @@ class Session:
             )
         else:
             self.stats.record_event(event.kind)
+
+    async def _record_turn_end(self, data: dict[str, Any], loop: AgentLoop) -> None:
+        """Write down why the turn ended, and say so in the log.
+
+        Both halves were missing, and for the same reason: a turn that stopped
+        left a transcript that merely looked unfinished. Nothing logged its
+        ending except the step-limit path, and nothing stored it at all, so "it
+        just stopped" could not be answered from the record — which is why
+        explaining one report needed the database read by hand.
+        """
+        reason = str(data.get("reason") or "complete")
+        steps = int(data.get("steps") or 0)
+        detail = str(data.get("detail") or "")
+        elapsed = max(0.0, time.time() - self._turn_started_at) if self._turn_started_at else 0.0
+        log.info(
+            "turn ended: reason=%s steps=%d duration=%.1fs spoken=%d chars tokens=%d/%d%s",
+            reason,
+            steps,
+            elapsed,
+            len(loop.partial_spoken or ""),
+            self._turn_prompt_tokens,
+            self._turn_completion_tokens,
+            f" -- {detail}" if detail else "",
+        )
+        if self.store and self.session_id:
+            with contextlib.suppress(Exception):
+                self.store.record_turn_end(
+                    self.session_id, reason=reason, detail=detail, steps=steps
+                )
 
     def _build_history(self) -> list[ChatMessage]:
         """Rebuild model context from the stored transcript.

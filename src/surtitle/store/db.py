@@ -33,6 +33,11 @@ SCHEMA_VERSION = 3
 # stored reasoning row is display-only by construction.
 REASONING_ROLE = "reasoning"
 
+# How much of a turn's ending explanation is kept. It is shown to the user, so it
+# has to survive a reload, but it is a sentence or two by construction — the cap
+# is only there so a pathological model reply cannot become the session record.
+_TURN_END_DETAIL_CHARS = 1000
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
@@ -60,7 +65,15 @@ CREATE TABLE IF NOT EXISTS sessions (
     -- NULL while the conversation is live. A timestamp once the user filed it
     -- away: archived conversations keep their messages and can be restored, but
     -- drop out of the sidebar and out of the agent's history search.
-    archived_at REAL
+    archived_at REAL,
+    -- How the last turn ended, written when it does and cleared when the next
+    -- one starts. Without it the browser had to infer "stopped" from the shape
+    -- of the transcript, and it could not tell a finished turn from a crashed
+    -- one — which is what made "it just stopped" so hard to answer.
+    last_end_reason TEXT,
+    last_end_detail TEXT,
+    last_end_steps  INTEGER,
+    last_end_at     REAL
 );
 
 CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id, updated_at DESC);
@@ -151,6 +164,11 @@ class Session:
     created_at: float
     updated_at: float
     archived_at: float | None = None
+    # Why the last turn ended, and how far it got. See `record_turn_end`.
+    last_end_reason: str | None = None
+    last_end_detail: str | None = None
+    last_end_steps: int | None = None
+    last_end_at: float | None = None
 
     @property
     def archived(self) -> bool:
@@ -165,6 +183,12 @@ class Session:
             "updated_at": self.updated_at,
             "archived_at": self.archived_at,
             "archived": self.archived,
+            # Sent to the browser so a reopened conversation states the real
+            # ending instead of inferring one from an unanswered transcript.
+            "last_end_reason": self.last_end_reason,
+            "last_end_detail": self.last_end_detail,
+            "last_end_steps": self.last_end_steps,
+            "last_end_at": self.last_end_at,
         }
 
 
@@ -274,7 +298,15 @@ class Store:
         database created by an older build. Each entry here is additive and
         idempotent, which keeps upgrades safe to repeat and safe to interrupt.
         """
-        additions = {"sessions": {"archived_at": "REAL"}}
+        additions = {
+            "sessions": {
+                "archived_at": "REAL",
+                "last_end_reason": "TEXT",
+                "last_end_detail": "TEXT",
+                "last_end_steps": "INTEGER",
+                "last_end_at": "REAL",
+            }
+        }
         for table, columns in additions.items():
             existing = {
                 row["name"] for row in self._conn.execute(f"PRAGMA table_info({table})").fetchall()
@@ -554,6 +586,46 @@ class Store:
             rows = self._conn.execute(sql, (project_id, limit)).fetchall()
         return [self._row_to_session(r) for r in rows]
 
+    def start_turn(self, session_id: str) -> None:
+        """Clear the previous turn's ending, now that a new one is under way.
+
+        Kept on the session row rather than appended to, because the only
+        question it answers is "why does this conversation look stopped *now*".
+        A stale reason left in place during the next turn would answer it with
+        the wrong turn's ending.
+        """
+        with self._lock, self._conn:
+            self._conn.execute(
+                "UPDATE sessions SET last_end_reason = NULL, last_end_detail = NULL,"
+                " last_end_steps = NULL, last_end_at = NULL WHERE id = ?",
+                (session_id,),
+            )
+
+    def record_turn_end(
+        self, session_id: str, *, reason: str, detail: str = "", steps: int = 0
+    ) -> None:
+        """Record how a turn ended, for the log and for a reopened conversation.
+
+        The browser used to infer this from the transcript: work with no answer
+        after it was announced as "Stopped", and it could not say *why*. A turn
+        that hit the step budget, one whose model returned nothing, one that
+        failed and one that was interrupted all looked identical, months of log
+        had no line for any of them, and a real report of "it just stopped" could
+        only be explained by reading the database by hand.
+        """
+        with self._lock, self._conn:
+            self._conn.execute(
+                "UPDATE sessions SET last_end_reason = ?, last_end_detail = ?,"
+                " last_end_steps = ?, last_end_at = ? WHERE id = ?",
+                (
+                    reason,
+                    (detail or "")[:_TURN_END_DETAIL_CHARS] or None,
+                    steps,
+                    time.time(),
+                    session_id,
+                ),
+            )
+
     def set_session_archived(self, session_id: str, archived: bool = True) -> Session | None:
         """File a conversation away, or bring it back. Never touches the files.
 
@@ -624,6 +696,10 @@ class Store:
             created_at=row["created_at"],
             updated_at=row["updated_at"],
             archived_at=row["archived_at"] if "archived_at" in keys else None,
+            last_end_reason=row["last_end_reason"] if "last_end_reason" in keys else None,
+            last_end_detail=row["last_end_detail"] if "last_end_detail" in keys else None,
+            last_end_steps=row["last_end_steps"] if "last_end_steps" in keys else None,
+            last_end_at=row["last_end_at"] if "last_end_at" in keys else None,
         )
 
     # --- messages --------------------------------------------------------

@@ -782,6 +782,41 @@ class TestTheSessionEndpoint:
         # The fields the transcript rebuild depends on.
         assert "tool_calls" in payload and "messages" in payload
 
+    def test_the_last_turn_ending_comes_back_with_the_conversation(self, tmp_path):
+        """A reopened conversation must state why its last turn ended.
+
+        The browser inferred this from an unanswered transcript and named a cause
+        it had no way to know. The record belongs to the server, so the endpoint
+        has to carry it or a reload goes back to guessing.
+        """
+        from starlette.testclient import TestClient
+
+        from surtitle.server import create_app_for
+        from surtitle.store.db import Store as FreshStore
+
+        home = tmp_path / "home"
+        home.mkdir()
+        settings = Settings(
+            DEEPSEEK_API_KEY="sk-test-deepseek-1234567890",
+            SURTITLE_HOME=str(home),
+            voice_enabled=False,
+        )
+        store = FreshStore(settings.db_path)
+        project = store.create_project("P", tmp_path / "work")
+        record = store.create_session(project.id)
+        store.record_turn_end(
+            record.id, reason="step_limit", detail="Stopped after 40 steps.", steps=40
+        )
+        store.close()
+
+        app = create_app_for(settings)
+        with TestClient(app) as client:
+            payload = client.get(f"/api/sessions/{record.id}").json()
+
+        assert payload["last_end_reason"] == "step_limit"
+        assert payload["last_end_steps"] == 40
+        assert "40 steps" in payload["last_end_detail"]
+
 
 class TestReasoningStaysOutOfTheModelPrompt:
     """Stored reasoning is a record for the user, never context for the model."""

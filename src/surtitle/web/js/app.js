@@ -2562,7 +2562,16 @@ async function selectSession(sessionId) {
     // was reached" over a complete answer — and named a cause the browser has no
     // way to know. It may have been a restart, a cancellation, or a crash.
     if (lastAskedAt > lastAnsweredAt) {
-      state.pendingStopNote = { reason: "interrupted", detail: STOPPED_WITHOUT_ANSWER };
+      // The server records how the last turn ended, so a reopened conversation
+      // states the real reason rather than one the browser inferred. "No answer
+      // after the work" is not the same as "why": a spent step budget, an empty
+      // model round, a failure and a restart all looked identical from here, and
+      // this used to name the wrong one. The guess is kept only for
+      // conversations whose last turn ended before the record existed.
+      state.pendingStopNote = {
+        reason: session.last_end_reason || "interrupted",
+        detail: session.last_end_detail || STOPPED_WITHOUT_ANSWER,
+      };
     }
     state.currentTurn = null;
   });

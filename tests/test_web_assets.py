@@ -823,6 +823,25 @@ class TestStopReasonIsVisible:
             "the client cannot know the server hit its step limit"
         )
 
+    def test_a_reopened_conversation_uses_the_recorded_ending(self, script):
+        """The client must not name a cause it has no way to know.
+
+        It inferred "interrupted" for any unanswered turn, which reads as a
+        specific diagnosis — a cancellation, a crash — when the real reason may
+        have been a spent step budget or an empty model round. The server records
+        the reason now, and the reload path prefers it, keeping the guess only as
+        the fallback for conversations whose last turn ended before the record
+        existed.
+        """
+        block = script[script.index("if (lastAskedAt > lastAnsweredAt)") :]
+        block = block[: block.index("\n    }")]
+        assert "session.last_end_reason || " in block, (
+            "the recorded reason is the answer; the guess is only the fallback"
+        )
+        assert "session.last_end_detail" in block, (
+            "the server's own sentence is what the banner should show"
+        )
+
     def test_continue_resumes_rather_than_repeating_the_question(self, script):
         block = script[script.index("function continueLastTurn(") :]
         block = block[: block.index("\n}\n")]

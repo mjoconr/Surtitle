@@ -24,10 +24,16 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
+import logging
+import time
+from types import SimpleNamespace
 
 import pytest
 
 from surtitle.config import Settings
+from surtitle.llm.deepseek import StreamEvent, ToolCallDelta, Usage
+from surtitle.tools.registry import ToolRegistry, default_tool_list
 from surtitle.voice.tts import TextToSpeech
 
 
@@ -693,3 +699,118 @@ def json_type(payload: str) -> str:
         return str(json.loads(payload).get("type"))
     except (TypeError, ValueError):
         return "?"
+
+
+class _ScriptedModel:
+    """A model that replays one scripted stream per round."""
+
+    def __init__(self, scripts: list[list[StreamEvent]]) -> None:
+        self.scripts = scripts
+        self.calls = 0
+
+    async def stream(self, messages, *, tools=None):
+        self.calls += 1
+        script = self.scripts[min(self.calls - 1, len(self.scripts) - 1)]
+        for event in script:
+            yield event
+
+    async def aclose(self) -> None:
+        return None
+
+
+def _tool_round(name: str, arguments: dict) -> list[StreamEvent]:
+    return [
+        StreamEvent(kind="reasoning", text="Working."),
+        StreamEvent(
+            kind="tool_call",
+            tool_call=ToolCallDelta(index=0, id="c1", name=name, arguments=json.dumps(arguments)),
+        ),
+        StreamEvent(kind="done", finish_reason="tool_calls"),
+        StreamEvent(kind="usage", usage=Usage()),
+    ]
+
+
+def _answer_round(text: str = "<say>Done.</say>") -> list[StreamEvent]:
+    return [
+        StreamEvent(kind="text", text=text),
+        StreamEvent(kind="done", finish_reason="stop"),
+        StreamEvent(kind="usage", usage=Usage()),
+    ]
+
+
+class TestTheTurnEndingIsRecorded:
+    """A turn must write down how it ended rather than leave it to be inferred.
+
+    Reported as "the latest chat just stopped again", where a refresh showed more
+    of what had happened but still could not say why the turn had ended. From the
+    stored transcript alone a spent step budget, an empty model round, a failure
+    and a restart are indistinguishable — and nothing logged or stored the
+    difference, so explaining that one report meant reading the database by hand.
+    """
+
+    async def test_a_finished_turn_records_that_it_finished(self, wired):
+        session, _tts, _stt = wired
+        session.deepseek = _ScriptedModel([_answer_round()])
+
+        await session._run_turn("hello")
+
+        record = session.store.get_session(session.session_id)
+        assert record.last_end_reason == "complete"
+        assert record.last_end_at, "the ending is given a time, so it can be ordered"
+
+    async def test_a_turn_that_spends_its_budget_says_so(self, wired):
+        """The ending from the report: work done, no answer, nothing said why."""
+        session, _tts, _stt = wired
+        session.settings.max_steps = 1
+        session.registry = ToolRegistry([t for t in default_tool_list() if t.name == "list_dir"])
+        session.deepseek = _ScriptedModel([_tool_round("list_dir", {"path": "."})])
+
+        await session._run_turn("hello")
+
+        record = session.store.get_session(session.session_id)
+        assert record.last_end_reason == "step_limit"
+        assert record.last_end_steps == 1
+        assert "step" in (record.last_end_detail or "").lower(), (
+            "the stored explanation is what a reopened conversation shows"
+        )
+
+    async def test_a_new_turn_clears_the_previous_ending(self, wired):
+        """A stale reason would answer "why does this look stopped" wrongly."""
+        session, _tts, _stt = wired
+        session.store.record_turn_end(session.session_id, reason="step_limit", steps=3)
+        assert session.store.get_session(session.session_id).last_end_reason == "step_limit"
+
+        session.store.start_turn(session.session_id)
+
+        assert session.store.get_session(session.session_id).last_end_reason is None
+
+    async def test_the_ending_is_logged_with_what_the_turn_used(self, wired, caplog):
+        """The line that makes "it just stopped" a ten-second answer next time."""
+        session, _tts, _stt = wired
+        session._turn_started_at = time.time() - 5
+        session._turn_prompt_tokens = 1200
+        session._turn_completion_tokens = 300
+
+        with caplog.at_level(logging.INFO):
+            await session._record_turn_end(
+                {"reason": "no_answer", "steps": 7, "detail": "No reply."},
+                SimpleNamespace(partial_spoken="I looked."),
+            )
+
+        assert "reason=no_answer" in caplog.text
+        assert "steps=7" in caplog.text
+        assert "tokens=1200/300" in caplog.text, "a turn's size is part of why it ended"
+
+    async def test_usage_is_counted_per_turn_without_the_run_counters(self, wired):
+        """The record is written even where no run-wide stats object is wired up."""
+        from surtitle.core.events import Event, EventKind
+
+        session, _tts, _stt = wired
+        session.stats = None
+        session._turn_prompt_tokens = 0
+        session._turn_completion_tokens = 0
+
+        session._count(Event(EventKind.USAGE, data={"prompt_tokens": 40, "completion_tokens": 2}))
+
+        assert session._turn_prompt_tokens == 40
+        assert session._turn_completion_tokens == 2

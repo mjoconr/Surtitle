@@ -389,3 +389,47 @@ class TestSessionApi:
 
         assert [s["id"] for s in payload["sessions"]] != [filed["id"]]
         assert payload["session_counts"]["archived"] == 1
+
+
+class TestAnOlderDatabaseIsBroughtForward:
+    """A new column reaches an existing install only through the ALTER path.
+
+    ``CREATE TABLE IF NOT EXISTS`` does nothing to a table that already exists,
+    so the turn-ending columns reach a database built by an earlier version only
+    via ``_add_missing_columns``. If that breaks it breaks exactly where the
+    history worth explaining lives — on the machines that have been running the
+    app — while a fresh test database looks perfectly fine.
+    """
+
+    def test_the_turn_ending_columns_are_added_to_an_old_sessions_table(self, tmp_path):
+        db = tmp_path / "old.sqlite"
+        con = sqlite3.connect(db)
+        con.executescript(
+            "CREATE TABLE sessions ("
+            " id TEXT PRIMARY KEY,"
+            " project_id TEXT NOT NULL,"
+            " title TEXT NOT NULL DEFAULT 'conversation',"
+            " created_at REAL NOT NULL,"
+            " updated_at REAL NOT NULL,"
+            " archived_at REAL"
+            ");"
+        )
+        con.execute(
+            "INSERT INTO sessions (id, project_id, title, created_at, updated_at)"
+            " VALUES ('s1', 'p1', 'old', 1.0, 2.0)"
+        )
+        con.commit()
+        con.close()
+
+        store = Store(db)
+        columns = {row["name"] for row in store._conn.execute("PRAGMA table_info(sessions)")}
+        assert {"last_end_reason", "last_end_detail", "last_end_steps", "last_end_at"} <= columns
+
+        # The existing conversation still reads, with no ending recorded yet.
+        record = store.get_session("s1")
+        assert record is not None
+        assert record.last_end_reason is None
+
+        store.record_turn_end("s1", reason="no_answer", detail="No reply.", steps=12)
+        assert store.get_session("s1").last_end_reason == "no_answer"
+        store.close()
