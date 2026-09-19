@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-09-19
+
+### Fixed
+
+- **A turn that pauses with the plan still open is no longer recorded as the
+  answer.** The loop ends a turn on the first round that calls no tool, so a model
+  that stopped mid-work in prose — "let me now check the feeder gate", "the sim is
+  not written yet", "say go and I'll start at change 1" — ended the turn as
+  `complete`: no banner, no Continue button, and a Plan tab still claiming work was
+  outstanding. In one real session that happened eight times in a day, each one
+  answered by the user typing "continue". When a working turn ends with items still
+  open, the agent is now asked once to carry on with the next one — or to tick what
+  is done, or to say plainly that it is stopping — and it is told which items the
+  user can see. A turn that ran no tools at all is untouched: answering a question
+  is not a pause in the work.
+
 ## [0.9.1] - 2026-09-19
 
 ### Fixed
@@ -806,8 +822,9 @@ Then:
 - Speech models are **not** carried over by the `.env` change alone. If you skip
   the data-directory move, run `surtitle models download` to fetch them again.
 
+[Unreleased]: https://github.com/mjoconr/Surtitle/compare/v0.9.2...HEAD
+[0.9.2]: https://github.com/mjoconr/Surtitle/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/mjoconr/Surtitle/compare/v0.9.0...v0.9.1
-[Unreleased]: https://github.com/mjoconr/Surtitle/compare/v0.9.1...HEAD
 [0.9.0]: https://github.com/mjoconr/Surtitle/releases/tag/v0.9.0
 [0.8.1]: https://github.com/mjoconr/Surtitle/releases/tag/v0.8.1
 [0.8.0]: https://github.com/mjoconr/Surtitle/releases/tag/v0.8.0
