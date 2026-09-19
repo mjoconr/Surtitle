@@ -122,14 +122,17 @@ class Settings(BaseSettings):
     thinking_enabled: bool = Field(default=True, alias="SURTITLE_THINKING")
     temperature: float = Field(default=0.7, alias="SURTITLE_TEMPERATURE")
     max_tokens: int = Field(default=4096, alias="SURTITLE_MAX_TOKENS")
-    # An override for the model's context window, which the browser shows a
-    # turn's usage against. Zero means "use the window published for the model" —
-    # see `surtitle.stats.MODEL_CONTEXT_WINDOWS`. It has to be stated somewhere
-    # because no API reports it: `GET /models` returns an id and an owner and
-    # nothing else.
-    #
-    # Reported, not enforced: the window belongs to the model, and the app trims
-    # by message count rather than to a token budget.
+    # The working budget for one request, in tokens: what the browser shows a
+    # turn's usage against, and what compaction will trigger on. Deliberately much
+    # smaller than the model's window — `deepseek-flash` accepts a million tokens,
+    # but a voice-first conversation that sends most of them is slow and expensive,
+    # and nothing has been built to compact it back down yet.
+    context_budget: int = Field(default=128_000, alias="SURTITLE_CONTEXT_BUDGET")
+    # An override for the model's context window, which the budget is chosen
+    # against and the meter reports for comparison. Zero means "use the window
+    # published for the model" — see `surtitle.stats.MODEL_CONTEXT_WINDOWS`. It has
+    # to be stated somewhere because no API reports it: `GET /models` returns an id
+    # and an owner and nothing else.
     context_limit: int = Field(default=0, alias="SURTITLE_CONTEXT_LIMIT")
 
     # --- agent loop limits ----------------------------------------------

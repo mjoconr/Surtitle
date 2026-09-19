@@ -67,11 +67,13 @@ const state = {
   // The project notebook, fetched when its tab is first opened. Null means "not
   // read yet" rather than "empty", so an empty notebook can say so properly.
   notes: null,
-  // The last completion's usage, and the window it is measured against. Both are
-  // about the conversation on screen, so both are cleared when it changes — a
-  // budget meter showing another conversation's numbers is a lie.
+  // The last completion's usage, and the two numbers it is judged against: the
+  // budget we intend to send within, and the model's own window. Both are cleared
+  // when the conversation changes — a budget meter showing another conversation's
+  // numbers is a lie.
   usage: null,
-  contextLimit: 0,
+  contextBudget: 0,
+  contextWindow: 0,
   environment: null,
   attachments: [],
 };
@@ -615,24 +617,30 @@ function formatTokens(count) {
  */
 function renderContextMeter() {
   const usage = state.usage;
-  const limit = Number(state.contextLimit) || 0;
-  if (!usage || !limit) {
+  // Measured against the working budget, not the model's window: the window says
+  // what is possible, the budget says what this app intends to send, and the
+  // second is the number worth watching.
+  const budget = Number(state.contextBudget) || 0;
+  if (!usage || !budget) {
     el.rightbarMeter.hidden = true;
     return;
   }
   const sent = Number(usage.prompt_tokens || 0);
   const reply = Number(usage.completion_tokens || 0);
   const used = sent + reply;
-  const share = Math.min(1, used / limit);
+  const share = Math.min(1, used / budget);
   el.rightbarMeter.hidden = false;
   el.rightbarMeter.dataset.level = share >= 0.9 ? "high" : share >= 0.7 ? "warm" : "ok";
   el.meterFill.style.width = `${(share * 100).toFixed(1)}%`;
-  el.meterLabel.textContent = `${formatTokens(used)} / ${formatTokens(limit)}`;
+  el.meterLabel.textContent = `${formatTokens(used)} / ${formatTokens(budget)}`;
+  const window_ = Number(state.contextWindow) || 0;
   el.rightbarMeter.title =
-    `This conversation is carrying about ${used.toLocaleString()} of the model's ` +
-    `${limit.toLocaleString()}-token window (${sent.toLocaleString()} sent, ` +
-    `${reply.toLocaleString()} written). The oldest turns fall out of the model's ` +
-    "view as it fills, so start a new conversation when the work moves on.";
+    `This conversation is carrying about ${used.toLocaleString()} tokens of a ` +
+    `${budget.toLocaleString()}-token working budget (${sent.toLocaleString()} sent, ` +
+    `${reply.toLocaleString()} written).` +
+    (window_ ? ` The model itself accepts ${window_.toLocaleString()}.` : "") +
+    " The oldest turns fall out of the model's view as it fills, so start a new" +
+    " conversation when the work moves on.";
 }
 
 /** First line of some thinking, trimmed to something a row can show. */
@@ -1713,10 +1721,11 @@ function handleEvent(event) {
         }
       }
       if (data.model) el.modelBadge.textContent = data.model;
-      // What the meter measures against. Sent by the server because the window
-      // belongs to the model, and a meter drawn against a stale one is worse
-      // than no meter at all.
-      if (data.context_limit) state.contextLimit = Number(data.context_limit) || 0;
+      // Two numbers from the server: the working budget the meter measures
+      // against, and the model's own window, which is context rather than a
+      // target. Sent rather than hardcoded because both move with the model.
+      if (data.context_window) state.contextWindow = Number(data.context_window) || 0;
+      if (data.context_budget) state.contextBudget = Number(data.context_budget) || 0;
       renderContextMeter();
       if (data.voice_backends) {
         // Which engine each direction uses belongs in the Activity panel: it is

@@ -284,11 +284,12 @@ class Session:
             voice_fix=self.voice_fix,
             voice_backends=self.voice_backends,
             model=self.settings.deepseek_model,
-            # What the browser measures a turn's usage against: the window
-            # published for the model, or the configured override. Zero when
-            # neither is known, and the meter then says nothing rather than
-            # measuring against a number nobody has.
-            context_limit=context_window(self.settings.deepseek_model, self.settings),
+            # Two numbers, because they answer different questions. The window is
+            # what the model accepts; the budget is what we intend to send, and it
+            # is deliberately far smaller. The browser measures against the budget
+            # and shows the window beside it.
+            context_window=context_window(self.settings.deepseek_model, self.settings),
+            context_budget=self.settings.context_budget,
             stt_api=self.settings.stt_api if self.stt else None,
             sample_rate=self.settings.tts_sample_rate,
             capture_rate=self.settings.stt_sample_rate,

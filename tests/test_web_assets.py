@@ -716,8 +716,21 @@ class TestTheContextMeter:
 
     def test_the_window_comes_from_the_server(self, script):
         """A meter drawn against a hardcoded window is wrong the moment the model changes."""
-        assert "data.context_limit" in script
-        assert "contextLimit" in script
+        assert "data.context_window" in script
+        assert "data.context_budget" in script
+        assert "contextBudget" in script
+
+    def test_the_meter_measures_against_the_budget_not_the_window(self, script):
+        """The window says what is possible; the budget says what we intend to send.
+
+        `deepseek-flash` accepts a million tokens, and a voice-first conversation
+        that sends most of them is slow and expensive — so the number worth
+        watching is the budget, and the window is shown beside it.
+        """
+        block = script[script.index("function renderContextMeter(") :]
+        block = block[: block.index("\n}\n")]
+        assert "used / budget" in block, "the ratio is over the budget"
+        assert "state.contextWindow" in block, "the window is still reported, as context"
 
     def test_a_million_token_window_does_not_read_as_a_thousand_k(self, script):
         block = script[script.index("function formatTokens(") :]
@@ -1115,9 +1128,12 @@ class TestReadyEventContract:
         ]
         assert ready, "a session must announce itself"
         assert ready[0]["data"]["sample_rate"] == session.settings.tts_sample_rate
-        assert ready[0]["data"]["context_limit"] == 1_000_000, (
-            "deepseek-flash accepts 1M tokens, and the meter measures against that — "
+        assert ready[0]["data"]["context_window"] == 1_000_000, (
+            "deepseek-flash accepts 1M tokens, and the meter reports that — "
             "a default window is wrong by however much the models differ"
+        )
+        assert ready[0]["data"]["context_budget"] == 128_000, (
+            "the budget is what we intend to send, and it is the number the meter measures"
         )
 
 
