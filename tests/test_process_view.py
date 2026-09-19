@@ -620,6 +620,162 @@ class TestANoAnswerTurn:
         assert "no_answer" in source, "a silent turn must not also be silent about itself"
 
 
+class TestATurnThatStopsWithThePlanOpen:
+    """A pause mid-plan must not be recorded as the answer.
+
+    Reported from the real 2026-09-19 session, eight times in one day: the agent
+    worked, then ended a round with prose and no tool call — "let me now check the
+    feeder gate", "the sim is not written yet", "say go and I'll start at change 1"
+    — and the loop read that as the answer. The turn was `complete`, the client
+    showed no banner and offered no Continue, and the Plan tab went on claiming
+    work was outstanding. Every one of those was answered by the user typing
+    "continue".
+
+    The plan is what makes this decidable rather than a guess about the shape of the
+    prose: it is the machine-readable statement of what the agent believes is left.
+    """
+
+    @staticmethod
+    def _registry():
+        return ToolRegistry([t for t in default_tool_list() if t.name == "list_dir"])
+
+    async def test_a_round_that_stops_with_the_plan_open_is_asked_to_carry_on(
+        self, settings, tmp_path, stored
+    ):
+        store, session_id = stored
+        store.set_todos(
+            session_id,
+            [
+                {"content": "Read the conveyor machine", "status": "completed"},
+                {"content": "Model the feeder gate", "status": "in_progress"},
+            ],
+        )
+        client = FakeClient(
+            [
+                thinking_script("Listing.", call=("list_dir", {"path": "."})),
+                # The pause: prose, and no call to carry it out.
+                thinking_script("Next I will model the feeder gate."),
+                thinking_script("Modelled it."),
+            ]
+        )
+        loop = make_loop(
+            settings,
+            tmp_path,
+            client,
+            store=store,
+            session_id=session_id,
+            registry=self._registry(),
+        )
+
+        events = await collect(loop)
+
+        assert len(client.calls) == 3, "a pause with the plan open must be asked to carry on"
+        nudge = client.calls[2]["messages"][-1]
+        assert nudge["role"] == "user"
+        assert "Model the feeder gate" in nudge["content"], (
+            "the ask must name the item the user can see, not just say 'continue'"
+        )
+        assert "Read the conveyor machine" not in nudge["content"], (
+            "a ticked item is not outstanding and must not be named as one"
+        )
+        done = next(e for e in events if e.kind is EventKind.DONE)
+        assert done.data.get("reason") == "complete"
+
+    async def test_the_ask_is_made_once_and_then_the_answer_stands(
+        self, settings, tmp_path, stored
+    ):
+        """A model that answers twice without a call is answering, not stalling."""
+        store, session_id = stored
+        store.set_todos(session_id, [{"content": "Model the feeder gate"}])
+        client = FakeClient(
+            [
+                thinking_script("Listing.", call=("list_dir", {"path": "."})),
+                thinking_script("I have stopped here."),
+                thinking_script("Yes, still stopped."),
+                thinking_script("And again."),
+            ]
+        )
+        loop = make_loop(
+            settings,
+            tmp_path,
+            client,
+            store=store,
+            session_id=session_id,
+            registry=self._registry(),
+        )
+
+        events = await collect(loop)
+
+        assert len(client.calls) == 3, "the ask is made once, not on every round"
+        done = next(e for e in events if e.kind is EventKind.DONE)
+        assert done.data.get("reason") == "complete", (
+            "the plan being open is not a turn-ending failure once it has been asked"
+        )
+
+    async def test_a_finished_plan_ends_the_turn(self, settings, tmp_path, stored):
+        store, session_id = stored
+        store.set_todos(
+            session_id,
+            [{"content": "Read the conveyor machine", "status": "completed"}],
+        )
+        client = FakeClient(
+            [
+                thinking_script("Listing.", call=("list_dir", {"path": "."})),
+                thinking_script("All done."),
+            ]
+        )
+        loop = make_loop(
+            settings,
+            tmp_path,
+            client,
+            store=store,
+            session_id=session_id,
+            registry=self._registry(),
+        )
+
+        await collect(loop)
+
+        assert len(client.calls) == 2, "a ticked plan needs no ask"
+
+    async def test_a_question_answered_without_tools_is_not_nudged(
+        self, settings, tmp_path, stored
+    ):
+        """A plan open does not make every answer a pause in the work."""
+        store, session_id = stored
+        store.set_todos(session_id, [{"content": "Model the feeder gate"}])
+        client = FakeClient([thinking_script("The gate item is still open.")])
+        loop = make_loop(settings, tmp_path, client, store=store, session_id=session_id)
+
+        events = await collect(loop)
+
+        assert len(client.calls) == 1, (
+            "the user asked a question; it was answered, and no work was in flight"
+        )
+        done = next(e for e in events if e.kind is EventKind.DONE)
+        assert done.data.get("reason") == "complete"
+
+    async def test_a_store_with_no_plan_is_left_alone(self, settings, tmp_path, stored):
+        store, session_id = stored
+        client = FakeClient(
+            [
+                thinking_script("Listing.", call=("list_dir", {"path": "."})),
+                thinking_script("Nothing more to do."),
+            ]
+        )
+        loop = make_loop(
+            settings,
+            tmp_path,
+            client,
+            store=store,
+            session_id=session_id,
+            registry=self._registry(),
+        )
+
+        await collect(loop)
+
+        assert len(client.calls) == 2, "no plan means nothing to carry on with"
+
+
 class TestTheSpokenReason:
     """A voice-first user hears why it stopped, in the same words as the screen."""
 

@@ -111,6 +111,29 @@ _NO_REPLY_FALLBACK = (
     "commands. Ask again, or ask for a smaller piece of it."
 )
 
+# Asked for when a round ends the turn while the plan the user is looking at still
+# has open items.
+#
+# This is the other half of "it stopped": the model pauses mid-work — "let me now
+# check the feeder gate", "say go and I'll start at change 1" — with no tool call in
+# the round, and the loop reads that as the answer. The turn is recorded `complete`,
+# the client shows no banner and offers no Continue, and the Plan tab keeps saying
+# there is work outstanding. On 2026-09-19 that happened eight times in one session,
+# every one of them answered by the user typing "continue".
+#
+# The plan is what makes this decidable rather than a guess about the shape of the
+# prose: it is the machine-readable statement of what the agent believes is left,
+# and it is already on the user's screen. So ask once, and name the items.
+_CONTINUE_PLAN_INSTRUCTION = (
+    "You ended that round without calling a tool, but the plan on the user's screen "
+    "is not finished:\n\n{items}\n\n"
+    "An open item reads as work you abandoned, so carry on with the next one now. "
+    "If an item is already done, `todo_write` the whole list with it ticked; if the "
+    "plan no longer describes what you are doing, rewrite it so that what is left is "
+    "true. Only then finish — and if you are deliberately stopping with work "
+    "outstanding, say so plainly so the user can decide what happens next."
+)
+
 
 def build_system_prompt(root_name: str) -> str:
     """The prompt that establishes the two-channel output contract.
@@ -628,6 +651,10 @@ class _TurnState:
     # wrap up. Without it a model that keeps returning nothing would be asked
     # forever; with it, the turn ends in a reported failure instead.
     wrapped_up: bool = False
+    # Set once a round that said something has been asked to carry on because the
+    # plan still had open items. One ask per turn, for the same reason: a model that
+    # answers twice without calling a tool is answering, not stalling.
+    plan_nudged: bool = False
 
     def reasoning_text(self, *, limit: int | None = None) -> str:
         """The step's thinking as one string, or ``""`` when it thought nothing.
@@ -718,6 +745,23 @@ class AgentLoop:
         if self._client is not None and self._owns_client:
             await self._client.aclose()
             self._client = None
+
+    def _open_plan_items(self) -> list[str]:
+        """What the plan says is left to do, as the user is reading it.
+
+        Empty when there is no plan, when every item is ticked, or when there is no
+        store to ask. A store failure is treated as "no plan" rather than raised: a
+        turn must not fail on bookkeeping, and the cost of getting this wrong is a
+        turn that ends the way it always did.
+        """
+        if self.store is None or not self.session_id:
+            return []
+        try:
+            plan = self.store.list_todos(self.session_id)
+        except Exception:  # pragma: no cover - defensive
+            log.debug("could not read the plan; finishing without it", exc_info=True)
+            return []
+        return [str(item["content"]) for item in plan if item.get("status") != "completed"]
 
     # --- main entry point ------------------------------------------------
     async def run(
@@ -871,6 +915,34 @@ class AgentLoop:
                         detail=fallback,
                     )
                     return
+
+                # The round said something, so this looks like the answer. But the
+                # plan is the machine-readable statement of what is outstanding, and
+                # a turn that ends with items still open is the shape the user
+                # reported as "it stopped": a `complete` turn, no banner, no
+                # Continue, and a Plan tab still claiming work is left. Ask once,
+                # naming the items; a second text-only round is an answer.
+                #
+                # Only on a turn that did work. A question the agent could answer
+                # from what it already knows — "which item is left?" — calls no
+                # tools and is a complete answer; nudging there would send it off to
+                # do the work the user only asked about.
+                open_items = self._open_plan_items() if state.actions else []
+                if open_items and not state.plan_nudged:
+                    state.plan_nudged = True
+                    state.messages.append(
+                        {
+                            "role": "user",
+                            "content": _CONTINUE_PLAN_INSTRUCTION.format(
+                                items="\n".join(f"- {item}" for item in open_items)
+                            ),
+                        }
+                    )
+                    log.info(
+                        "turn paused with %d open plan item(s); asking it to carry on",
+                        len(open_items),
+                    )
+                    continue
 
                 self._store_reasoning(state)
                 if self.store and self.session_id:
