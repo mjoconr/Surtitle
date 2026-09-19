@@ -56,7 +56,14 @@ const state = {
   // without retyping it.
   lastUserText: "",
   settings: null,
-  rightTab: "files",
+  // Which panel is open, remembered per conversation: one conversation may be
+  // about a plan while another is one you are watching the process of, and
+  // switching between them should not re-open the wrong view. Plan leads.
+  rightTab: "todo",
+  sessionTabs: new Map(),
+  // Files this turn has read or written, so the Files panel can lead with what
+  // the agent actually touched instead of an undifferentiated project tree.
+  touched: new Map(),
   environment: null,
   attachments: [],
 };
@@ -1006,25 +1013,76 @@ function scheduleActivityRender() {
 }
 
 function renderRightbar() {
-  document.getElementById("tabFiles").setAttribute("aria-selected", String(state.rightTab === "files"));
-  document
-    .getElementById("tabActivity")
-    .setAttribute("aria-selected", String(state.rightTab === "activity"));
-  document
-    .getElementById("tabTodo")
-    .setAttribute("aria-selected", String(state.rightTab === "todo"));
-  document.getElementById("tabTodo").hidden = state.todos.length === 0;
+  // Plan, Thinking, Files — in the order they answer a question. The plan is
+  // what the agent intends, thinking is what it is doing, files is what it has
+  // done to the project. Plan leads because it is the only one that says how
+  // far the work has got, and it no longer appears and disappears: a primary
+  // tab that is absent until the agent writes a plan is one nobody looks for.
+  for (const [tab, id] of [
+    ["todo", "tabTodo"],
+    ["thinking", "tabThinking"],
+    ["files", "tabFiles"],
+  ]) {
+    document.getElementById(id).setAttribute("aria-selected", String(state.rightTab === tab));
+  }
 
   el.rightbarBody.replaceChildren();
-  if (state.rightTab === "activity") {
-    renderActivity();
+  if (state.rightTab === "thinking") {
+    renderThinking();
     return;
   }
-  if (state.rightTab === "todo") {
-    renderTodo();
+  if (state.rightTab === "files") {
+    renderFiles();
     return;
   }
-  renderFiles();
+  renderTodo();
+}
+
+/** The tools whose `path` argument names a file the turn touched, and how. */
+const TOUCHED_TOOLS = {
+  read_file: "read",
+  write_file: "wrote",
+  edit_file: "edited",
+};
+
+/**
+ * Note a file this turn touched, for the Files panel.
+ *
+ * The panel was the project tree and nothing else, which is why it read as
+ * decoration: it said what exists, which the person working in the project
+ * already knows, and never what the agent had done with it. A path is recorded
+ * once per turn and the later action wins, so a file that was read and then
+ * rewritten shows as written.
+ */
+function noteTouched(name, args) {
+  const mode = TOUCHED_TOOLS[name];
+  const path = args && args.path;
+  if (!mode || !path) return;
+  state.touched.set(String(path), mode);
+}
+
+/**
+ * What this turn has touched, ahead of the tree below it.
+ *
+ * "Wrote sim/balegate.lpc" is a fact about the conversation; a directory listing
+ * is a fact about the disk. The panel is worth a tab because of the first.
+ */
+function renderTouchedFiles() {
+  if (state.touched.size === 0) return;
+  const section = node("div", "touched");
+  section.append(node("div", "sectionTitle", "Touched this turn"));
+  // Newest first: the file being worked on now is the one being looked for.
+  for (const [path, mode] of [...state.touched.entries()].reverse()) {
+    const row = node("button", "touched__row");
+    row.type = "button";
+    row.dataset.mode = mode;
+    row.title = path;
+    row.append(node("span", "touched__mode", mode));
+    row.append(node("span", "touched__path", path));
+    row.addEventListener("click", () => window.open(projectFileUrl(path), "_blank", "noopener"));
+    section.append(row);
+  }
+  el.rightbarBody.append(section);
 }
 
 function renderFiles() {
@@ -1032,6 +1090,8 @@ function renderFiles() {
     el.rightbarBody.append(node("p", "empty", "No project open."));
     return;
   }
+
+  renderTouchedFiles();
 
   const header = node("div", "row");
   header.style.cursor = "default";
@@ -1103,7 +1163,7 @@ function renderEnvironment() {
 }
 
 /**
- * The running list of the turn's process, grouped by step.
+ * The Thinking tab: the turn's process, grouped by step.
  *
  * This is the live view of what the agent is doing, laid out the way the
  * transcript groups it — a step's reasoning, then the calls it made — so the two
@@ -1111,11 +1171,17 @@ function renderEnvironment() {
  * showing unrelated notices. Notes that belong to no step (voice engines, an
  * install) are collected at the bottom under their own heading.
  *
+ * It is a tab rather than something always on screen because it is the *process*,
+ * not the answer: the person this is for is often listening rather than reading,
+ * and the panel is a choice they make when they want to see how a conclusion was
+ * reached. The data it renders is still the activity log — `pushActivity` is what
+ * feeds it — hence the names below.
+ *
  * Only the summary is rendered here. A tool's output and a step's full thinking
  * are in the transcript, one disclosure away; printing a command's whole stdout
  * into this column is what buried the useful rows under a wall of text.
  */
-function renderActivity() {
+function renderThinking() {
   renderEnvironment();
 
   const steps = new Map();
@@ -1530,6 +1596,10 @@ function handleEvent(event) {
       state.lastUserText = data.text || "";
       state.currentTurn = null;
       state.pendingStopNote = null;
+      // A new turn touches its own files; the last turn's list is history, and
+      // the Thinking tab is where history lives.
+      state.touched.clear();
+      renderRightbar();
       el.captions.replaceChildren();
       hideStopNote();
       break;
@@ -1555,6 +1625,7 @@ function handleEvent(event) {
       startTimers();
       record.arguments = data.arguments || {};
       clearApprovalFor(data.call_id);
+      noteTouched(data.name, data.arguments);
       pushActivity({
         kind: "tool",
         step: step ? step.index : 0,
@@ -1591,6 +1662,9 @@ function handleEvent(event) {
       link.target = "_blank";
       link.rel = "noopener";
       turn.root.append(link);
+      // A file the agent produced is the most interesting thing the Files panel
+      // can show, and this is the event that names it.
+      state.touched.set(String(data.path), "created");
       pushActivity({
         kind: "artifact",
         step: currentStepIndex(),
@@ -1654,11 +1728,9 @@ function handleEvent(event) {
       // the panel a faithful picture of what the agent believes, including items
       // it decided to drop.
       state.todos = Array.isArray(data.todos) ? data.todos : [];
-      if (state.todos.length && state.rightTab === "files") {
-        // Show the plan the first time it exists: a tab that appears and stays
-        // hidden is a tab nobody finds.
-        state.rightTab = "todo";
-      }
+      // Writing a plan no longer steals the panel. The plan has its own tab,
+      // which is already in front of the user the first time, and switching
+      // under them would take away whatever they were reading.
       renderRightbar();
       break;
     }
@@ -2439,6 +2511,9 @@ async function selectSession(sessionId) {
   state.currentTurn = null;
   state.activity = [];
   state.todos = Array.isArray(session.todos) ? session.todos : [];
+  // The panel this conversation was last left on, if it has been open before.
+  state.rightTab = state.sessionTabs.get(sessionId) || "todo";
+  state.touched.clear();
   state.lastUserText = "";
   state.pendingStopNote = null;
   hideStopNote();
@@ -2819,18 +2894,16 @@ el.micButton.addEventListener("contextmenu", (event) => {
 
 document.getElementById("newSession").addEventListener("click", () => createSession());
 
-document.getElementById("tabFiles").addEventListener("click", () => {
-  state.rightTab = "files";
+/** Show one panel, and remember it for this conversation. */
+function showRightTab(tab) {
+  state.rightTab = tab;
+  if (state.session) state.sessionTabs.set(state.session.id, tab);
   renderRightbar();
-});
-document.getElementById("tabActivity").addEventListener("click", () => {
-  state.rightTab = "activity";
-  renderRightbar();
-});
-document.getElementById("tabTodo").addEventListener("click", () => {
-  state.rightTab = "todo";
-  renderRightbar();
-});
+}
+
+document.getElementById("tabFiles").addEventListener("click", () => showRightTab("files"));
+document.getElementById("tabThinking").addEventListener("click", () => showRightTab("thinking"));
+document.getElementById("tabTodo").addEventListener("click", () => showRightTab("todo"));
 el.stopContinue.addEventListener("click", () => continueLastTurn());
 el.stopDismiss.addEventListener("click", () => hideStopNote());
 document.getElementById("rightbarToggle").addEventListener("click", () => {

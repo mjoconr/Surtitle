@@ -1402,6 +1402,57 @@ button, input, textarea, select {
 
 .filetree__item:hover { background: var(--dsw-alias-interactive-bg-hover); }
 
+/* What the turn touched, above the tree.
+ *
+ * The mode is the point — "wrote" is the part the user did not already know, so
+ * it is set apart from the path rather than buried in a row of equal weight.
+ */
+.touched {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin-bottom: 12px;
+}
+
+.touched .sectionTitle { margin-top: 0; }
+
+.touched__row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  width: 100%;
+  padding: 5px 6px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  font-size: 12px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.touched__row:hover { background: var(--dsw-alias-interactive-bg-hover); }
+
+.touched__mode {
+  flex: none;
+  min-width: 46px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--dsw-alias-label-caption);
+}
+
+.touched__row[data-mode="wrote"] .touched__mode,
+.touched__row[data-mode="edited"] .touched__mode,
+.touched__row[data-mode="created"] .touched__mode {
+  color: var(--dsw-alias-state-business-primary);
+}
+
+.touched__path {
+  font-family: var(--ds-font-family-code);
+  word-break: break-all;
+}
+
 .detail {
   display: flex;
   flex-direction: column;

@@ -148,13 +148,16 @@
   </main>
 
   <!-- ----------------------------------------------------------- rightbar -->
-  <aside class="rightbar" aria-label="Project files">
+  <aside class="rightbar" aria-label="Conversation and project">
     <div class="rightbar__tabs" role="tablist">
-      <button class="tab" id="tabFiles" role="tab" aria-selected="true" type="button">Files</button>
-      <button class="tab" id="tabActivity" role="tab" aria-selected="false" type="button">Activity</button>
-      <!-- Hidden until the agent writes a plan, so the panel is not offering an
-           empty tab on every conversation. -->
-      <button class="tab" id="tabTodo" role="tab" aria-selected="false" type="button" hidden>Plan</button>
+      <!-- Plan leads, and is always present. It is the one tab that answers
+           "what is it trying to do, and how far has it got" at a glance. It used
+           to be last and hidden until the agent happened to write a plan, so the
+           panel opened on a file browser and the useful view was the one nobody
+           had seen. -->
+      <button class="tab" id="tabTodo" role="tab" aria-selected="true" type="button">Plan</button>
+      <button class="tab" id="tabThinking" role="tab" aria-selected="false" type="button">Thinking</button>
+      <button class="tab" id="tabFiles" role="tab" aria-selected="false" type="button">Files</button>
     </div>
     <div class="rightbar__body" id="rightbarBody"></div>
   </aside>

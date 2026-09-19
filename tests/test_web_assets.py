@@ -562,6 +562,67 @@ class TestActivityPanelNoise:
         )
 
 
+class TestTheRightPanel:
+    """Three tabs, in the order they answer a question.
+
+    Reported from a real session: the plan was the only panel worth reading, the
+    Files tab had no obvious purpose, and the panel opened on Files — so the
+    useful view was the one nobody had seen. Plan leads now, Thinking is the
+    process view the Activity tab was reaching for, and Files leads with what the
+    turn actually touched.
+    """
+
+    def test_the_plan_leads_and_is_what_opens(self, html, script):
+        assert html.index('id="tabTodo"') < html.index('id="tabThinking"')
+        assert html.index('id="tabThinking"') < html.index('id="tabFiles"')
+        assert 'rightTab: "todo"' in script, "the panel must open on the plan"
+
+    def test_the_plan_tab_is_never_hidden(self, html, script):
+        """A primary tab that appears only once a plan exists is one nobody finds."""
+        button = re.search(r'<button[^>]*id="tabTodo"[^>]*>', html).group(0)
+        assert "hidden" not in button
+        assert ".hidden = state.todos.length === 0" not in script
+
+    def test_the_process_view_is_a_tab(self, html, script):
+        """The user asked for thinking as a tab, not more always-on screen."""
+        assert 'id="tabThinking"' in html
+        assert 'id="tabActivity"' not in html
+        assert "function renderThinking()" in script
+
+    def test_writing_a_plan_does_not_steal_the_panel(self, script):
+        """Switching under the reader takes away what they were looking at."""
+        block = script[script.index('case "todos": {') :]
+        block = block[: block.index("break;")]
+        assert 'state.rightTab = "todo"' not in block
+
+    def test_each_conversation_remembers_its_tab(self, script):
+        """One conversation may be about a plan; another is one being watched."""
+        assert "sessionTabs" in script
+        assert "state.sessionTabs.get(sessionId)" in script
+
+    def test_the_files_panel_leads_with_what_the_turn_touched(self, script):
+        """It said what exists, which the user already knew.
+
+        The tree is a fact about the disk; "wrote sim/balegate.lpc" is a fact
+        about the conversation, and it is the one worth a tab.
+        """
+        assert "function renderTouchedFiles()" in script
+        assert "renderTouchedFiles();" in script, "the section must actually render"
+        assert "function noteTouched(" in script
+        block = script[script.index('case "tool_call": {') :]
+        block = block[: block.index("break;")]
+        assert "noteTouched(data.name, data.arguments)" in block, (
+            "a call's file argument is where the touch comes from"
+        )
+        for tool in ("read_file", "write_file", "edit_file"):
+            assert tool in script
+
+    def test_a_new_turn_forgets_the_last_turn_s_files(self, script):
+        block = script[script.index('case "user_text": {') :]
+        block = block[: block.index("break;")]
+        assert "state.touched.clear()" in block
+
+
 class TestStepGrouping:
     """A turn's process must be grouped by the step that produced it.
 
