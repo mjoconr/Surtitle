@@ -768,11 +768,18 @@ async def _install_packages_handler(
 
 
 async def _search_history_handler(ctx: ToolContext, query: str, limit: int = 5) -> ToolResult:
-    """Search earlier conversations in this project.
+    """Search this project's conversations, including the one in progress.
 
     The retrieval half of durable memory. The notebook holds what the agent chose
     to record; this finds what it did not, so knowledge from a previous session is
     reachable rather than lost.
+
+    The current conversation is deliberately included. Excluding it looked tidy —
+    "history" reads as "earlier sessions" — but it took away the only way to
+    recover what had just been done and said, in exactly the situation that needs
+    it: a long session whose earlier turns have aged out of the replay window. An
+    agent that has lost its own record and cannot search it will re-derive the
+    work, or attribute it to somebody else.
     """
     if ctx.store is None:
         return ToolResult(ok=False, error="Conversation history is not available here.")
@@ -780,19 +787,34 @@ async def _search_history_handler(ctx: ToolContext, query: str, limit: int = 5) 
     if not needle:
         return ToolResult(ok=False, error="Provide something to search for.")
 
-    results = ctx.store.search_conversations(
-        needle, limit=max(1, min(int(limit), 20)), exclude_session=ctx.session_id or None
-    )
+    results = ctx.store.search_conversations(needle, limit=max(1, min(int(limit), 20)))
+    # Say which conversation each hit came from. Including the current session is
+    # the point — it is how the agent recovers work that has aged out of its
+    # context — but a hit from its own last utterance must not read as established
+    # fact from somewhere else. The label is the difference.
+    for item in results:
+        item["from"] = (
+            "this conversation"
+            if ctx.session_id and item["session_id"] == ctx.session_id
+            else "an earlier conversation"
+        )
     if not results:
         return ToolResult(
             ok=True,
             data={"query": needle, "results": []},
-            display=f"Nothing in earlier conversations mentions {needle!r}",
+            display=f"Nothing in this project's conversations mentions {needle!r}",
         )
+    mine = sum(1 for item in results if item["from"] == "this conversation")
+    elsewhere = len(results) - mine
+    where = []
+    if mine:
+        where.append(f"{mine} in this conversation")
+    if elsewhere:
+        where.append(f"{elsewhere} in earlier conversations")
     return ToolResult(
         ok=True,
         data={"query": needle, "results": results},
-        display=f"Found {len(results)} earlier mention(s) of {needle!r}",
+        display=f"Found {len(results)} mention(s) of {needle!r} (" + ", ".join(where) + ")",
     )
 
 
@@ -1024,11 +1046,14 @@ _READ_NOTES = Tool(
 _SEARCH_HISTORY = Tool(
     name="search_history",
     description=(
-        "Search this project's earlier conversations. Use it before re-deriving "
-        "something or asking the user to repeat themselves: if a previous session "
-        "already established how to reach a system, why a machine is down, or where "
-        "a file lives, it is probably recorded here. Distinct from the notebook, "
-        "which holds only what was deliberately written down."
+        "Search this project's conversations, including the current one. Use it "
+        "before re-deriving something or asking the user to repeat themselves: if "
+        "an earlier turn — or a previous session — already established how to reach "
+        "a system, why a machine is down, or where a file lives, it is probably "
+        "recorded here. This is also how you recover your own earlier work when it "
+        "has aged out of your context, so reach for it before concluding that "
+        "somebody else must have done something. Distinct from the notebook, which "
+        "holds only what was deliberately written down."
     ),
     parameters={
         "type": "object",
@@ -1040,7 +1065,7 @@ _SEARCH_HISTORY = Tool(
     },
     handler=_search_history_handler,
     approval="never",
-    summary="Search earlier conversations",
+    summary="Search conversations",
 )
 
 

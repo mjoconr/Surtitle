@@ -22,7 +22,7 @@ import pytest
 
 from surtitle.config import Settings
 from surtitle.core.session import Session
-from surtitle.store.db import Store
+from surtitle.store.db import REASONING_ROLE, Store
 
 DOC = """# Project conventions
 
@@ -103,6 +103,106 @@ class TestInstructionsAreReinjected:
         write_notes(tmp_path, "- 4C-120 is on the same bus as 4C-117")
 
         assert "same bus" in session._system_prompt()
+
+
+class TestTheWindowKeepsTheEndOfTheConversation:
+    """The replay window is the *newest* messages, and it counts the conversation.
+
+    Both halves of that sentence were wrong, and the failure they produced did not
+    look like a bug from outside. The window was taken from the *beginning*
+    (`ORDER BY id ASC LIMIT 40`), and reasoning is stored as one row per step, so
+    a session filled its 40 rows within the first turn or two and the model's
+    context then froze at the opening exchange. Everything the agent had since
+    done — including work it had built and committed itself — was absent from
+    every later turn, which is why it re-proposed that work and then reported that
+    "somebody" had already done it.
+    """
+
+    def test_the_newest_exchange_survives_and_the_opening_ages_out(self, session):
+        for index in range(200):
+            session.store.add_message(session.session_id, "user", f"question {index}")
+            session.store.add_message(session.session_id, "assistant", f"answer {index}")
+
+        history = session._build_history()
+
+        assert len(history) == 40, "the window should hold exactly the limit"
+        assert history[-1]["content"] == "answer 199", (
+            "the most recent reply is what the next turn must be able to read"
+        )
+        assert history[0]["content"] == "question 180", "the oldest forty are the ones kept"
+        assert all("question 0" not in item["content"] for item in history), (
+            "the opening of a long conversation is the part that should age out"
+        )
+
+    def test_reasoning_does_not_consume_the_window(self, session):
+        """It is one row per step; counting it evicts the conversation itself."""
+        session.store.add_message(session.session_id, "user", "the question")
+        session.store.add_message(session.session_id, "assistant", "the answer")
+        for step in range(200):
+            session.store.add_message(session.session_id, REASONING_ROLE, f"thinking {step}")
+
+        history = session._build_history()
+
+        assert history == [
+            {"role": "user", "content": "the question"},
+            {"role": "assistant", "content": "the answer"},
+        ]
+
+    def test_a_cancelled_exchange_is_not_replayed_twice(self, session):
+        """`_rolled_back` still marks a turn whose user message is already stored."""
+        session.store.add_message(session.session_id, "user", "the question")
+        session.store.add_message(session.session_id, "assistant", "")
+        session._rolled_back = True
+
+        history = session._build_history()
+
+        assert history == [{"role": "user", "content": "the question"}], (
+            "an empty interrupted reply must not reach the model, and the stored "
+            "user message must be kept for the loop to append afresh"
+        )
+
+
+class TestThePlanIsNotLostWithTheConversation:
+    """The plan is on the user's screen, so the agent must be able to read it.
+
+    `todo_write` only ever wrote. Nothing replayed the plan, so an agent whose
+    context had moved on could not answer "which item is still unticked?" — and in
+    a real session, asked exactly that, it could not.
+    """
+
+    def test_the_current_plan_reaches_the_prompt(self, session):
+        session.store.set_todos(
+            session.session_id,
+            [
+                {"content": "Write the renderer", "status": "completed"},
+                {"content": "Report and ask about committing", "status": "in_progress"},
+            ],
+        )
+
+        prompt = session._system_prompt()
+
+        assert "Report and ask about committing" in prompt, (
+            "the agent cannot answer a question about an item it cannot see"
+        )
+        assert "Write the renderer" in prompt
+        assert "[x]" in prompt and "[>]" in prompt, "the state of each item must be legible"
+        assert "1/2" in prompt, "how far along the plan is must be legible"
+
+    def test_an_unfinished_item_is_called_out(self, session):
+        session.store.set_todos(
+            session.session_id,
+            [{"content": "Report and ask about committing", "status": "pending"}],
+        )
+
+        prompt = session._system_prompt()
+
+        assert "Report and ask about committing" in prompt
+        assert "Not finished on that list" in prompt, (
+            "an item left unticked is a standing claim that work is outstanding"
+        )
+
+    def test_an_empty_plan_adds_nothing(self, session):
+        assert "Your plan, as the user is looking at it" not in session._system_prompt()
 
 
 class TestThePrimaryFileIsNeverLost:

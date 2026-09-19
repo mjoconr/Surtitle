@@ -56,7 +56,8 @@ log = logging.getLogger(__name__)
 # lives beside the step budget it describes, so the two cannot drift apart.
 _PROGRESS_STEPS = PROGRESS_STEPS
 
-# How many transcript messages to replay into the model as context.
+# How many of the most recent conversational messages to replay into the model as
+# context. "Most recent" is the load-bearing part — see `_build_history`.
 _HISTORY_LIMIT = 40
 
 # A session whose connection left mid-turn is kept for a reload to reclaim, then
@@ -891,6 +892,42 @@ class Session:
                 f"Top level: {', '.join(listing)}"
             )
 
+        # The plan the user is looking at right now.
+        #
+        # It is rendered in the UI's Plan tab and it survives the end of the turn,
+        # so an item left unfinished is a standing claim, in front of the user,
+        # that work is outstanding. The only todo tool *writes*, so without this
+        # the agent could neither see its own plan nor answer "which item is still
+        # unticked?" — and in a real session it could not, when the user asked
+        # exactly that. Replayed every turn, so losing the conversation cannot
+        # lose the plan with it.
+        plan = self.store.list_todos(self.session_id) if self.store is not None else []
+        if plan:
+            done = sum(1 for item in plan if item["status"] == "completed")
+            rows = []
+            for item in plan:
+                mark = {"completed": "[x]", "in_progress": "[>]"}.get(item["status"], "[ ]")
+                rows.append(f"- {mark} {item['content']}")
+            open_items = [item["content"] for item in plan if item["status"] != "completed"]
+            section = (
+                "## Your plan, as the user is looking at it\n"
+                f"This is the Plan tab in their window right now ({done}/{len(plan)} "
+                "done). It stays on screen after the turn ends, so an unfinished item "
+                "reads as work you abandoned — and they may ask you about an item by "
+                "name, so this list is the only thing that lets you answer. Keep it "
+                "true before you finish: `todo_write` the whole list as items start "
+                "and finish, rather than leaving one in progress while you answer "
+                "something else.\n\n" + "\n".join(rows)
+            )
+            if open_items:
+                section += (
+                    "\n\nNot finished on that list: "
+                    + "; ".join(open_items)
+                    + ". Either finish them, tick them off, or say plainly that they "
+                    "are not done."
+                )
+            sections.append(section)
+
         config = self.project_config
         if config is not None and config.instructions:
             sections.append(
@@ -1107,22 +1144,31 @@ class Session:
     def _build_history(self) -> list[ChatMessage]:
         """Rebuild model context from the stored transcript.
 
+        The window is the **newest** ``_HISTORY_LIMIT`` conversational messages,
+        and it is counted over the conversation only: reasoning is stored one row
+        per step, so counting it against the window pushed the conversation itself
+        out of the model's context within a single turn. The failure that caused is
+        worth naming, because it does not look like a bug from the outside — the
+        agent would re-derive work it had already finished and committed earlier in
+        the same session, then report that "somebody" had already done it, because
+        its own record of doing it was no longer replayed. See the prompt's
+        standing rule to check what it already did: that rule is only usable if the
+        record is actually here.
+
         ``_rolled_back`` marks a turn whose exchange was already written during
         cancellation, so the current user message must not be appended twice.
         """
+        messages = self.store.list_messages(
+            self.session_id, limit=_HISTORY_LIMIT, roles=("user", "assistant")
+        )
+        history: list[ChatMessage] = [
+            {"role": message.role, "content": message.content}
+            for message in messages
+            if message.content
+        ]
         if self._rolled_back:
             self._rolled_back = False
-            messages = self.store.list_messages(self.session_id, limit=_HISTORY_LIMIT)
-            return [
-                {"role": message.role, "content": message.content}
-                for message in messages
-                if message.role in {"user", "assistant"} and message.content
-            ]
-        messages = self.store.list_messages(self.session_id, limit=_HISTORY_LIMIT)
-        history: list[ChatMessage] = []
-        for message in messages:
-            if message.role in {"user", "assistant"} and message.content:
-                history.append({"role": message.role, "content": message.content})
+            return history
         # The current user message is appended by the loop, so drop the copy the
         # loop's own run() would duplicate.
         if history and history[-1]["role"] == "user":

@@ -15,6 +15,7 @@ import sqlite3
 import threading
 import time
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -648,11 +649,40 @@ class Store:
             created_at=now,
         )
 
-    def list_messages(self, session_id: str, *, limit: int = 500) -> list[Message]:
+    def list_messages(
+        self,
+        session_id: str,
+        *,
+        limit: int = 500,
+        roles: Sequence[str] | None = None,
+    ) -> list[Message]:
+        """The most recent ``limit`` messages, oldest first.
+
+        The window is taken from the **end** of the conversation, which is the
+        part a reader — or a model — needs. Returning the first ``limit`` rows
+        instead looks harmless until a session outgrows the limit, at which point
+        the context is frozen at the opening exchange and everything done since
+        becomes invisible. That is exactly how a long voice session came to
+        re-propose work it had already built and committed: see
+        ``Session._build_history``, which is the caller this matters most to.
+
+        ``roles`` restricts the window *before* it is cut, so a caller that only
+        wants the conversation does not lose it to the audit trail — reasoning is
+        stored as one row per step and otherwise crowds the window out.
+        """
+        clause = ""
+        params: list[Any] = [session_id]
+        if roles:
+            clause = f" AND role IN ({', '.join('?' for _ in roles)})"
+            params.extend(roles)
+        params.append(limit)
         with self._lock:
             rows = self._conn.execute(
-                "SELECT * FROM messages WHERE session_id = ? ORDER BY id ASC LIMIT ?",
-                (session_id, limit),
+                "SELECT * FROM ("
+                f" SELECT * FROM messages WHERE session_id = ?{clause}"
+                " ORDER BY id DESC LIMIT ?"
+                ") ORDER BY id ASC",
+                params,
             ).fetchall()
         return [
             Message(
@@ -713,9 +743,18 @@ class Store:
         )
 
     def list_tool_calls(self, session_id: str, *, limit: int = 200) -> list[ToolCallRecord]:
+        """The most recent ``limit`` calls, oldest first.
+
+        Newest-from-the-end for the same reason as :meth:`list_messages`: a long
+        turn can exceed the cap, and the calls a reader wants are the ones it just
+        made, not the ones it made first.
+        """
         with self._lock:
             rows = self._conn.execute(
-                "SELECT * FROM tool_calls WHERE session_id = ? ORDER BY id ASC LIMIT ?",
+                "SELECT * FROM ("
+                " SELECT * FROM tool_calls WHERE session_id = ?"
+                " ORDER BY id DESC LIMIT ?"
+                ") ORDER BY id ASC",
                 (session_id, limit),
             ).fetchall()
         records = []

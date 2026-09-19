@@ -110,8 +110,18 @@ class TestSearchTool:
         assert result.data["results"], "the tool found nothing"
         assert "4C-120" in result.display
 
-    async def test_searching_from_the_same_session_excludes_it(self, populated):
-        """Otherwise the agent is handed its own last utterance as 'memory'."""
+    async def test_searching_from_the_same_session_includes_it_and_says_so(self, populated):
+        """The agent must be able to recover its own record — and know it is its own.
+
+        This used to exclude the current session, on the grounds that the agent
+        would be handed its own last utterance as "memory". The concern is real but
+        the cure was worse: it removed the only way to find what the agent itself
+        had already done, in exactly the situation that needs it — a long session
+        whose earlier turns have aged out of the replayed context. An agent that
+        cannot find its own work re-derives it, or reports that somebody else must
+        have done it. So the current session is searched, and every hit is labelled
+        with where it came from so its own words cannot pass as outside memory.
+        """
         store, project, first, _second = populated
         registry = default_registry()
         ctx = ToolContext(
@@ -119,7 +129,23 @@ class TestSearchTool:
         )
         result = await registry.dispatch("search_history", ctx, {"query": "4C-120"})
         assert result.ok
-        assert all(item["session_id"] != first.id for item in result.data["results"])
+        assert any(item["session_id"] == first.id for item in result.data["results"])
+        assert all(
+            item["from"] == "this conversation"
+            for item in result.data["results"]
+            if item["session_id"] == first.id
+        )
+
+    async def test_another_sessions_hits_are_labelled_as_such(self, populated):
+        """So a fact from a previous session is not mistaken for this one's."""
+        store, project, _first, second = populated
+        ctx = ToolContext(
+            root=Path(store.path).parent, session_id=second.id, project_id=project.id, store=store
+        )
+        result = await default_registry().dispatch("search_history", ctx, {"query": "4C-120"})
+        assert result.ok
+        assert result.data["results"], "the other session's finding must still be reachable"
+        assert all(item["from"] == "an earlier conversation" for item in result.data["results"])
 
     async def test_a_miss_is_reported_plainly(self, populated):
         store, project, _first, second = populated

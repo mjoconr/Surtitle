@@ -606,6 +606,55 @@ class TestThePlan:
         ]
 
 
+class TestTheTranscriptWindowKeepsTheEnd:
+    """A capped read of a long transcript must lose the opening, not the tail.
+
+    Both `list_messages` and `list_tool_calls` took the *first* `limit` rows. On a
+    long session that silently showed the oldest part of it — and for
+    `list_messages` the model read the same truncated view, which is the amnesia
+    this whole area exists to prevent.
+    """
+
+    def test_messages_over_the_limit_keep_the_newest(self, tmp_path):
+        store = Store(tmp_path / "db.sqlite")
+        project = store.create_project("P", tmp_path)
+        record = store.create_session(project.id)
+        for index in range(500):
+            store.add_message(record.id, "user", f"message {index}")
+
+        kept = store.list_messages(record.id, limit=10)
+
+        assert [m.content for m in kept] == [f"message {index}" for index in range(490, 500)], (
+            "the newest ten, still in reading order"
+        )
+
+    def test_tool_calls_over_the_limit_keep_the_newest(self, tmp_path):
+        store = Store(tmp_path / "db.sqlite")
+        project = store.create_project("P", tmp_path)
+        record = store.create_session(project.id)
+        for index in range(300):
+            store.add_tool_call(record.id, "run_shell", {"command": f"cmd {index}"})
+
+        kept = store.list_tool_calls(record.id, limit=5)
+
+        assert [c.arguments["command"] for c in kept] == [
+            f"cmd {index}" for index in range(295, 300)
+        ]
+
+    def test_a_role_filter_is_applied_before_the_window_is_cut(self, tmp_path):
+        """Otherwise the audit trail evicts the conversation it sits beside."""
+        store = Store(tmp_path / "db.sqlite")
+        project = store.create_project("P", tmp_path)
+        record = store.create_session(project.id)
+        store.add_message(record.id, "user", "the question")
+        for step in range(50):
+            store.add_message(record.id, REASONING_ROLE, f"thinking {step}")
+
+        kept = store.list_messages(record.id, limit=5, roles=("user", "assistant"))
+
+        assert [m.content for m in kept] == ["the question"]
+
+
 class TestTheSessionEndpoint:
     """Reopening a conversation must return everything the process view needs."""
 
