@@ -71,6 +71,7 @@ CHECK_KINDS = (
     "tool_not_called",
     "writes_within",
     "answer_contains",
+    "any_answer_contains",
     "plan_written",
     "max_steps",
     "no_failed_tools",
@@ -104,6 +105,9 @@ class Outcome:
     root: str
     reason: str = ""
     answer: str = ""
+    # Every turn's answer, oldest first. A one-turn task has one; a conversation
+    # has the lot, which is what a memory check has to look at.
+    answers: list[str] = field(default_factory=list)
     steps: int = 0
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
     duration_s: float = 0.0
@@ -148,15 +152,31 @@ def validate_task(task: Any, *, source: str = "task") -> None:
     """Check a task is one the harness can actually run and score."""
     if not isinstance(task, dict):
         raise ValueError(f"{source}: a task must be an object")
-    for key in ("id", "root", "prompt", "checks"):
+    for key in ("id", "root", "checks"):
         if not task.get(key):
             raise ValueError(f"{source}: missing {key!r}")
+    prompts = task.get("turns") or ([task["prompt"]] if task.get("prompt") else [])
+    if not prompts:
+        raise ValueError(f"{source}: give a 'prompt', or 'turns' for a conversation")
+    if not all(isinstance(prompt, str) and prompt.strip() for prompt in prompts):
+        raise ValueError(f"{source}: every prompt must be a non-empty string")
     if not isinstance(task["checks"], list) or not task["checks"]:
         raise ValueError(f"{source}: 'checks' must be a non-empty list")
     for check in task["checks"]:
         kind = check if isinstance(check, str) else (check or {}).get("kind")
         if kind not in CHECK_KINDS:
             raise ValueError(f"{source}: unknown check {kind!r}; known: {', '.join(CHECK_KINDS)}")
+
+
+def task_prompts(task: dict[str, Any]) -> list[str]:
+    """What is said to the agent, in order — one turn, or a conversation.
+
+    A one-turn task is a question. A multi-turn task is the only way to measure
+    what the agent's *history* does for it: a fresh conversation has no history, so
+    nothing about replay, ageing or the transcript window can show up in a run of
+    single-turn tasks.
+    """
+    return list(task.get("turns") or [task["prompt"]])
 
 
 def task_root(task: dict[str, Any]) -> Path:
@@ -226,7 +246,8 @@ async def run_task(
 
     started = time.monotonic()
     try:
-        await session._run_turn(task["prompt"])
+        for prompt in task_prompts(task):
+            await session._run_turn(prompt)
     except Exception as exc:  # noqa: BLE001 - a broken run is a result, not a crash
         outcome.error = f"{type(exc).__name__}: {exc}"
     finally:
@@ -242,12 +263,12 @@ async def run_task(
     outcome.prompt_tokens = session._turn_prompt_tokens
     outcome.completion_tokens = session._turn_completion_tokens
 
-    answers = [
-        message
+    outcome.answers = [
+        strip_work_log(message.content)
         for message in store.list_messages(record.id, limit=200, roles=("assistant",))
-        if message.content.strip()
+        if strip_work_log(message.content)
     ]
-    outcome.answer = strip_work_log(answers[-1].content) if answers else ""
+    outcome.answer = outcome.answers[-1] if outcome.answers else ""
     outcome.tool_calls = [
         {"name": call.name, "arguments": call.arguments, "ok": call.ok}
         for call in store.list_tool_calls(record.id, limit=500)
@@ -272,7 +293,6 @@ def _check(check: Any, outcome: Outcome) -> CheckResult:
     if isinstance(check, str):
         check = {"kind": check}
     kind = check["kind"]
-    answer = outcome.answer.lower()
 
     if kind == "answered":
         text = outcome.answer.strip()
@@ -323,16 +343,17 @@ def _check(check: Any, outcome: Outcome) -> CheckResult:
         return CheckResult(kind, not offenders, detail)
 
     if kind == "answer_contains":
-        missing = [needle for needle in check.get("all_of", []) if needle.lower() not in answer]
-        if missing:
-            return CheckResult(kind, False, f"missing: {', '.join(missing)}")
-        any_of = check.get("any_of", [])
-        if any_of and not any(needle.lower() in answer for needle in any_of):
-            return CheckResult(kind, False, f"none of: {', '.join(any_of)}")
-        forbidden = [needle for needle in check.get("none_of", []) if needle.lower() in answer]
-        if forbidden:
-            return CheckResult(kind, False, f"must not say: {', '.join(forbidden)}")
-        return CheckResult(kind, True, _excerpt(outcome.answer))
+        ok, detail = _contains(check, outcome.answer)
+        return CheckResult(kind, ok, detail)
+
+    if kind == "any_answer_contains":
+        # For a conversation: the fact may have been established in any turn.
+        detail = "no answer matched"
+        for text in outcome.answers or [outcome.answer]:
+            ok, detail = _contains(check, text)
+            if ok:
+                return CheckResult(kind, True, detail)
+        return CheckResult(kind, False, detail)
 
     if kind == "plan_written":
         for call in outcome.tool_calls:
@@ -354,6 +375,21 @@ def _check(check: Any, outcome: Outcome) -> CheckResult:
         return CheckResult(kind, ok, detail)
 
     raise ValueError(f"unknown check {kind!r}")  # pragma: no cover - validated on load
+
+
+def _contains(check: dict[str, Any], text: str) -> tuple[bool, str]:
+    """Whether an answer satisfies an ``answer_contains``-style check, and why not."""
+    answer = text.lower()
+    missing = [needle for needle in check.get("all_of", []) if needle.lower() not in answer]
+    if missing:
+        return False, f"missing: {', '.join(missing)}"
+    any_of = check.get("any_of", [])
+    if any_of and not any(needle.lower() in answer for needle in any_of):
+        return False, f"none of: {', '.join(any_of)}"
+    forbidden = [needle for needle in check.get("none_of", []) if needle.lower() in answer]
+    if forbidden:
+        return False, f"must not say: {', '.join(forbidden)}"
+    return True, _excerpt(text)
 
 
 def _excerpt(text: str, limit: int = 90) -> str:

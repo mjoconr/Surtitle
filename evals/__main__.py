@@ -148,7 +148,11 @@ def main(argv: list[str] | None = None) -> int:
                 check if isinstance(check, str) else check["kind"] for check in task["checks"]
             )
             print(f"{task['id']:<34} {task_root_label(task):<28} [{checks}]")
-            print(f"    {harness._excerpt(task['prompt'], 150)}")
+            prompts = harness.task_prompts(task)
+            opening = (
+                prompts[0] if len(prompts) == 1 else f"{len(prompts)} turns, starting: {prompts[0]}"
+            )
+            print(f"    {harness._excerpt(opening, 150)}")
         print(f"\n{len(tasks)} task(s)")
         return 0
 

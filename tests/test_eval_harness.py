@@ -108,6 +108,30 @@ class TestTaskFiles:
         with pytest.raises(ValueError, match="missing"):
             harness.load_tasks()
 
+    def test_a_task_may_be_a_conversation(self):
+        """A fresh conversation has no history, so a single-turn task cannot
+        measure replay, ageing, or the transcript window. `turns` is how those are
+        reached; a one-turn task is still just a `prompt`."""
+        single = {"id": "s", "root": "/tmp", "prompt": "one", "checks": ["answered"]}
+        conversation = {
+            "id": "c",
+            "root": "/tmp",
+            "turns": ["first", "second"],
+            "checks": ["answered"],
+        }
+        assert harness.task_prompts(single) == ["one"]
+        assert harness.task_prompts(conversation) == ["first", "second"]
+
+    def test_a_task_with_neither_prompt_nor_turns_is_rejected(self):
+        with pytest.raises(ValueError, match="prompt"):
+            harness.validate_task({"id": "x", "root": "/tmp", "checks": ["answered"]})
+
+    def test_a_conversation_with_a_blank_turn_is_rejected(self):
+        with pytest.raises(ValueError, match="non-empty"):
+            harness.validate_task(
+                {"id": "x", "root": "/tmp", "turns": ["first", "  "], "checks": ["answered"]}
+            )
+
 
 class TestScoring:
     def check(self, spec, result):
@@ -123,18 +147,16 @@ class TestScoring:
             assert not self.check({"kind": "ended_complete"}, outcome(reason=reason)).ok
 
     def test_tool_called_narrows_on_the_arguments(self):
-        calls = [
-            {"name": "read_file", "arguments": {"path": "machine/Grab/Conveyor.lpc"}, "ok": True}
-        ]
+        calls = [{"name": "read_file", "arguments": {"path": "src/ingest.py"}, "ok": True}]
         assert self.check(
             {"kind": "tool_called", "name": "read_file"}, outcome(tool_calls=calls)
         ).ok
         assert self.check(
-            {"kind": "tool_called", "name": "read_file", "contains": "Conveyor.lpc"},
+            {"kind": "tool_called", "name": "read_file", "contains": "ingest.py"},
             outcome(tool_calls=calls),
         ).ok
         assert not self.check(
-            {"kind": "tool_called", "name": "read_file", "contains": "BaleGate.lpc"},
+            {"kind": "tool_called", "name": "read_file", "contains": "parser.py"},
             outcome(tool_calls=calls),
         ).ok
         assert not self.check(
@@ -174,15 +196,15 @@ class TestScoring:
     def test_writes_within_catches_a_write_to_the_wrong_file(self):
         calls = [
             {"name": "write_file", "arguments": {"path": "docs/CURRENT_STATE.md"}, "ok": True},
-            {"name": "edit_file", "arguments": {"path": "machine/Grab/Conveyor.lpc"}, "ok": True},
-            {"name": "read_file", "arguments": {"path": "machine/Grab/Conveyor.lpc"}, "ok": True},
+            {"name": "edit_file", "arguments": {"path": "src/ingest.py"}, "ok": True},
+            {"name": "read_file", "arguments": {"path": "src/ingest.py"}, "ok": True},
         ]
         result = self.check(
             {"kind": "writes_within", "paths": ["docs/state/"]}, outcome(tool_calls=calls)
         )
         assert not result.ok
         assert "docs/current_state.md" in result.detail
-        assert "conveyor.lpc" in result.detail, "the edit is an offender too"
+        assert "ingest.py" in result.detail, "the edit is an offender too"
         assert result.detail.count("(") == 2, "a read is not a write"
 
     def test_answer_contains_is_case_insensitive_and_handles_all_three_forms(self):

@@ -1,0 +1,21 @@
+{
+  "id": "example-remembers-what-it-found",
+  "root": "examples/sample-project",
+  "turns": [
+    "What is the retry limit for ingest, and where is it set?",
+    "And what does export use? Answer from what you established in the last turn."
+  ],
+  "origin": "The sample project in evals/examples. Multi-turn on purpose: a fresh conversation has no history, so a single-turn task cannot measure what the agent's own transcript does for it — which is what replay, ageing and the transcript window are about.",
+  "checks": [
+    "answered",
+    { "kind": "ended_complete" },
+    { "kind": "any_answer_contains", "all_of": ["5"] },
+    {
+      "kind": "answer_contains",
+      "any_of": ["default", "falls back", "not set", "no max_attempts", "unset"],
+      "note": "The export section has no max_attempts, so the answer is the default — which only follows if the previous turn is still known."
+    },
+    { "kind": "writes_within", "paths": ["docs/state/"] },
+    { "kind": "max_steps", "value": 30 }
+  ]
+}
