@@ -18,6 +18,7 @@ Two rules hold everything together:
 `main` should be green and the working tree clean.
 
 ```bash
+uv lock --check
 uv run --frozen ruff format --check src tests scripts
 uv run --frozen ruff check src tests scripts
 uv run --frozen pytest -q
@@ -49,6 +50,23 @@ release if the *shipped* code changed; it does not if nothing a user runs change
 `tests/test_build_release.py::TestVersionConsistency` fails if those disagree or if
 the changelog has no section for the version, so this is enforced rather than
 remembered. The `Unreleased` heading stays at the top for the next change.
+
+Then tell the lock, which is the fourth place the version is written:
+
+```bash
+uv lock
+```
+
+`uv.lock` records the version of the editable project. It is derived rather than
+hand-edited, but it goes stale the moment `pyproject.toml` moves, and nothing else
+refreshes it: every command in this document runs with `--frozen`, which means
+"do not touch the lockfile". So the release pipeline never rewrites it, and step
+3's `git add -A` catches a change that never appears. That is how it came to say
+`0.1.0` against a `0.5.2` project, five releases on.
+
+`--frozen` is still right everywhere else — a release must not re-resolve
+dependencies — but it does not *assert* the lock is current. `uv lock --check` in
+the pre-flight above does, and it is the difference between a rule and a habit.
 
 Write the changelog entry for someone deciding whether to update: what was wrong,
 what it means for them, and what they have to do — not which files moved. The
