@@ -131,12 +131,13 @@ git push origin vX.Y.Z
    `scripts/build_release.py`, which is also what the check compares against.
 
 For a look before announcing, run the workflow by hand
-(`gh workflow run release.yml -f dry_run=true`): it runs every check and builds
-every archive on the runner that will ship it, and **creates nothing** — no tag, no
-release, not even a draft. That is the way to find out whether the release path
-still works, and it is what to reach for after changing anything in this workflow.
-`-f draft=true` is the older option and still writes a tag, which is the part that
-is hard to take back.
+(`gh workflow run release.yml -f dry_run=true`): it runs every check, builds every
+archive on the runner that will ship it, and then runs the publish stage's
+completeness and checksum steps against those real artifacts — and creates nothing.
+No tag, no release, not even a draft. The only step it skips is the one that creates
+the release. That is the way to find out whether the release path still works, and it
+is what to reach for after changing anything in this workflow. `-f draft=true` is the
+older option and still writes a tag, which is the part that is hard to take back.
 
 ## 5. Verify what was published, not the run
 

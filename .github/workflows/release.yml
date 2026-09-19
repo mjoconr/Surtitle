@@ -105,11 +105,10 @@ jobs:
   publish:
     name: Publish the release
     needs: [build]
-    # A dry run is the honest way to check the release path: it runs every test and
-    # builds every archive on the runner that will ship it, and creates nothing.
-    # `gh workflow run release.yml -f dry_run=true` — the alternative, a draft
-    # release, still writes a tag, which is the thing that is hard to take back.
-    if: ${{ !inputs.dry_run }}
+    # The job always runs, including on a dry run, so that the checks below are
+    # exercised before a real tag depends on them — a check that only runs when
+    # publishing is a check nobody has run until it matters. Only the step that
+    # creates the release is conditional.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -133,7 +132,10 @@ jobs:
             shasum -a 256 "$file" >> SHA256SUMS.txt || sha256sum "$file" >> SHA256SUMS.txt
           done
           cat SHA256SUMS.txt
+      # The point of the dry run: everything above has now run against the real
+      # artifacts, and this step is the only one that creates anything.
       - name: Create the release
+        if: ${{ !inputs.dry_run }}
         uses: softprops/action-gh-release@v2
         with:
           draft: ${{ github.event_name == 'workflow_dispatch' && inputs.draft || false }}
