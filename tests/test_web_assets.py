@@ -1370,10 +1370,11 @@ class TestMutingActuallyReachesTheWorklet:
     """
 
     def test_the_message_goes_whenever_there_is_a_worklet_node(self, audio):
-        block = audio[audio.index("setMuted(muted)") :]
-        block = block[: block.index("\n  }")]
+        for method in ("setMuted(muted)", "notifyPlayback(playing)"):
+            block = audio[audio.index(method) :]
+            block = block[: block.index("\n  }")]
 
-        assert 'this.backend === "worklet"' not in block, (
-            "the label is not the same as the node being there"
-        )
-        assert "this.node.port.postMessage" in block
+            assert 'this.backend === "worklet"' not in block, (
+                "the label is not the same as the node being there"
+            )
+            assert "this.node.port.postMessage" in block

@@ -348,7 +348,9 @@ export class Capture {
   notifyPlayback(playing) {
     // 400 ms, matching the worklet's grace window.
     if (playing) this._graceUntil = performance.now() + 400;
-    if (this.node && this.backend === "worklet" && this.node.port) {
+    // Same rule as `setMuted`: the worklet holds this state itself, and the label
+    // on the backend is not the same thing as a worklet node being attached.
+    if (this.node && this.node.port) {
       this.node.port.postMessage({ type: "playback", value: playing });
     }
   }
