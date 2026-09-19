@@ -690,9 +690,19 @@ function assistantTurn() {
   if (state.currentTurn && state.currentTurn.kind === "assistant") {
     return state.currentTurn;
   }
+  // A new assistant turn means the message that was waiting behind the last one
+  // has started, so its "queued" marker is no longer true.
+  clearQueuedMarkers();
   const turn = beginTurn("assistant");
   state.currentTurn = turn;
   return turn;
+}
+
+/** Drop the queued marker from messages whose turn has now begun. */
+function clearQueuedMarkers() {
+  for (const bubble of el.turns.querySelectorAll('.bubble[data-queued="true"]')) {
+    delete bubble.dataset.queued;
+  }
 }
 
 /**
@@ -1847,14 +1857,26 @@ function handleEvent(event) {
       break;
     }
     case "user_text": {
-      // A new turn supersedes anything outstanding: if an approval was waiting,
-      // the turn that asked for it is gone.
-      clearApproval();
+      // A message typed while a turn was running arrives here too. It is shown —
+      // it is the user's message and hiding it reads as lost — but nothing is
+      // reset, because the turn it is waiting behind is still streaming into its
+      // own block above.
+      const queued = Boolean(data.queued);
+      if (!queued) {
+        // A new turn supersedes anything outstanding: if an approval was waiting,
+        // the turn that asked for it is gone.
+        clearApproval();
+      }
       const turn = beginTurn("user");
       turn.bubble.textContent = data.text || "";
       // Kept so a stopped turn can be resumed: the server continues from its own
       // stored conversation, and this is only what the composer re-offers.
       state.lastUserText = data.text || "";
+      if (queued) {
+        turn.bubble.dataset.queued = "true";
+        toast("Queued — it will run as soon as this request finishes.");
+        break;
+      }
       state.currentTurn = null;
       state.pendingStopNote = null;
       // A new turn touches its own files; the last turn's list is history, and

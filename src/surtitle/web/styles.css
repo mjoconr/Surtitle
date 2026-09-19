@@ -579,6 +579,17 @@ button, input, textarea, select {
   padding: 0;
 }
 
+/* A message typed while the agent was still working: it is waiting, not ignored.
+ *
+ * The marker is dropped when the next assistant turn starts, which is exactly
+ * when the held request begins — so it never outlives the wait it describes.
+ */
+.bubble--user[data-queued="true"] {
+  opacity: 0.75;
+  outline: 1px dashed var(--dsw-alias-border-l3);
+  outline-offset: -1px;
+}
+
 /* Spoken text is visually distinct: it is what you actually hear. */
 .said {
   display: flex;

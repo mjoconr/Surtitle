@@ -886,3 +886,63 @@ class TestTheTurnEndingIsRecorded:
             f"a turn that produced nothing must say so aloud; heard {spoken!r}"
         )
         assert session._turn_spoken_chars > 0, "the log must not report this as a silent turn"
+
+
+class TestRequestsArrivingMidTurn:
+    """A request that arrives while the agent is working must not be lost.
+
+    Reported as losing the ability to type while the agent thinks, answered with
+    "Still working on the previous request. Stop it first or wait." — and an
+    utterance captured in the same window was dropped with no message at all. A
+    turn can run for minutes, so the next thought has to be kept rather than
+    refused or thrown away.
+    """
+
+    @staticmethod
+    def _drain(session) -> list:
+        events = []
+        while not session._outbox.empty():
+            events.append(session._outbox.get_nowait())
+        return events
+
+    async def test_a_typed_request_during_a_turn_is_queued_not_refused(self, wired):
+        from surtitle.core.events import EventKind
+
+        session, _tts, _stt = wired
+        session._turn = asyncio.create_task(asyncio.sleep(30))
+
+        try:
+            await session.handle_text("and also check the notes")
+
+            events = self._drain(session)
+            assert [event.kind for event in events] == [EventKind.USER_TEXT], (
+                "a queued request is an acknowledgement, not an error"
+            )
+            assert events[0].data["queued"] is True, "the browser is told it is waiting"
+            assert session._queue == [("and also check the notes", "typed")]
+        finally:
+            session._turn.cancel()
+
+    async def test_the_queued_request_runs_when_the_turn_finishes(self, wired):
+        session, _tts, _stt = wired
+        session.registry = ToolRegistry([t for t in default_tool_list() if t.name == "list_dir"])
+        session.deepseek = _ScriptedModel([_answer_round()])
+        session._queue.append(("the second question", "typed"))
+
+        session._drain_queue()
+        assert session._turn is not None, "the held request was never started"
+        await session._turn
+
+        assert session._queue == [], "it must not run twice"
+        assert session.store.get_session(session.session_id).last_end_reason == "complete"
+
+    async def test_a_closed_session_does_not_start_queued_work(self, wired):
+        """Shutdown must not begin a turn on the way out."""
+        session, _tts, _stt = wired
+        session._queue.append(("too late", "typed"))
+        await session.close()
+
+        session._drain_queue()
+
+        assert session._queue == [("too late", "typed")]
+        assert session._turn is None or session._turn.done()

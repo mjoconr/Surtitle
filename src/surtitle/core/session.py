@@ -163,6 +163,10 @@ class Session:
     _commit_task: asyncio.Task[None] | None = None
     # Set when an interrupted turn was already written to the transcript.
     _rolled_back: bool = False
+    # Requests that arrived while a turn was running, in order. Held rather than
+    # refused: a turn can run for minutes, and "stop it first or wait" turns the
+    # user's next thought into an error message.
+    _queue: list[tuple[str, str]] = field(default_factory=list)
     # Per-turn accounting, reported when the turn ends. The run-wide totals live
     # in `RunStats`; these are what the turn-end record and its log line report,
     # because "how big did this turn get, and what did it say" is the question a
@@ -469,14 +473,46 @@ class Session:
         cleaned = text.strip()
         if not cleaned:
             return
-        if self._turn is not None and not self._turn.done():
-            await self.emit(
-                EventKind.ERROR,
-                message="Still working on the previous request. Stop it first or wait.",
-            )
+        await self._deliver(cleaned, "typed")
+
+    async def _deliver(self, text: str, source: str) -> None:
+        """Start a turn, or hold the request until the running one finishes.
+
+        Both entry points — typed and spoken — come through here. A person typing
+        while the agent works used to be refused with "still working on the
+        previous request. Stop it first or wait", and an utterance arriving in the
+        same window was dropped with no message at all. Neither is defensible when
+        a turn can run for minutes: the request is kept, shown, and runs next.
+
+        The message is emitted now rather than when it starts, because a request
+        that vanishes from the composer with nothing on screen reads as lost.
+        """
+        if self._closed:
             return
-        await self.emit(EventKind.USER_TEXT, text=cleaned, source="typed")
-        self._turn = asyncio.create_task(self._run_turn(cleaned), name="agent-turn")
+        if self._turn_in_flight():
+            self._queue.append((text, source))
+            log.info("queued a %s request behind the running turn: %r", source, text[:80])
+            await self.emit(EventKind.USER_TEXT, text=text, source=source, queued=True)
+            return
+        await self.emit(EventKind.USER_TEXT, text=text, source=source)
+        self._turn = asyncio.create_task(self._run_turn(text), name="agent-turn")
+
+    def _drain_queue(self) -> None:
+        """Start the next held request, once the turn that held it has finished.
+
+        Called from the end of `_run_turn`, including the paths where that turn
+        was stopped or failed: the queued request is the user's most recent
+        intent, and a turn ending for any reason is the moment to honour it.
+        """
+        if self._closed or not self._queue:
+            return
+        current = asyncio.current_task()
+        if self._turn is not None and not self._turn.done() and self._turn is not current:
+            # Something else is running and will drain when it finishes.
+            return
+        text, source = self._queue.pop(0)
+        log.info("starting the queued %s request: %r", source, text[:80])
+        self._turn = asyncio.create_task(self._run_turn(text), name="agent-turn")
 
     async def _on_transcript(self, event: TranscriptEvent) -> None:
         """Handle one transcription update, without blocking the recogniser.
@@ -837,7 +873,9 @@ class Session:
             # Counters are intentionally left in place: they describe the listening
             # session, and clearing them here is what made a failed second attempt
             # look identical to a failed first one.
-            pass
+            # A request that arrived while this turn ran goes next, whatever ended
+            # this one — finished, stopped, or failed.
+            self._drain_queue()
 
     # Instruction files, by conventional location. Root first, then `docs/`,
     # because a project that keeps its orientation material in `docs/` was
@@ -1382,10 +1420,10 @@ class Session:
         # happened on a second attempt to speak.
         pending = self._state.interim.strip()
         self._state.interim = ""
-        if pending and not self._turn_in_flight():
-            log.info("delivering speech captured before playback: %r", pending[:80])
-            await self.emit(EventKind.USER_TEXT, text=pending, source="voice")
-            self._turn = asyncio.create_task(self._run_turn(pending), name="agent-turn")
+        if pending:
+            # Was `and not self._turn_in_flight()`, which dropped the utterance
+            # silently whenever the agent was still working. It is queued now.
+            await self._deliver(pending, "voice")
 
         if self.stt is not None:
             self.stt.set_suppression(True)

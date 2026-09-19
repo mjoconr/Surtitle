@@ -642,7 +642,9 @@ class TestTheRightPanel:
 
     def test_a_new_turn_forgets_the_last_turn_s_files(self, script):
         block = script[script.index('case "user_text": {') :]
-        block = block[: block.index("break;")]
+        # To the end of the case, not to the first `break` — the queued-message
+        # branch has one of its own.
+        block = block[: script.index('case "say": {')]
         assert "state.touched.clear()" in block
 
 
@@ -1222,3 +1224,37 @@ class TestFolderPickerList:
 
     def test_a_new_level_starts_at_the_top(self, script):
         assert "el.folderList.scrollTop = 0" in script
+
+
+class TestAMessageTypedWhileTheAgentWorks:
+    """Reported: "I've lost the ability to enter text while the system is thinking".
+
+    The old answer was an error telling the user to stop the turn or wait. The
+    request is held now, shown where it was typed, and marked as waiting until its
+    own turn begins — and a turn can run for minutes, so the marker has to go away
+    when the wait is over rather than sitting there claiming it is still pending.
+    """
+
+    def _queued_branch(self, script: str) -> str:
+        block = script[script.index('case "user_text": {') :]
+        block = block[: script.index('case "say": {')]
+        branch = block[block.index("if (queued) {") :]
+        return branch[: branch.index("break;")]
+
+    def test_a_queued_message_is_shown_as_waiting(self, script):
+        branch = self._queued_branch(script)
+
+        assert "dataset.queued" in branch, "the transcript says it is waiting"
+        assert "toast(" in branch, "and so does the moment it was typed"
+        assert "state.currentTurn = null" not in branch, (
+            "resetting the turn would orphan the answer still streaming above it"
+        )
+
+    def test_the_waiting_marker_clears_when_its_turn_starts(self, script):
+        """Otherwise a message that has been answered still says "queued"."""
+        block = script[script.index("function assistantTurn(") :]
+        block = block[: block.index("\n}\n")]
+        assert "clearQueuedMarkers()" in block
+        clear = script[script.index("function clearQueuedMarkers(") :]
+        clear = clear[: clear.index("\n}\n")]
+        assert 'data-queued="true"' in clear
