@@ -13,6 +13,7 @@ reads as a hung agent and hid the real work.
 
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import subprocess
@@ -1524,3 +1525,156 @@ class TestMutingActuallyReachesTheWorklet:
                 "the label is not the same as the node being there"
             )
             assert "this.node.port.postMessage" in block
+
+
+class TestTheMarkdownRenderer:
+    """The `<display>` channel is Markdown by contract — the prompt asks for tables,
+    code, listings and paths there — and it was being shown as preformatted text.
+
+    Run through node rather than read as text: escaping is the part that matters and
+    the part a source-reading test cannot check. Skipped where node is absent, since
+    node is not a dependency of this project.
+    """
+
+    @staticmethod
+    def render(markdown: str) -> str:
+        node = shutil.which("node")
+        if node is None:
+            pytest.skip("node is not installed")
+        module = WEB / "js" / "markdown.js"
+        script = (
+            "import { pathToFileURL } from 'node:url';"
+            f"const m = await import(pathToFileURL({json.dumps(str(module))}).href);"
+            f"process.stdout.write(m.markdownToHtml({json.dumps(markdown)}));"
+        )
+        result = subprocess.run(
+            [node, "--input-type=module", "-e", script],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert result.returncode == 0, result.stderr
+        return result.stdout
+
+    def test_a_table_becomes_a_table(self):
+        html = self.render("| Station | Distance |\n|---|---|\n| Lagana | in town |")
+
+        assert "<table" in html and "<th>Station</th>" in html
+        assert "<td>Lagana</td>" in html
+        assert "|---|" not in html, "the separator row is not content"
+        assert "| Station |" not in html, "and neither is the pipe syntax"
+
+    def test_a_table_without_a_separator_is_still_a_table(self):
+        html = self.render("| a | b |\n| 1 | 2 |")
+
+        assert "<th>a</th>" in html and "<td>2</td>" in html
+
+    def test_a_pipe_in_a_sentence_is_not_a_table(self):
+        html = self.render("the flag is a | b in the docs")
+
+        assert "<table" not in html
+        assert "a | b" in html
+
+    def test_bold_and_inline_code(self):
+        html = self.render("**Name check** — `Lindock` is not a township")
+
+        assert "<strong>Name check</strong>" in html
+        assert "<code>Lindock</code>" in html
+        assert "**" not in html and "`" not in html
+
+    def test_a_fenced_block_is_code(self):
+        html = self.render("```python\nprint(1 < 2)\n```")
+
+        assert 'class="md__code"' in html
+        assert "print(1 &lt; 2)" in html, "escaped, and in a code block"
+
+    def test_headings_lists_and_rules(self):
+        html = self.render("## Findings\n\n- one\n- two\n\n---\n")
+
+        assert "<h2" in html and "Findings" in html
+        assert html.count("<li>") == 2
+        assert "<hr" in html
+
+    def test_an_ordered_list_is_ordered(self):
+        html = self.render("1. first\n2. second")
+
+        assert "<ol" in html and html.count("<li>") == 2
+
+    def test_a_link_is_a_link(self):
+        html = self.render("see [the docs](https://example.test/x)")
+
+        assert 'href="https://example.test/x"' in html
+        assert 'rel="noopener noreferrer"' in html
+        assert ">the docs</a>" in html
+
+    def test_a_dangerous_link_is_not_a_link(self):
+        """The text comes from a model that has been reading files and web pages, so
+        it can contain whatever those contained."""
+        for attempt in ("[x](javascript:alert(1))", "[x](data:text/html,<script>)"):
+            html = self.render(attempt)
+
+            assert "<a " not in html, attempt
+            assert "href" not in html, attempt
+
+    def test_html_in_the_text_is_shown_rather_than_run(self):
+        html = self.render('<img src=x onerror="alert(1)"> and <script>bad()</script>')
+
+        assert "<img" not in html and "<script>" not in html
+        assert "&lt;img" in html and "&lt;script&gt;" in html
+
+    def test_an_attribute_cannot_be_broken_out_of(self):
+        """A URL with a quote in it never becomes a link at all, and the quote is
+        escaped on the way out — so there is no attribute for it to escape from."""
+        html = self.render('[x](https://example.test/"onmouseover="alert(1))')
+
+        assert "<a " not in html and "href=" not in html
+        assert "&quot;onmouseover" in html, "the text is shown, inert"
+
+    def test_plain_prose_keeps_its_line_breaks(self):
+        """Half of what lands here is a listing, where the breaks are the structure."""
+        html = self.render("line one\nline two")
+
+        assert "line one<br />line two" in html
+
+    def test_nothing_is_rendered_for_nothing(self):
+        assert self.render("") == ""
+        assert self.render("   \n\n  ") == ""
+
+    def test_the_app_renders_the_display_channel_through_it(self, script):
+        """The only place a rendered string reaches the page, so the only place that
+        has to be checked: everything it emits is escaped inside `markdown.js`."""
+        block = function_source(script, "appendShown")
+
+        assert "markdownToHtml(block.rawText)" in block
+        assert 'from "./markdown.js"' in script, "and the renderer is imported, not inlined"
+
+
+class TestTheWorkLogIsFoldedAway:
+    """The stored answer is the display text with the turn's tool log appended, and
+    the log is the model's memory of its work rather than part of what it said: one
+    `run_shell(...)` line per call, unbounded, and on a long turn far longer than the
+    answer above it. Rendered inline it put a wall of shell commands under every
+    reopened reply, in the transcripts that most needed reading.
+    """
+
+    def test_a_stored_answer_is_split_into_what_it_showed_and_the_log(self, script):
+        block = function_source(script, "splitWorkLog")
+
+        assert "WORK_LOG_MARKER" in block
+        assert "shown:" in block and "log:" in block
+
+    def test_the_log_is_a_closed_disclosure_in_the_steps(self, script):
+        block = function_source(script, "appendWorkLog")
+
+        assert 'node("details", "worklog")' in block, "closed until asked for"
+        assert "turn.steps.append(details)" in block, "with the work, not after the answer"
+
+    def test_reopening_a_conversation_splits_the_stored_answer(self, script):
+        """Both stored paths have to go through it. The recovery path was wired up
+        and the replay path was not, so a reopened conversation still dumped the log
+        while the code that fixes it sat there unused."""
+        replay = script[script.index("await replayThenJumpToLatest(") :]
+        assert "appendStoredAnswer(turn, message.content, message.spoken)" in replay
+
+        recovery = function_source(script, "recoverMissingAnswer")
+        assert "appendStoredAnswer(turn, last.content, last.spoken)" in recovery

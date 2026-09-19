@@ -9,6 +9,7 @@
 
 import { Capture, Playback } from "./audio.js";
 import { Connection, ConnectionState } from "./connection.js";
+import { markdownToHtml } from "./markdown.js";
 import { SettingsPanel } from "./settings.js";
 
 const AGENT_STATE_LABELS = {
@@ -20,6 +21,18 @@ const AGENT_STATE_LABELS = {
   speaking: "Speaking",
   error: "Error",
 };
+
+/**
+ * Where a stored answer stops being an answer and becomes the log of the work.
+ *
+ * The server appends the turn's tool activity to the message it stores, because
+ * that listing is how the *model* remembers what it already did. It is not part of
+ * what the person was told, and it is not written to be read: it is one line per
+ * call, unbounded, and on a long turn it is far longer than the answer above it.
+ * Rendering it inline put a wall of `run_shell(...)` under every reopened reply —
+ * the transcripts that most needed reading were the ones it buried.
+ */
+const WORK_LOG_MARKER = "[work this turn]";
 
 const state = {
   projects: [],
@@ -784,15 +797,71 @@ function appendShown(turn, text) {
   if (!text) return;
   turn.shownText += text;
   const last = turn.shown.lastElementChild;
+  let block;
   // Consecutive display chunks belong to one block unless a tool row or a
   // spoken line intervened, which is the visual promise of the speak layer.
   if (last && last.dataset.kind === "shown") {
-    last.textContent += text;
+    block = last;
+    block.rawText = (block.rawText || "") + text;
   } else {
-    const block = node("div", "shown", text);
+    block = node("div", "shown");
     block.dataset.kind = "shown";
+    block.rawText = text;
     turn.shown.append(block);
   }
+  // Markdown, re-rendered from the whole of what has arrived rather than appended
+  // per delta: a table is only a table once its separator row is in, and half a
+  // fence is not a fence. The display channel is a table or a listing written once
+  // at the end of a turn, so this is a handful of small renders, not a hot path.
+  //
+  // The raw text is kept on the node rather than in `dataset` so it does not also
+  // sit in the DOM as a copy of itself.
+  block.innerHTML = markdownToHtml(block.rawText);
+}
+
+/** An answer as it was stored: what it showed, and the log of the work under it. */
+function splitWorkLog(content) {
+  const text = content || "";
+  const at = text.indexOf(WORK_LOG_MARKER);
+  if (at === -1) return { shown: text, log: "" };
+  return {
+    shown: text.slice(0, at).trim(),
+    log: text.slice(at + WORK_LOG_MARKER.length).trim(),
+  };
+}
+
+/**
+ * Render a stored answer: what it showed, and the work log folded away.
+ *
+ * Used wherever a *stored* message is put on screen — reopening a conversation,
+ * and recovering a reply whose events never arrived. The live path never needs it:
+ * while a turn is running the work is on screen as steps and tool rows, which is
+ * what the log summarises.
+ */
+function appendStoredAnswer(turn, content, spoken) {
+  const { shown, log } = splitWorkLog(content);
+  if (shown && shown !== (spoken || "").trim()) appendShown(turn, shown);
+  appendWorkLog(turn, log);
+}
+
+/**
+ * The turn's tool activity, folded shut.
+ *
+ * Folded because it is a record rather than a reply: eleven `run_shell(...)` lines
+ * after every answer is the transcript burying itself. It goes inside the steps
+ * rather than after the answer, so the closed version still reads top-down — the
+ * work, then what was shown, then what was said.
+ */
+function appendWorkLog(turn, log) {
+  if (!log) return;
+  const lines = log.split("\n").filter((line) => line.trim());
+  const details = node("details", "worklog");
+  const summary = node("summary", "worklog__summary");
+  const count = lines.length;
+  summary.textContent = `Work this turn · ${count} action${count === 1 ? "" : "s"}`;
+  const body = node("pre", "worklog__body", lines.join("\n"));
+  details.append(summary, body);
+  turn.steps.append(details);
 }
 
 function appendError(turn, message) {
@@ -2423,7 +2492,7 @@ async function recoverMissingAnswer(turn) {
 
     if (last.spoken && last.spoken.trim()) appendSaid(turn, last.spoken);
     if (last.content && last.content.trim() !== (last.spoken || "").trim()) {
-      appendShown(turn, last.content);
+      appendStoredAnswer(turn, last.content, last.spoken);
     }
     pushActivity({
       label: "Recovered a missing reply",
@@ -3104,7 +3173,10 @@ async function selectSession(sessionId) {
             appendSaid(turn, message.spoken);
           }
           if (message.content && message.content.trim() !== (message.spoken || "").trim()) {
-            appendShown(turn, message.content);
+            // The stored content is the display text with the turn's work log
+            // appended to it: `appendStoredAnswer` splits them, renders the first as
+            // Markdown and folds the second away.
+            appendStoredAnswer(turn, message.content, message.spoken);
           }
           lastAnsweredAt = item.at || 0;
         }

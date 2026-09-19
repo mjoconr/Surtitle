@@ -668,6 +668,10 @@ button, input, textarea, select {
   line-height: 18px;
 }
 
+/* What the agent chose to show: the evidence behind the answer — a table, a
+ * listing, a set of paths. Markdown, rendered (see `js/markdown.js`), so it is set
+ * in the reading font and only its code is monospace.
+ */
 .shown {
   font-size: var(--dsh-content-font-size-secondary);
   color: var(--dsw-alias-label-secondary);
@@ -675,11 +679,134 @@ button, input, textarea, select {
   border: 0.5px solid var(--dsw-alias-border-l1);
   border-radius: 12px;
   padding: 10px 12px;
+  word-break: break-word;
+  line-height: 21px;
+  /* Tall content scrolls rather than pushing the answer off the screen, and the
+   * table inside keeps its own width rather than wrapping its columns. */
+  max-height: 340px;
+  overflow: auto;
+}
+
+.shown p { margin: 0 0 8px; }
+.shown > :last-child { margin-bottom: 0; }
+
+.md__h {
+  margin: 10px 0 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--dsw-alias-label-primary);
+}
+
+.md__list {
+  margin: 0 0 8px;
+  padding-left: 18px;
+}
+
+.md__list li { margin-bottom: 2px; }
+
+.md__quote {
+  margin: 0 0 8px;
+  padding-left: 10px;
+  border-left: 2px solid var(--dsw-alias-border-l3);
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.md__hr {
+  margin: 10px 0;
+  border: 0;
+  border-top: 0.5px solid var(--dsw-alias-border-l2);
+}
+
+/* The one place a table has to be wide: it is the shape the agent is told to put
+ * numbers and paths in, and wrapping cells makes columns unreadable. */
+.md__table {
+  width: 100%;
+  margin: 0 0 8px;
+  border-collapse: collapse;
+  font-size: var(--dsh-content-font-size-secondary);
+}
+
+.md__table th,
+.md__table td {
+  padding: 3px 10px 3px 0;
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 0.5px solid var(--dsw-alias-border-l1);
+}
+
+.md__table th {
+  color: var(--dsw-alias-label-primary);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.md__table tr:last-child td { border-bottom: 0; }
+
+.md__code {
+  margin: 0 0 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-module-platform);
+  overflow-x: auto;
+}
+
+.shown code,
+.md__code code {
+  font-family: var(--ds-font-family-code);
+  font-size: 12px;
+}
+
+/* Inline code only: a block already sits on its own background. */
+.shown :not(pre) > code {
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--dsw-alias-bg-module-platform);
+}
+
+.shown a {
+  color: var(--dsw-alias-state-business-primary);
+  text-decoration: underline;
+}
+
+/* The turn's tool log, folded away. It is the model's memory of what it did, not
+ * part of what it said: eleven `run_shell(...)` lines under every answer is the
+ * transcript burying itself.
+ */
+.worklog {
+  margin-top: 2px;
+  padding: 6px 10px;
+  border: 0.5px solid var(--dsw-alias-border-l1);
+  border-radius: 10px;
+  background: var(--dsw-alias-bg-module-platform);
+}
+
+.worklog__summary {
+  cursor: pointer;
+  list-style: none;
+  color: var(--dsw-alias-label-caption);
+  font: var(--dsw-font-xxs-12);
+}
+
+.worklog__summary::-webkit-details-marker { display: none; }
+
+.worklog__summary::before {
+  content: "\25B8  ";
+  font-size: 9px;
+}
+
+.worklog[open] .worklog__summary::before { content: "\25BE  "; }
+.worklog[open] .worklog__summary { margin-bottom: 6px; }
+
+.worklog__body {
+  margin: 0;
+  max-height: 320px;
+  overflow: auto;
+  color: var(--dsw-alias-label-secondary);
+  font-family: var(--ds-font-family-code);
+  font-size: 11px;
+  line-height: 16px;
   white-space: pre-wrap;
   word-break: break-word;
-  font-family: var(--ds-font-family-code);
-  max-height: 260px;
-  overflow: auto;
 }
 
 /* ------------------------------------------------------------ tool rows */

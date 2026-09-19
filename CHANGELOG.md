@@ -25,7 +25,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rate-limited, the reliable route is a provider key, and the provider is one function
   wide.
 
+- **What the agent shows you is rendered as Markdown.** The `<display>` channel is
+  Markdown by contract — the prompt asks for tables, code, file listings, long numbers
+  and paths there — and it was being shown as preformatted text, so a table arrived as
+  a row of pipes and bold arrived with its asterisks. Headings, lists, tables, fenced
+  and inline code, links, quotes and rules are now rendered. Nothing in it is trusted:
+  the text comes from a model that has been reading files and web pages, so every
+  character is escaped and the only markup that reaches the page is markup the renderer
+  builds itself, and a link is a link only if it is `http` or `https`. `js/markdown.js`
+  is a plain string function with no DOM, which is what lets its escaping be tested
+  directly instead of by looking at a page.
+
 ### Fixed
+
+- **The turn's tool log is folded away instead of dumped under the answer.** The
+  server appends a listing of the turn's tool calls to the message it stores, because
+  that listing is how the *model* remembers what it already did. It is not part of
+  what the person was told and it is not written to be read: one line per call,
+  unbounded — a measured example was 24,669 characters of `run_shell(...)` under a
+  two-sentence answer, which is the transcript burying itself in the transcripts that
+  most needed reading. It is now one closed row, *Work this turn · 74 actions*, with
+  the lines inside it when they are asked for.
 
 - **A turn reads top-down now, with the answer at the bottom.** The reply used to be
   announced at the top of a turn with the steps accumulating underneath it, so the
