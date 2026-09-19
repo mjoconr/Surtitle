@@ -29,6 +29,7 @@ from surtitle.tools.fs_tools import ToolContext, ToolResult
 from surtitle.vcs.guide import DETAIL_LEVELS, detail_menu
 
 __all__ = [
+    "GOAL_TOOL",
     "SUBAGENT_TOOL",
     "TODO_TOOL",
     "WEB_FETCH_TOOL",
@@ -613,6 +614,7 @@ class ToolRegistry:
 
 
 TODO_TOOL = "todo_write"
+GOAL_TOOL = "goal_write"
 SUBAGENT_TOOL = "subagent"
 WEB_FETCH_TOOL = "web_fetch"
 
@@ -625,7 +627,9 @@ _WEB_FETCH_CHARS = 12_000
 # they belong to — `todo_write` writes its plan, `search_history` reads other
 # conversations, and a sub-agent has neither — and the third starts another
 # sub-agent, which is how a delegation becomes a fork bomb.
-_NOT_FOR_A_SUBAGENT = frozenset({TODO_TOOL, "search_history", SUBAGENT_TOOL, *_JOB_TOOLS})
+_NOT_FOR_A_SUBAGENT = frozenset(
+    {TODO_TOOL, GOAL_TOOL, "search_history", SUBAGENT_TOOL, *_JOB_TOOLS}
+)
 
 
 def _todo_write_handler(ctx: ToolContext, todos: list[dict[str, Any]] | None = None) -> ToolResult:
@@ -896,6 +900,73 @@ _JOB_KILL = Tool(
 )
 
 
+def _goal_write_handler(
+    ctx: ToolContext, goal: str = "", achieved: bool = False, **_ignored: Any
+) -> ToolResult:
+    """Record what the conversation is for, or that it has been reached.
+
+    The plan is what is being done; this is what it is for. Three calls, decided by
+    the arguments rather than by three tools, because they are one idea: a goal
+    stated, a goal reached, a goal abandoned.
+    """
+    if ctx.store is None or not ctx.session_id:
+        return ToolResult(ok=False, error="There is nowhere to record a goal in this session.")
+
+    text = (goal or "").strip()
+    if not text and not achieved:
+        ctx.store.set_goal(ctx.session_id, None)
+        return ToolResult(
+            ok=True,
+            data={"goal": None, "goal_achieved": False},
+            display="Goal cleared.",
+        )
+
+    stored = ctx.store.set_goal(ctx.session_id, text or None, achieved=achieved)
+    if stored is None:  # pragma: no cover - the session is checked above
+        return ToolResult(ok=False, error="That conversation no longer exists.")
+
+    if achieved:
+        return ToolResult(
+            ok=True,
+            data={"goal": stored.goal, "goal_achieved": True},
+            display=f"Goal reached: {stored.goal or '(none recorded)'}",
+        )
+    return ToolResult(
+        ok=True,
+        data={"goal": stored.goal, "goal_achieved": False},
+        display=f"Goal recorded: {stored.goal}",
+    )
+
+
+_GOAL_WRITE = Tool(
+    name=GOAL_TOOL,
+    description=(
+        "Record what this conversation is for, in one sentence, so it survives past "
+        "the turn that has it in mind — and mark it reached when it is. Set it when "
+        "the user asks for something that will take more than a turn, or says what "
+        "the objective is; a goal is not a plan, it is the thing the plan is for "
+        "('get the handoff cap into 122 without lowering the scales throw', not "
+        "'read Conveyor.lpc'). Mark it achieved the moment it is done, so a finished "
+        "conversation stops being nudged onward. Send no arguments to clear a goal "
+        "that is no longer what you are doing."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "goal": _string(
+                "The objective, one sentence, in the user's terms. Omit to mark the "
+                "current goal achieved, or to clear it."
+            ),
+            "achieved": _boolean("Mark the recorded goal as reached.", default=False),
+        },
+        "required": [],
+    },
+    handler=_goal_write_handler,
+    approval="never",
+    summary="Record the objective",
+)
+
+
 def default_tool_list() -> list[Tool]:
     """Every tool the agent may use."""
     return [
@@ -915,6 +986,7 @@ def default_tool_list() -> list[Tool]:
         _MAKE_CHART,
         _CONVERT_DOCUMENT,
         _TODO_WRITE,
+        _GOAL_WRITE,
         _SUBAGENT,
     ]
 

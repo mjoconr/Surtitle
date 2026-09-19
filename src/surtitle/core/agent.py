@@ -37,7 +37,13 @@ from surtitle.llm.deepseek import ChatMessage, DeepSeekClient, DeepSeekError, To
 from surtitle.store.db import REASONING_ROLE, Store
 from surtitle.tools import environment
 from surtitle.tools.fs_tools import ToolContext, ToolResult
-from surtitle.tools.registry import SUBAGENT_TOOL, TODO_TOOL, ToolRegistry, default_registry
+from surtitle.tools.registry import (
+    GOAL_TOOL,
+    SUBAGENT_TOOL,
+    TODO_TOOL,
+    ToolRegistry,
+    default_registry,
+)
 
 __all__ = ["AgentLoop", "ApprovalBroker", "RepeatCallGuard", "build_system_prompt"]
 
@@ -135,6 +141,19 @@ _NO_ANSWER_FALLBACK = (
 _NO_REPLY_FALLBACK = (
     "That turn produced no answer at all — the model returned no text and ran no "
     "commands. Ask again, or ask for a smaller piece of it."
+)
+
+# Asked for when a round ends the turn while the conversation's objective is still
+# standing. The plan says what is left to do; the goal says what it is all for, and
+# it is the broader of the two: a turn can have every plan item ticked and still not
+# have done what the user asked for, which is the case a plan cannot catch.
+_CONTINUE_GOAL_INSTRUCTION = (
+    "This conversation has an objective that is not marked done:\n\n{goal}\n\n"
+    "You ended that round without calling a tool, which reads as though the work "
+    "finished with it. Carry on with the next thing that moves that objective "
+    "forward. If it is finished, mark it with `goal_write(achieved=true)` and say so "
+    "— do not leave it standing. If you are deliberately stopping short, say what is "
+    "left and why."
 )
 
 # Asked for when a round ends the turn while the plan the user is looking at still
@@ -351,6 +370,15 @@ name for the job. Say what you started, do something else, and read it with
 `job_output` when you need it — give that a `wait_seconds` rather than asking again in
 a loop, because one step that waits is worth five that check. Stop a job you no longer
 want with `job_kill`; a job nobody wants should not keep running quietly.
+
+**Say what the conversation is *for*, once.** The plan is what you are doing; the goal
+is what it is for, and it is the thing that has to survive a long piece of work. When
+the user asks for something that will take more than a turn, or says what they are
+trying to achieve, record it with `goal_write` in their words — one sentence, in their
+terms, not a restatement of your first step. It comes back to you every turn, which is
+also how you keep your bearings after a long conversation. When it is done, mark it
+with `goal_write(achieved=true)`: a goal left standing after the work is finished is a
+promise the user can read that you have not kept.
 
 **Write the plan down when the work is bigger than a couple of steps.** The user
 can see your plan while you work, which is the difference between watching
@@ -804,6 +832,25 @@ class AgentLoop:
             await self._client.aclose()
             self._client = None
 
+    def _active_goal(self) -> str:
+        """The conversation's objective, when there is one still standing.
+
+        Empty when there is no goal, when it has been marked achieved, or when there
+        is no store to ask. A store failure is treated as "no goal", for the same
+        reason `_open_plan_items` treats one as "no plan": bookkeeping must not be
+        able to end a turn.
+        """
+        if self.store is None or not self.session_id:
+            return ""
+        try:
+            record = self.store.get_session(self.session_id)
+        except Exception:  # pragma: no cover - defensive
+            log.debug("could not read the goal; carrying on without it", exc_info=True)
+            return ""
+        if record is None or record.goal_achieved:
+            return ""
+        return (record.goal or "").strip()
+
     def _open_plan_items(self) -> list[str]:
         """What the plan says is left to do, as the user is reading it.
 
@@ -987,19 +1034,24 @@ class AgentLoop:
                 # tools and is a complete answer; nudging there would send it off to
                 # do the work the user only asked about.
                 open_items = self._open_plan_items() if state.actions else []
-                if open_items and not state.plan_nudged:
+                goal = self._active_goal() if state.actions else ""
+                if (open_items or goal) and not state.plan_nudged:
                     state.plan_nudged = True
-                    state.messages.append(
-                        {
-                            "role": "user",
-                            "content": _CONTINUE_PLAN_INSTRUCTION.format(
-                                items="\n".join(f"- {item}" for item in open_items)
-                            ),
-                        }
+                    # The plan is the more specific of the two, so it is the one
+                    # named when both are outstanding: "you left this item open" is
+                    # a better instruction than "you have not finished".
+                    instruction = (
+                        _CONTINUE_PLAN_INSTRUCTION.format(
+                            items="\n".join(f"- {item}" for item in open_items)
+                        )
+                        if open_items
+                        else _CONTINUE_GOAL_INSTRUCTION.format(goal=goal)
                     )
+                    state.messages.append({"role": "user", "content": instruction})
                     log.info(
-                        "turn paused with %d open plan item(s); asking it to carry on",
+                        "turn paused with %d open plan item(s) and %s goal; asking it to carry on",
                         len(open_items),
+                        "a standing" if goal else "no",
                     )
                     continue
 
@@ -1419,6 +1471,21 @@ class AgentLoop:
                     todos=self.store.list_todos(self.session_id)
                     if self.store and self.session_id
                     else arguments.get("todos", []),
+                )
+
+            if call.name == GOAL_TOOL and result.ok:
+                # Same reasoning as the plan above, and the same source of truth:
+                # the goal is what the work is measured against, and the user reads
+                # it rather than taking the agent's word for it.
+                record = (
+                    self.store.get_session(self.session_id)
+                    if self.store and self.session_id
+                    else None
+                )
+                yield self._event(
+                    EventKind.GOAL,
+                    goal=(record.goal if record is not None else None),
+                    achieved=bool(record.goal_achieved) if record is not None else False,
                 )
 
     def _store_reasoning(self, state: _TurnState) -> None:

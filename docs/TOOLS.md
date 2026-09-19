@@ -21,6 +21,7 @@ asks about packages the project has not already approved.
 | `list_dir`, `read_file`, `search_files` | never | no |
 | `environment_info`, `search_packages` | never | no |
 | `todo_write` | never | no |
+| `goal_write` | never | no |
 | `subagent` | never | no |
 | `web_fetch` | ask | no |
 | `write_file`, `edit_file` | ask | yes |
@@ -321,6 +322,32 @@ Implemented over stdio JSON-RPC (`initialize`, `notifications/initialized`, `too
 `tools/call`) rather than the official SDK, whose dependency chain requires a Rust build
 and would defeat the no-toolchain Windows release. Timeouts, process-group kills and
 shutdown follow the same patterns as the rest of the app.
+
+## The goal
+
+`goal_write` records what the conversation is *for*, in one sentence, and whether it
+has been reached. It is not the plan: the plan is the list of steps, the goal is the
+thing the steps are for, and it is the broader of the two — every plan item can be
+ticked while the thing the user actually asked for is still not done, which is the
+case a plan cannot catch.
+
+It is per **conversation** — two columns on the session row — and it is given to the
+agent at the start of every turn, above the plan, in the same transient notes block
+the plan lives in. Losing the conversation cannot lose it. It is rendered above the
+plan in the Plan tab, and echoed to the browser as its own `goal` event when it
+changes, for the same reason the plan is: it is state the user watches, so it is
+sent from the record rather than read out of a tool result.
+
+It also drives continuation, which is what it is really for. A turn that ends with
+the goal still standing — and did some work — is asked once to carry on, the same way
+a turn that ends with plan items open is. The plan is named when both are
+outstanding, because "you left this item open" is a better instruction than "you have
+not finished". A goal marked **achieved** stops driving anything: what was wanted is
+kept for the record, and a finished conversation is not nudged onward.
+
+`goal_write` takes no approval. It changes nothing outside the conversation, exactly
+like the plan, and it is absent from a sub-agent's registry for the same reason: a
+child has no conversation of its own for a goal to belong to.
 
 ## The plan
 

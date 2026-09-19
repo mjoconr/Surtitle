@@ -1,0 +1,20 @@
+{
+  "id": "example-set-a-goal-and-keep-it",
+  "root": "..",
+  "turns": [
+    "Our goal for this conversation is to get the closing-round rules documented in docs/TOOLS.md. Record that, then tell me what you have recorded.",
+    "Which file would you change to make them clearer, and why?"
+  ],
+  "origin": "Written to check that the agent records a goal when the user states one, in the user's terms, and that the goal is still there a turn later — the two halves a goal has to get right to be worth having.",
+  "checks": [
+    "answered",
+    { "kind": "ended_complete" },
+    {
+      "kind": "tool_called",
+      "name": "goal_write",
+      "note": "The point of the task: the user said what the conversation is for."
+    },
+    { "kind": "any_answer_contains", "any_of": ["closing-round", "closing round", "TOOLS.md"] },
+    { "kind": "writes_within", "paths": [] }
+  ]
+}

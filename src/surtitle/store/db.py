@@ -78,7 +78,12 @@ CREATE TABLE IF NOT EXISTS sessions (
     -- carries it, which is what lets the model be shown a turn as it actually
     -- happened — the call, its result, then the answer — instead of a summary of
     -- it. See `Session._build_history`.
-    turn_seq        INTEGER NOT NULL DEFAULT 0
+    turn_seq        INTEGER NOT NULL DEFAULT 0,
+    -- What this conversation is for, in one sentence, and whether it has been
+    -- reached. The plan says what is being done now; this says why, and it is the
+    -- thing a turn that ends too early is measured against. See `set_goal`.
+    goal            TEXT,
+    goal_achieved   INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id, updated_at DESC);
@@ -189,6 +194,11 @@ class Session:
     last_end_at: float | None = None
     # How many turns this conversation has had. See `start_turn`.
     turn_seq: int = 0
+    # What the conversation is for, and whether it has been reached. Distinct from
+    # the plan: the plan is the list of steps, this is the thing the steps are for,
+    # and it is what an early stop is measured against.
+    goal: str | None = None
+    goal_achieved: bool = False
 
     @property
     def archived(self) -> bool:
@@ -209,6 +219,10 @@ class Session:
             "last_end_detail": self.last_end_detail,
             "last_end_steps": self.last_end_steps,
             "last_end_at": self.last_end_at,
+            # What the conversation is for. The browser shows it beside the plan:
+            # the plan is what is being done, this is what it is for.
+            "goal": self.goal,
+            "goal_achieved": self.goal_achieved,
         }
 
 
@@ -341,6 +355,8 @@ class Store:
                 "last_end_steps": "INTEGER",
                 "last_end_at": "REAL",
                 "turn_seq": "INTEGER NOT NULL DEFAULT 0",
+                "goal": "TEXT",
+                "goal_achieved": "INTEGER NOT NULL DEFAULT 0",
             },
             "messages": {"model_content": "TEXT", "turn": "INTEGER"},
             "tool_calls": {"turn": "INTEGER"},
@@ -624,6 +640,38 @@ class Store:
             rows = self._conn.execute(sql, (project_id, limit)).fetchall()
         return [self._row_to_session(r) for r in rows]
 
+    def set_goal(
+        self, session_id: str, goal: str | None, *, achieved: bool = False
+    ) -> Session | None:
+        """Record what this conversation is for, or that it has been reached.
+
+        ``goal=None`` clears it — the conversation goes back to having no objective,
+        which is what "that is not what I am doing" means. ``achieved`` is kept
+        beside the text rather than replacing it: what was wanted is worth keeping
+        after it has been got, and a marked-done goal stops driving the turn
+        without disappearing from the record.
+        """
+        cleaned = (goal or "").strip() or None
+        now = time.time()
+        with self._lock, self._conn:
+            if cleaned is None and not achieved:
+                self._conn.execute(
+                    "UPDATE sessions SET goal = NULL, goal_achieved = 0,"
+                    " updated_at = ? WHERE id = ?",
+                    (now, session_id),
+                )
+            elif cleaned is not None:
+                self._conn.execute(
+                    "UPDATE sessions SET goal = ?, goal_achieved = ?, updated_at = ? WHERE id = ?",
+                    (cleaned, int(achieved), now, session_id),
+                )
+            else:
+                self._conn.execute(
+                    "UPDATE sessions SET goal_achieved = 1, updated_at = ? WHERE id = ?",
+                    (now, session_id),
+                )
+        return self.get_session(session_id)
+
     def start_turn(self, session_id: str) -> int:
         """Begin a turn: clear the previous ending, and count this one.
 
@@ -747,6 +795,8 @@ class Store:
             last_end_steps=row["last_end_steps"] if "last_end_steps" in keys else None,
             last_end_at=row["last_end_at"] if "last_end_at" in keys else None,
             turn_seq=(row["turn_seq"] if "turn_seq" in keys else 0) or 0,
+            goal=(row["goal"] if "goal" in keys else None),
+            goal_achieved=bool(row["goal_achieved"]) if "goal_achieved" in keys else False,
         )
 
     # --- messages --------------------------------------------------------

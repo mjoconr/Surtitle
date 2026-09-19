@@ -797,6 +797,21 @@ class TestATurnEndsWithAClosingSection:
             "the ending belongs in the transcript, not only in the banner"
         )
 
+    def test_the_goal_is_shown_above_the_plan(self, script):
+        """The plan says what is being done; the goal says what it is for, and the
+        broader of the two goes first."""
+        assert 'case "goal": {' in script, "the goal arrives as its own event"
+        plan = script[script.index("function renderTodo()") :]
+        plan = plan[: plan.index("state.todos.length === 0")]
+        assert "state.goal" in plan and "goal__text" in plan, (
+            "and is rendered above the plan rather than beside it"
+        )
+
+    def test_the_goal_comes_back_with_a_reopened_conversation(self, script):
+        assert "session.goal" in script, (
+            "a goal outlives the turn that set it, so reopening must show it"
+        )
+
     def test_the_store_is_asked_before_concluding_there_was_no_answer(self, script):
         """A lost event stream is not the same as a turn that produced nothing."""
         block = script[script.index('case "done": {') :]

@@ -41,6 +41,7 @@ const state = {
   // current with the todo_write tool. Reloaded with the conversation, because a
   // plan that forgets itself on refresh is worse than none.
   todos: [],
+  goal: null,
   micOpen: false,
   // True while the server is discarding transcripts as the agent's own voice.
   echoSuppressed: false,
@@ -1616,6 +1617,17 @@ function focusStep(index) {
  * not finished, and nothing else in the UI says so.
  */
 function renderTodo() {
+  // What the conversation is for, above what is being done about it. Shown first
+  // because it is the broader statement: every item below can be ticked while the
+  // thing the user actually asked for is still not done.
+  if (state.goal && state.goal.text) {
+    const goal = node("div", "goal");
+    goal.dataset.achieved = state.goal.achieved ? "true" : "false";
+    goal.append(node("span", "goal__mark", state.goal.achieved ? "☑" : "◇"));
+    goal.append(node("span", "goal__text", state.goal.text));
+    if (state.goal.achieved) goal.append(node("span", "goal__note", "reached"));
+    el.rightbarBody.append(goal);
+  }
   if (state.todos.length === 0) {
     el.rightbarBody.append(node("p", "empty", "The agent has not written a plan."));
     return;
@@ -2108,6 +2120,13 @@ function handleEvent(event) {
           });
         }
       }
+      break;
+    }
+    case "goal": {
+      // Same contract as the plan below: the store is the source of truth, so this
+      // replaces rather than merges and cannot drift from the record.
+      state.goal = data.goal ? { text: data.goal, achieved: !!data.achieved } : null;
+      renderRightbar();
       break;
     }
     case "todos": {
@@ -2909,6 +2928,7 @@ async function selectSession(sessionId) {
   state.currentTurn = null;
   state.activity = [];
   state.todos = Array.isArray(session.todos) ? session.todos : [];
+  state.goal = session.goal ? { text: session.goal, achieved: !!session.goal_achieved } : null;
   // The panel this conversation was last left on, if it has been open before.
   state.rightTab = state.sessionTabs.get(sessionId) || "todo";
   state.touched.clear();

@@ -48,6 +48,7 @@ class EventKind(StrEnum):
     TOOL_RESULT = "tool_result"
     ARTIFACT = "artifact"
     TODOS = "todos"
+    GOAL = "goal"
     USAGE = "usage"
     ERROR = "error"
     DONE = "done"

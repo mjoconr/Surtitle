@@ -1341,6 +1341,20 @@ class Session:
                 f"Top level: {', '.join(listing)}"
             )
 
+        # What the conversation is for, before the plan that serves it. Given first
+        # because it is the broader statement: a plan can be entirely ticked and the
+        # thing the user asked for still not done.
+        goal = self.store.get_session(self.session_id) if self.store is not None else None
+        if goal is not None and goal.goal:
+            state = "achieved" if goal.goal_achieved else "not yet reached"
+            sections.append(
+                "## What this conversation is for\n"
+                f"{goal.goal}\n\n"
+                f"Recorded as {state}. It is what the work is measured against, so "
+                "when it is done say so with `goal_write(achieved=true)` rather than "
+                "leaving it standing."
+            )
+
         # The plan the user is looking at right now.
         #
         # It is rendered in the UI's Plan tab and it survives the end of the turn,

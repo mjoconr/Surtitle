@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A conversation can have a goal, and keeps working toward it.** The plan says what
+  is being done; `goal_write` records what it is *for*, in one sentence, and whether
+  it has been reached. It is the broader of the two — every plan item can be ticked
+  while the thing you asked for is still not done — so it is given to the agent at the
+  start of every turn, above the plan, and shown above the plan in the panel. A turn
+  that ends with the goal still standing and work behind it is asked once to carry on,
+  which is the "it stopped and needed prompting" complaint one level up from the plan;
+  marking it achieved stops that. A goal outlives the turn that set it, and reopening
+  the conversation brings it back.
+
 - **Long commands no longer hold a turn open.** `run_background` starts a command and
   returns at once with a name for it; `job_output` reads it — waiting a bounded time
   if you ask it to, so the agent does not sit in a polling loop — and `job_kill`
