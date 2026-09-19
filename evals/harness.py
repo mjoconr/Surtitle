@@ -35,6 +35,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import shutil
 import tempfile
 import time
 from dataclasses import asdict, dataclass, field
@@ -84,6 +85,33 @@ CHECK_KINDS = (
 # that note is following the convention rather than misbehaving.
 _WRITE_TOOLS = ("write_file", "edit_file")
 
+# What a run works in is a *copy* of its project, because a task may legitimately
+# write — that is what `writes_within` measures — and a measurement that edits the
+# checkout it is measuring has changed the thing the next run measures. The sample
+# project is committed: a task allowed to close one of its notes would leave the
+# tree dirty and would rewrite what `example-open-items` is asked about.
+#
+# The skip list is the parts of a checkout that are large, regenerable, or another
+# tool's state. Copied whole, a real project's `.venv` and `node_modules` would cost
+# more than the run. A task that needs them can say `"in_place": true` and get the
+# project itself — which is only safe against a throwaway checkout.
+_COPY_SKIP = shutil.ignore_patterns(
+    ".git",
+    ".hg",
+    ".svn",
+    ".venv",
+    "venv",
+    "node_modules",
+    "__pycache__",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".uv-cache",
+    "target",
+    "dist",
+    "build",
+)
+
 
 @dataclass(slots=True)
 class CheckResult:
@@ -103,6 +131,11 @@ class Outcome:
 
     task_id: str
     root: str
+    # Where the run actually worked, which is a copy of `root` unless the task asked
+    # for the project itself. Recorded so a surprising result can be traced back to
+    # what was really on disk — but that directory is gone by the time this is read,
+    # which is the point: nothing a task wrote survives its run.
+    ran_in: str = ""
     reason: str = ""
     answer: str = ""
     # Every turn's answer, oldest first. A one-turn task has one; a conversation
@@ -164,6 +197,8 @@ def validate_task(task: Any, *, source: str = "task") -> None:
         raise ValueError(f"{source}: every prompt must be a non-empty string")
     if not isinstance(task["checks"], list) or not task["checks"]:
         raise ValueError(f"{source}: 'checks' must be a non-empty list")
+    if "in_place" in task and not isinstance(task["in_place"], bool):
+        raise ValueError(f"{source}: 'in_place' must be true or false")
     for check in task["checks"]:
         kind = check if isinstance(check, str) else (check or {}).get("kind")
         if kind not in CHECK_KINDS:
@@ -191,6 +226,22 @@ def task_root(task: dict[str, Any]) -> Path:
     raw = os.path.expandvars(str(task["root"])).strip()
     path = Path(raw).expanduser()
     return path if path.is_absolute() else (PACKAGE_DIR / path).resolve()
+
+
+def sandbox_root(task: dict[str, Any], root: Path, workdir: Path) -> Path:
+    """The directory this run actually works in: a copy of the project, by default.
+
+    A run is allowed to write — following the project's own record-keeping is often
+    the point of the task — so it must not be the checkout the task names. A task
+    whose project is a throwaway copy can say ``"in_place": true`` and get the
+    project itself, which is what a task needing something the skip list leaves
+    behind — a virtualenv, a git history — has to do.
+    """
+    if task.get("in_place"):
+        return root
+    destination = workdir / "project"
+    shutil.copytree(root, destination, ignore=_COPY_SKIP, symlinks=True)
+    return destination
 
 
 # --- running -------------------------------------------------------------
@@ -222,8 +273,33 @@ async def run_task(
         settings = settings.model_copy(update={"max_steps": max_steps})
 
     workdir = Path(tempfile.mkdtemp(prefix=f"eval-{task['id']}-"))
+    try:
+        return await _run_task_in(task, settings, root, workdir, outcome)
+    except Exception as exc:  # noqa: BLE001 - a broken run is a result, not a crash
+        # Copying the project is the one step outside the session's own error
+        # handling, and an unreadable checkout must not end the suite and take every
+        # result already gathered with it.
+        outcome.error = f"{type(exc).__name__}: {exc}"
+        return outcome
+    finally:
+        # The run's scratch space, and with it the copy of the project. Left behind,
+        # a suite of tasks would leave one copy of a project per task in the temp
+        # directory, which is the leak the job registry was fixed for.
+        with contextlib.suppress(OSError):
+            shutil.rmtree(workdir)
+
+
+async def _run_task_in(
+    task: dict[str, Any],
+    settings: Settings,
+    root: Path,
+    workdir: Path,
+    outcome: Outcome,
+) -> Outcome:
+    work_root = sandbox_root(task, root, workdir)
+    outcome.ran_in = str(work_root)
     store = Store(workdir / "eval.sqlite")
-    project = store.create_project(root.name, root)
+    project = store.create_project(root.name, work_root)
     record = store.create_session(project.id)
     client = DeepSeekClient(settings)
     tools = default_tool_list()
@@ -235,7 +311,7 @@ async def run_task(
     session = Session(
         session_id=record.id,
         project_id=project.id,
-        root=root,
+        root=work_root,
         settings=settings,
         store=store,
         deepseek=client,
@@ -244,7 +320,7 @@ async def run_task(
         registry=ToolRegistry(tools),
         approvals=approvals,
     )
-    session.project_config = load_project_config(root)
+    session.project_config = load_project_config(work_root)
 
     started = time.monotonic()
     # Summed across every turn, not read once at the end. A conversation's cost is

@@ -58,6 +58,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   you trust it for the project — reading a page is harmless, but the URL is the part
   of a request that can carry something out. There is no search yet: it needs a URL.
 
+### Fixed
+
+- **An eval run works in a copy of the project it measures, and cleans it up.** A
+  run is allowed to write — following a project's own record-keeping is often what
+  the task is testing — so it was writing into the checkout the task named. The
+  first live run of the skills example closed one of the sample project's notes in
+  place: a committed file dirtied, and the answer to another task quietly changed for
+  every run after it. Each run now copies the project first, leaving behind what no
+  task needs and no run should pay for (`.git`, virtualenvs, dependency caches, build
+  output), and deletes the copy when it ends. A task that needs one of those against
+  a throwaway checkout can say `"in_place": true`.
+
 ## [0.11.0] - 2026-09-19
 
 ### Added

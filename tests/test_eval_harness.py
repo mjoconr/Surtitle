@@ -320,6 +320,103 @@ class TestMissingProject:
         assert not result.tool_calls
 
 
+class TestTheRunDoesNotTouchTheProject:
+    """A run is allowed to write, so the write must land somewhere disposable.
+
+    This is not hypothetical: the first live run of the skills example closed one of
+    the sample project's notes in place, which dirtied a committed file and quietly
+    changed the answer to ``example-open-items`` for every run after it.
+    """
+
+    @pytest.fixture
+    def project(self, tmp_path):
+        root = tmp_path / "checkout"
+        (root / "docs").mkdir(parents=True)
+        (root / "docs" / "note.md").write_text("original", encoding="utf-8")
+        (root / ".git").mkdir()
+        (root / ".git" / "HEAD").write_text("ref: refs/heads/main", encoding="utf-8")
+        (root / ".venv" / "lib").mkdir(parents=True)
+        (root / ".venv" / "lib" / "big.py").write_text("x" * 100, encoding="utf-8")
+        return root
+
+    def test_the_work_root_is_a_copy(self, project, tmp_path):
+        work_root = harness.sandbox_root({"id": "t"}, project, tmp_path)
+
+        assert work_root != project
+        assert (work_root / "docs" / "note.md").read_text(encoding="utf-8") == "original"
+
+    def test_writing_in_the_copy_leaves_the_project_alone(self, project, tmp_path):
+        work_root = harness.sandbox_root({"id": "t"}, project, tmp_path)
+
+        (work_root / "docs" / "note.md").write_text("edited", encoding="utf-8")
+
+        assert (project / "docs" / "note.md").read_text(encoding="utf-8") == "original"
+
+    def test_the_caches_a_copy_does_not_need_are_left_behind(self, project, tmp_path):
+        """Copied whole, a real project's virtualenv would cost more than the run."""
+        work_root = harness.sandbox_root({"id": "t"}, project, tmp_path)
+
+        assert not (work_root / ".git").exists()
+        assert not (work_root / ".venv").exists()
+        assert (work_root / "docs").is_dir(), "and the project's own files are still there"
+
+    def test_a_task_may_ask_for_the_project_itself(self, project, tmp_path):
+        """For a throwaway checkout, or when something the skip list drops is needed."""
+        assert harness.sandbox_root({"id": "t", "in_place": True}, project, tmp_path) == project
+
+    def test_in_place_must_be_a_boolean(self):
+        task = {
+            "id": "t",
+            "root": "/tmp",
+            "prompt": "p",
+            "checks": ["answered"],
+            "in_place": "yes",
+        }
+        with pytest.raises(ValueError, match="in_place"):
+            harness.validate_task(task)
+
+    async def test_the_scratch_space_is_removed_when_the_run_ends(self, tmp_path, monkeypatch):
+        """Otherwise a suite leaves one copy of a project per task in the temp
+        directory — the leak the job registry was fixed for."""
+        from surtitle.config import Settings
+
+        project = tmp_path / "project"
+        project.mkdir()
+        seen: dict = {}
+
+        async def fake(task, settings, root, workdir, outcome):
+            seen["workdir"] = workdir
+            assert workdir.is_dir()
+            return outcome
+
+        monkeypatch.setattr(harness, "_run_task_in", fake)
+        task = {"id": "t", "root": str(project), "prompt": "p", "checks": ["answered"]}
+        await harness.run_task(task, Settings(DEEPSEEK_API_KEY="unused"))
+
+        assert not seen["workdir"].exists()
+
+    async def test_a_project_that_cannot_be_copied_does_not_end_the_suite(
+        self, tmp_path, monkeypatch
+    ):
+        """The other tasks' results are already gathered; one unreadable checkout
+        must not throw them away."""
+        from surtitle.config import Settings
+
+        project = tmp_path / "checkout"
+        project.mkdir()
+
+        def cant(src, dst, **kwargs):
+            raise PermissionError(13, "Permission denied")
+
+        monkeypatch.setattr(harness.shutil, "copytree", cant)
+        task = {"id": "t", "root": str(project), "prompt": "p", "checks": ["answered"]}
+
+        result = await harness.run_task(task, Settings(DEEPSEEK_API_KEY="unused"))
+
+        assert "PermissionError" in result.error
+        assert not result.tool_calls, "nothing was run, so nothing can be scored"
+
+
 class TestCli:
     def test_listing_the_tasks_needs_no_credentials(self, capsys):
         assert eval_cli.main(["--list"]) == 0

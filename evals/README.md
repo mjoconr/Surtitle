@@ -35,6 +35,15 @@ turn-end record are all the real ones, and a change to any of them shows up here
 Built-in tools are trusted up front because nothing can answer an approval prompt
 mid-run; a missing project root is reported as **skipped**, never as a pass.
 
+**It works in a copy of the project, not the project.** A run is allowed to write —
+following the project's own record-keeping is often the point of a task — and a
+measurement that edits the checkout it is measuring has changed what the next run
+measures. The copy leaves behind the parts no task needs and no run should pay for:
+`.git`, `.venv`, `node_modules`, the tool caches, build output. A task that really
+needs one of those, against a throwaway checkout, can say `"in_place": true`. The
+copy lives in a scratch directory that is deleted when the run ends, so nothing a
+task wrote outlives it.
+
 Each result is saved to `evals/runs/`, which is gitignored. Keep the run file from
 before a change and compare: pass rate, steps, tokens, wall time.
 
