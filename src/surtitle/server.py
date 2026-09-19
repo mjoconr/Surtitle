@@ -1337,7 +1337,17 @@ async def _dispatch(session: Session, payload: dict[str, Any]) -> None:
     elif command.kind is CommandKind.MIC:
         await session.handle_mic(bool(data.get("open")))
     elif command.kind is CommandKind.TEXT:
-        await session.handle_text(str(data.get("text") or ""))
+        # `interrupt` is the Push action: stop what is running and take its place.
+        await session.handle_text(
+            str(data.get("text") or ""),
+            interrupt=bool(data.get("interrupt")),
+        )
+    elif command.kind is CommandKind.CANCEL:
+        # Stop: halt the turn, and do not then start what was waiting behind it. A
+        # person pressing stop wants the agent to stop, not to stop and immediately
+        # do the next thing they had lined up.
+        session.clear_queue()
+        await session.cancel_turn()
     elif command.kind is CommandKind.BARGE_IN:
         # The client detects loudness, which cannot tell the user from the
         # speakers. It requests; the server decides, using transcribed speech.

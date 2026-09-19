@@ -1258,3 +1258,35 @@ class TestAMessageTypedWhileTheAgentWorks:
         clear = script[script.index("function clearQueuedMarkers(") :]
         clear = clear[: clear.index("\n}\n")]
         assert 'data-queued="true"' in clear
+
+
+class TestStopAndPushControls:
+    """Two ways out of a turn that is taking too long.
+
+    Stop halts the work and drops what was queued behind it. Push stops the turn
+    and takes its place. Neither existed: the protocol had a cancel command and the
+    client never sent it, so a running turn could not be stopped from the interface
+    at all — and a message typed during one could only wait.
+    """
+
+    def test_both_controls_exist_and_start_hidden(self, html):
+        for element_id in ("stopButton", "pushButton"):
+            assert re.search(rf'id="{element_id}"[^>]*\bhidden\b', html), (
+                f"#{element_id} should start hidden"
+            )
+
+    def test_they_appear_only_while_a_turn_is_running(self, script):
+        block = script[script.index("function syncComposerControls(") :]
+        block = block[: block.index("\n}\n")]
+        assert "el.stopButton.hidden = !working" in block
+        assert "el.pushButton.hidden = !working" in block
+        assert 'state_ === "thinking" || state_ === "tool"' in script, (
+            "speaking after a turn is not working"
+        )
+
+    def test_stop_sends_cancel_and_push_interrupts(self, script):
+        assert 'sendCommand("cancel"' in script, "the cancel command was never sent"
+        assert "sendMessage({ interrupt: true })" in script
+        assert "interrupt: Boolean(options && options.interrupt)" in script, (
+            "the flag has to reach the wire"
+        )

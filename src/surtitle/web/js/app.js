@@ -112,6 +112,8 @@ const el = {
   meterFill: document.getElementById("meterFill"),
   meterLabel: document.getElementById("meterLabel"),
   modelBadge: document.getElementById("modelBadge"),
+  stopButton: document.getElementById("stopButton"),
+  pushButton: document.getElementById("pushButton"),
   approvalStrip: document.getElementById("approvalStrip"),
   approvalText: document.getElementById("approvalText"),
   approvalActions: document.getElementById("approvalActions"),
@@ -1608,6 +1610,29 @@ function setAgentState(name) {
   const label = AGENT_STATE_LABELS[name] || name;
   el.agentState.dataset.state = name;
   el.agentStateLabel.textContent = label;
+  syncComposerControls();
+}
+
+/** True while a turn is actually running, as opposed to speaking after one. */
+function isWorking() {
+  const state_ = el.agentState.dataset.state;
+  return state_ === "thinking" || state_ === "tool";
+}
+
+/**
+ * Show Stop and Push only while there is something to stop or push through.
+ *
+ * Without them there was no way to halt a running turn at all — the protocol had a
+ * cancel command and the client never sent it — and no way to say "this next thing
+ * matters more than what you are doing", which is the other half of that.
+ */
+function syncComposerControls() {
+  const working = isWorking();
+  el.stopButton.hidden = !working;
+  el.pushButton.hidden = !working;
+  el.sendButton.title = working
+    ? "Send — it will run after this turn finishes (Enter)"
+    : "Send (Enter)";
 }
 
 /**
@@ -3072,7 +3097,7 @@ function closeConnection(sessionId) {
   connections.delete(sessionId);
 }
 
-async function sendMessage() {
+async function sendMessage(options = {}) {
   const text = el.composer.value.trim();
   const hasAttachments = state.attachments.length > 0;
   if (!text && !hasAttachments) return;
@@ -3096,7 +3121,11 @@ async function sendMessage() {
     }
   }
 
-  activeConnection().sendCommand("text", { text: message });
+  activeConnection().sendCommand("text", {
+    text: message,
+    // Push, from the button beside send: stop the running turn and take its place.
+    interrupt: Boolean(options && options.interrupt),
+  });
   el.composer.value = "";
   el.composer.style.height = "auto";
   clearAttachments();
@@ -3123,6 +3152,14 @@ function answerApproval(allowed, remember) {
 // -------------------------------------------------------------------- wiring
 
 el.sendButton.addEventListener("click", () => sendMessage());
+
+// Stop: halt the turn and drop what was waiting behind it.
+el.stopButton.addEventListener("click", () => {
+  activeConnection().sendCommand("cancel", {});
+});
+
+// Push: stop the turn and send this through it, rather than behind it.
+el.pushButton.addEventListener("click", () => sendMessage({ interrupt: true }));
 
 el.micButton.addEventListener("click", toggleMic);
 
@@ -3200,7 +3237,9 @@ document.addEventListener("keydown", (event) => {
 el.composer.addEventListener("keydown", (event) => {
   if (event.key === "Enter" && !event.shiftKey) {
     event.preventDefault();
-    sendMessage();
+    // Enter sends; with a turn running that means it waits behind it. Modifier+Enter
+    // is the keyboard form of Push, for when this message cannot wait.
+    sendMessage({ interrupt: event.metaKey || event.ctrlKey });
   }
 });
 

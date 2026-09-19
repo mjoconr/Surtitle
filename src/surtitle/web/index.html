@@ -140,6 +140,12 @@
               <button class="button button--primary" id="approvalAllow" type="button"
                       title="Run this one time only">Allow once</button>
             </span>
+            <!-- While a turn is running: stop it, or push this message through it. -->
+            <button class="button button--icon button--ghost" id="stopButton" type="button" hidden
+                    title="Stop the agent, and drop anything waiting behind it"
+                    aria-label="Stop">■</button>
+            <button class="button button--icon button--ghost" id="pushButton" type="button" hidden
+                    title="Interrupt and send this now" aria-label="Push">⤒</button>
             <button class="send" id="sendButton" type="button" title="Send (Enter)" aria-label="Send">➤</button>
           </div>
         </div>

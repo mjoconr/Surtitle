@@ -701,17 +701,29 @@ def json_type(payload: str) -> str:
 
 
 class _ScriptedModel:
-    """A model that replays one scripted stream per round."""
+    """A model that replays one scripted stream per round.
 
-    def __init__(self, scripts: list[list[StreamEvent]]) -> None:
+    ``block_first`` holds the first round open, so a test can act while a turn is
+    genuinely in flight rather than pretending that one is.
+    """
+
+    def __init__(self, scripts: list[list[StreamEvent]], *, block_first: bool = False) -> None:
         self.scripts = scripts
         self.calls = 0
+        self._block_first = block_first
+        self.release = None
+        # What each round was shown, so a test can assert on the order requests ran.
+        self.prompts: list[list] = []
 
     async def stream(self, messages, *, tools=None):
         self.calls += 1
+        self.prompts.append(list(messages))
         script = self.scripts[min(self.calls - 1, len(self.scripts) - 1)]
         for event in script:
             yield event
+        if self._block_first and self.calls == 1:
+            self.release = asyncio.get_running_loop().create_future()
+            await self.release
 
     async def aclose(self) -> None:
         return None
@@ -946,3 +958,89 @@ class TestRequestsArrivingMidTurn:
 
         assert session._queue == [("too late", "typed")]
         assert session._turn is None or session._turn.done()
+
+
+class TestStopAndPush:
+    """Two ways out of a turn that is taking too long.
+
+    Stop halts the work and drops what was waiting behind it. Push is for the case
+    where the next message matters more than the current one: it stops the turn and
+    takes its place. Until now there was no way to do either from the interface —
+    the protocol had a cancel command and the client never sent it.
+    """
+
+    @staticmethod
+    def _drain(session) -> list:
+        events = []
+        while not session._outbox.empty():
+            events.append(session._outbox.get_nowait())
+        return events
+
+    async def _running_turn(self, session):
+        """Start a real turn that stays in flight, and wait until it is blocked."""
+        model = _ScriptedModel([_answer_round()], block_first=True)
+        session.deepseek = model
+        session.registry = ToolRegistry([t for t in default_tool_list() if t.name == "list_dir"])
+        await session.handle_text("a long job")
+        for _ in range(50):
+            if model.release is not None:
+                return model
+            await asyncio.sleep(0)
+        raise AssertionError("the first turn never reached the model")
+
+    async def test_push_stops_the_turn_and_takes_its_place(self, wired):
+        from surtitle.core.events import EventKind
+
+        session, _tts, _stt = wired
+        model = await self._running_turn(session)
+        self._drain(session)
+
+        await session.handle_text("actually, do this instead", interrupt=True)
+        await session._turn
+
+        events = self._drain(session)
+        assert not [e for e in events if e.kind is EventKind.ERROR], (
+            "pushing is a valid action, not the old 'stop it first' refusal"
+        )
+        assert [e for e in events if e.kind is EventKind.USER_TEXT], "the browser is told"
+        assert session._queue == [], "the pushed request ran; it was not left waiting"
+        assert model.calls >= 2, "the pushed request reached the model"
+        assert session.store.get_session(session.session_id).last_end_reason == "complete"
+
+    async def test_a_queued_request_is_still_behind_a_pushed_one(self, wired):
+        """Push takes its place; it does not throw away what was already waiting."""
+        session, _tts, _stt = wired
+        model = await self._running_turn(session)
+        await session.handle_text("waiting behind", interrupt=False)
+
+        await session.handle_text("pushed", interrupt=True)
+        # Let the pushed turn — and then the held one — run to the end.
+        for _ in range(50):
+            if session._turn is not None and not session._turn.done():
+                await asyncio.sleep(0)
+                continue
+            if not session._queue:
+                break
+            await asyncio.sleep(0)
+
+        answered = [prompt[-1]["content"] for prompt in model.prompts]
+        assert answered[:2] == ["a long job", "pushed"], (
+            f"the pushed request goes first, ahead of the one already waiting: {answered}"
+        )
+        assert "waiting behind" in answered, "the held request still runs, afterwards"
+
+    async def test_stop_drops_what_was_waiting(self, wired):
+        from surtitle.core.events import EventKind
+        from surtitle.server import _dispatch
+
+        session, _tts, _stt = wired
+        await self._running_turn(session)
+        await session.handle_text("still waiting", interrupt=False)
+
+        await _dispatch(session, {"kind": "cancel"})
+        await asyncio.sleep(0)
+
+        assert session._queue == [], "stop means stop: nothing runs after it"
+        assert session._turn is None or session._turn.done()
+        kinds = [e.kind for e in self._drain(session)]
+        assert EventKind.STATE in kinds, "the browser is told the turn ended"

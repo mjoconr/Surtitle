@@ -468,12 +468,33 @@ class Session:
             self._state.interim = ""
             await self.emit(EventKind.INTERIM, text="")
 
-    async def handle_text(self, text: str) -> None:
-        """Run a typed turn, exactly as if it had been spoken."""
+    async def handle_text(self, text: str, *, interrupt: bool = False) -> None:
+        """Run a typed turn, exactly as if it had been spoken.
+
+        ``interrupt`` is the Push action. The running turn is stopped and this
+        message takes its place rather than waiting behind it. It goes to the
+        *front* of the queue *before* the stop, because stopping a turn drains that
+        queue on the way out — and a pushed message that queued second would
+        otherwise watch the work it interrupted finish first.
+        """
         cleaned = text.strip()
-        if not cleaned:
+        if not cleaned or self._closed:
+            return
+        if interrupt and self._turn_in_flight():
+            self._queue.insert(0, (cleaned, "typed"))
+            # Not marked queued: it is going now, and the client should treat it as
+            # the current request — the turn it displaces is being cancelled.
+            await self.emit(EventKind.USER_TEXT, text=cleaned, source="typed")
+            await self.cancel_turn()
             return
         await self._deliver(cleaned, "typed")
+
+    def clear_queue(self) -> None:
+        """Drop requests held behind the running turn. Stop means stop."""
+        if not self._queue:
+            return
+        log.info("dropping %d queued request(s)", len(self._queue))
+        self._queue.clear()
 
     async def _deliver(self, text: str, source: str) -> None:
         """Start a turn, or hold the request until the running one finishes.
@@ -1472,11 +1493,19 @@ class Session:
                 "(the agent's own voice is the likely cause)"
             )
             return
-        if self._turn is not None and not self._turn.done():
-            self._turn.cancel()
+        running = self._turn
+        if running is not None and not running.done():
+            running.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
-                await self._turn
-        self._turn = None
+                await running
+            # Only clear it if this is still the turn this call stopped. Finishing a
+            # turn drains the queue, and that may already have installed the next
+            # one — clearing *that* would leave a live turn untracked, so the next
+            # stop or push could not reach it.
+            if self._turn is running:
+                self._turn = None
+        else:
+            self._turn = None
         self.approvals.cancel_all()
         await self.barge_in()
 
