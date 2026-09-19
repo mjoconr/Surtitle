@@ -836,3 +836,53 @@ class TestTheTurnEndingIsRecorded:
 
         assert session._turn_prompt_tokens == 40
         assert session._turn_completion_tokens == 2
+
+    async def test_a_silent_closing_round_is_heard_not_just_recorded(self, wired):
+        """The report was "it stopped", from someone who is listening.
+
+        This is the 0.8.1 turn end to end: a spoken preamble, a tool call, then two
+        rounds that produce nothing at all. Recording `no_answer` is not the fix —
+        saying it is. Driving the real session is what proves the sentence reaches
+        the synthesiser rather than only the database and the log.
+        """
+        session, _tts, _stt = wired
+        spoken: list[str] = []
+
+        class Recorder:
+            is_speaking = False
+
+            def speak(self, text, *, final=False):
+                spoken.append(text)
+
+            def end_of_turn(self):
+                return None
+
+        session.tts = Recorder()  # type: ignore[assignment]
+        session.registry = ToolRegistry([t for t in default_tool_list() if t.name == "list_dir"])
+        empty = [StreamEvent(kind="done", finish_reason="stop")]
+        session.deepseek = _ScriptedModel(
+            [
+                [
+                    StreamEvent(kind="text", text="<say>Let me read the harness.</say>"),
+                    StreamEvent(
+                        kind="tool_call",
+                        tool_call=ToolCallDelta(
+                            index=0, id="c1", name="list_dir", arguments=json.dumps({"path": "."})
+                        ),
+                    ),
+                    StreamEvent(kind="done", finish_reason="tool_calls"),
+                    StreamEvent(kind="usage", usage=Usage()),
+                ],
+                empty,
+                empty,
+            ]
+        )
+
+        await session._run_turn("build the sim")
+
+        record = session.store.get_session(session.session_id)
+        assert record.last_end_reason == "no_answer"
+        assert any("without saying anything" in line for line in spoken), (
+            f"a turn that produced nothing must say so aloud; heard {spoken!r}"
+        )
+        assert session._turn_spoken_chars > 0, "the log must not report this as a silent turn"
