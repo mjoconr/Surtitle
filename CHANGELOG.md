@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-09-19
+
 ### Added
 
 - **An eval harness, and the first tasks for it.** `python -m evals` runs real
@@ -857,7 +859,8 @@ Then:
 - Speech models are **not** carried over by the `.env` change alone. If you skip
   the data-directory move, run `surtitle models download` to fetch them again.
 
-[Unreleased]: https://github.com/mjoconr/Surtitle/compare/v0.9.2...HEAD
+[Unreleased]: https://github.com/mjoconr/Surtitle/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/mjoconr/Surtitle/compare/v0.9.2...v0.10.0
 [0.9.2]: https://github.com/mjoconr/Surtitle/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/mjoconr/Surtitle/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/mjoconr/Surtitle/releases/tag/v0.9.0
