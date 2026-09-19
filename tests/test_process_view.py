@@ -998,3 +998,51 @@ class TestSeveralConversationsAtOnce:
         assert "if (state.session?.id === sessionId)" in block, (
             "re-selecting the open conversation must not replay and rebuild it"
         )
+
+
+class TestTheChangingContextIsDeliveredInHistory:
+    """The head of the request must stay still, or the provider cannot cache it.
+
+    DeepSeek matches whole cache prefixes and a cache miss costs a fiftieth of a
+    hit, so anything that changes between turns — the plan, the notebook, the
+    project's top-level listing — is delivered *after* the history rather than
+    inside the system prompt. The model still gets all of it every turn; only the
+    position changed, and the position is the whole point.
+    """
+
+    async def test_the_note_follows_the_history_and_precedes_the_user(self, settings, tmp_path):
+        client = FakeClient([thinking_script("Done.")])
+        loop = AgentLoop(
+            settings,
+            root=tmp_path,
+            client=client,
+            context_note="## Your plan\n- [ ] One",
+        )
+        history = [
+            {"role": "user", "content": "earlier"},
+            {"role": "assistant", "content": "earlier answer"},
+        ]
+
+        async for _event in loop.run(history, "now this"):
+            pass
+
+        sent = client.calls[0]["messages"]
+        assert [message["role"] for message in sent] == [
+            "system",
+            "user",
+            "assistant",
+            "system",
+            "user",
+        ], "the stable prompt leads and the changing note follows the history"
+        assert sent[3]["content"] == "## Your plan\n- [ ] One"
+
+    async def test_an_empty_note_adds_no_message(self, settings, tmp_path):
+        """A turn with nothing to report should not spend a message saying so."""
+        client = FakeClient([thinking_script("Done.")])
+        loop = AgentLoop(settings, root=tmp_path, client=client)
+
+        async for _event in loop.run([], "hello"):
+            pass
+
+        sent = client.calls[0]["messages"]
+        assert [message["role"] for message in sent] == ["system", "user"]

@@ -655,6 +655,7 @@ class AgentLoop:
         approvals: ApprovalBroker | None = None,
         client: DeepSeekClient | None = None,
         system_prompt: str | None = None,
+        context_note: str = "",
         repeat_guard: RepeatCallGuard | None = None,
     ) -> None:
         self.settings = settings
@@ -667,6 +668,10 @@ class AgentLoop:
         self._client = client
         self._owns_client = client is None
         self.system_prompt = system_prompt or build_system_prompt(root.name)
+        # What has changed since the last turn — the plan, the notebook, the
+        # project's top-level listing. Carried separately from the system prompt
+        # because it is delivered *after* the history: see `run`.
+        self.context_note = context_note
         self._seq = 0
         self._cancelled = asyncio.Event()
         # Guards against a model that gets stuck calling the same tool with the
@@ -721,8 +726,19 @@ class AgentLoop:
         how the session forwards spoken text to text-to-speech without waiting
         for the turn to finish. It is a callback rather than a yielded event
         because audio must start streaming while the loop is still running.
+
+        The turn's changing context — ``context_note`` — is placed *after* the
+        history rather than in the system prompt, which is the head of the request.
+        DeepSeek's context cache matches whole prefixes, and a cache hit costs a
+        fiftieth of a miss, so a system prompt that changes whenever the agent
+        updates its plan or creates a file invalidates everything behind it. Kept
+        at the tail, the stable head stays cached and only this block is new.
         """
-        state = _TurnState(messages=[*history, {"role": "user", "content": user_text}])
+        messages: list[ChatMessage] = list(history)
+        if self.context_note:
+            messages.append({"role": "system", "content": self.context_note})
+        messages.append({"role": "user", "content": user_text})
+        state = _TurnState(messages=messages)
         self.partial_text = ""
         self.partial_spoken = ""
         self._repeat_guard = RepeatCallGuard()

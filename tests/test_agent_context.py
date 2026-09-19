@@ -311,9 +311,14 @@ class TestProjectNotebook:
 
         session, root = project_session
         write_notes(root, "Machines are named <rack>-<slot>.")
-        prompt = session._system_prompt()
-        assert "## Project notebook" in prompt
-        assert "Machines are named" in prompt
+        note = session._context_note()
+
+        assert "## Project notebook" in note
+        assert "Machines are named" in note
+        assert "Machines are named" not in session._system_prompt(), (
+            "the notebook changes whenever the agent remembers something, so it must "
+            "not sit in the head of the request — that invalidates the prefix cache"
+        )
 
     def test_an_enormous_notebook_keeps_the_newest_notes(self, project_session):
         """It is injected every turn, so it must not be able to crowd the context."""
@@ -386,18 +391,41 @@ class TestProjectBriefing:
         session, root = project_session
         (root / "plant.hosts").write_text("2G-120\n")
         (root / "docs").mkdir()
-        prompt = session._system_prompt()
-        assert "## Project briefing" in prompt
-        assert str(root) in prompt
-        assert "plant.hosts" in prompt
+        note = session._context_note()
+        assert "## Project briefing" in note
+        assert str(root) in note
+        assert "plant.hosts" in note
 
     def test_hidden_directories_are_not_advertised(self, project_session):
         session, root = project_session
         (root / ".surtitle").mkdir()
         (root / "visible.txt").write_text("x")
-        prompt = session._system_prompt()
-        assert "visible.txt" in prompt
-        assert ".surtitle" not in prompt.split("## Project briefing")[1][:200]
+        note = session._context_note()
+        assert "visible.txt" in note
+        assert ".surtitle" not in note.split("## Project briefing")[1][:200]
+
+    def test_the_head_of_the_request_does_not_move_between_turns(self, project_session):
+        """The system prompt must be byte-stable, or the provider cannot cache it.
+
+        DeepSeek matches whole cache prefixes and a miss costs fifty times a hit.
+        The plan, the notebook and the top-level listing are exactly the parts that
+        change during a session, and they used to sit here — so nearly every turn
+        of a coding session began by invalidating everything behind the change.
+        """
+        from surtitle.tools.environment import write_notes
+
+        session, root = project_session
+        before = session._system_prompt()
+
+        write_notes(root, "Recorded mid-conversation.")
+        session.store.set_todos(session.session_id, [{"content": "Do the thing"}])
+        (root / "created-mid-turn.txt").write_text("x")
+
+        assert session._system_prompt() == before, "the head of the request moved"
+        note = session._context_note()
+        assert "Recorded mid-conversation." in note
+        assert "Do the thing" in note
+        assert "created-mid-turn.txt" in note
 
 
 class TestNeverAssume:

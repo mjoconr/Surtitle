@@ -102,7 +102,10 @@ class TestInstructionsAreReinjected:
 
         write_notes(tmp_path, "- 4C-120 is on the same bus as 4C-117")
 
-        assert "same bus" in session._system_prompt()
+        # Delivered with the turn's changing context rather than in the system
+        # prompt, so the head of the request stays cacheable. It still reaches the
+        # agent on every turn, which is what this asserts.
+        assert "same bus" in session._context_note()
 
 
 class TestTheWindowKeepsTheEndOfTheConversation:
@@ -179,14 +182,14 @@ class TestThePlanIsNotLostWithTheConversation:
             ],
         )
 
-        prompt = session._system_prompt()
+        note = session._context_note()
 
-        assert "Report and ask about committing" in prompt, (
+        assert "Report and ask about committing" in note, (
             "the agent cannot answer a question about an item it cannot see"
         )
-        assert "Write the renderer" in prompt
-        assert "[x]" in prompt and "[>]" in prompt, "the state of each item must be legible"
-        assert "1/2" in prompt, "how far along the plan is must be legible"
+        assert "Write the renderer" in note
+        assert "[x]" in note and "[>]" in note, "the state of each item must be legible"
+        assert "1/2" in note, "how far along the plan is must be legible"
 
     def test_an_unfinished_item_is_called_out(self, session):
         session.store.set_todos(
@@ -194,15 +197,15 @@ class TestThePlanIsNotLostWithTheConversation:
             [{"content": "Report and ask about committing", "status": "pending"}],
         )
 
-        prompt = session._system_prompt()
+        note = session._context_note()
 
-        assert "Report and ask about committing" in prompt
-        assert "Not finished on that list" in prompt, (
+        assert "Report and ask about committing" in note
+        assert "Not finished on that list" in note, (
             "an item left unticked is a standing claim that work is outstanding"
         )
 
     def test_an_empty_plan_adds_nothing(self, session):
-        assert "Your plan, as the user is looking at it" not in session._system_prompt()
+        assert "Your plan, as the user is looking at it" not in session._context_note()
 
 
 class TestThePrimaryFileIsNeverLost:

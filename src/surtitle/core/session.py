@@ -714,6 +714,7 @@ class Session:
             client=self.deepseek,
             registry=self.registry,
             system_prompt=self._system_prompt(),
+            context_note=self._context_note(),
             repeat_guard=self._repeat_guard,
         )
         loop.set_emitter(self._emit_side_channel)
@@ -903,68 +904,12 @@ class Session:
         prompt = build_system_prompt(self.root.name)
         sections: list[str] = []
 
-        # Durable facts the agent recorded in earlier sessions. This is what lets
-        # knowledge accumulate across conversations.
-        from surtitle.tools.environment import project_notes
-
-        notes = project_notes(self.root)
-        if notes:
-            sections.append(
-                "## Project notebook\n"
-                "Facts recorded in earlier sessions. Treat these as established "
-                "unless they conflict with something you observe now; if a note is "
-                "wrong, correct it with the remember tool.\n\n" + notes
-            )
-
-        # Orientation, so the first turn is not blind. Capped: this is a signpost,
-        # not content.
-        try:
-            listing = sorted(
-                entry.name for entry in self.root.iterdir() if not entry.name.startswith(".")
-            )[:40]
-        except OSError:
-            listing = []
-        if listing:
-            sections.append(
-                f"## Project briefing\nWorking directory: {self.root}\n"
-                f"Top level: {', '.join(listing)}"
-            )
-
-        # The plan the user is looking at right now.
-        #
-        # It is rendered in the UI's Plan tab and it survives the end of the turn,
-        # so an item left unfinished is a standing claim, in front of the user,
-        # that work is outstanding. The only todo tool *writes*, so without this
-        # the agent could neither see its own plan nor answer "which item is still
-        # unticked?" — and in a real session it could not, when the user asked
-        # exactly that. Replayed every turn, so losing the conversation cannot
-        # lose the plan with it.
-        plan = self.store.list_todos(self.session_id) if self.store is not None else []
-        if plan:
-            done = sum(1 for item in plan if item["status"] == "completed")
-            rows = []
-            for item in plan:
-                mark = {"completed": "[x]", "in_progress": "[>]"}.get(item["status"], "[ ]")
-                rows.append(f"- {mark} {item['content']}")
-            open_items = [item["content"] for item in plan if item["status"] != "completed"]
-            section = (
-                "## Your plan, as the user is looking at it\n"
-                f"This is the Plan tab in their window right now ({done}/{len(plan)} "
-                "done). It stays on screen after the turn ends, so an unfinished item "
-                "reads as work you abandoned — and they may ask you about an item by "
-                "name, so this list is the only thing that lets you answer. Keep it "
-                "true before you finish: `todo_write` the whole list as items start "
-                "and finish, rather than leaving one in progress while you answer "
-                "something else.\n\n" + "\n".join(rows)
-            )
-            if open_items:
-                section += (
-                    "\n\nNot finished on that list: "
-                    + "; ".join(open_items)
-                    + ". Either finish them, tick them off, or say plainly that they "
-                    "are not done."
-                )
-            sections.append(section)
+        # The notebook, the project briefing and the current plan used to be
+        # sections here. They are precisely the parts that change between turns,
+        # and this prompt is the *head* of every request — so keeping them here
+        # invalidated the provider's prefix cache on nearly every turn of a coding
+        # session, and a cache miss costs fifty times a hit. They are delivered
+        # after the history now: see `_context_note`.
 
         config = self.project_config
         if config is not None and config.instructions:
@@ -1084,6 +1029,87 @@ class Session:
             sections.append(version_control)
 
         return f"{prompt}\n\n" + "\n\n".join(sections) if sections else prompt
+
+    def _context_note(self) -> str:
+        """What the agent should know that changes between turns.
+
+        Delivered as a message *after* the conversation rather than inside the
+        system prompt. The system prompt is the head of every request, and
+        DeepSeek's context cache matches whole prefixes: rewriting the head
+        invalidates everything behind it, at fifty times the cost of a hit. This
+        block is the part that would have caused that rewrite — the plan changes
+        whenever the agent uses `todo_write`, the notebook whenever it remembers
+        something, and the briefing whenever it creates a file in the project root.
+
+        Everything here is still given to the agent on every turn; only its
+        position changed.
+        """
+        sections: list[str] = []
+
+        # Durable facts the agent recorded in earlier sessions. This is what lets
+        # knowledge accumulate across conversations.
+        from surtitle.tools.environment import project_notes
+
+        notes = project_notes(self.root)
+        if notes:
+            sections.append(
+                "## Project notebook\n"
+                "Facts recorded in earlier sessions. Treat these as established "
+                "unless they conflict with something you observe now; if a note is "
+                "wrong, correct it with the remember tool.\n\n" + notes
+            )
+
+        # Orientation, so the first turn is not blind. Capped: this is a signpost,
+        # not content.
+        try:
+            listing = sorted(
+                entry.name for entry in self.root.iterdir() if not entry.name.startswith(".")
+            )[:40]
+        except OSError:
+            listing = []
+        if listing:
+            sections.append(
+                f"## Project briefing\nWorking directory: {self.root}\n"
+                f"Top level: {', '.join(listing)}"
+            )
+
+        # The plan the user is looking at right now.
+        #
+        # It is rendered in the UI's Plan tab and it survives the end of the turn,
+        # so an item left unfinished is a standing claim, in front of the user,
+        # that work is outstanding. The only todo tool *writes*, so without this
+        # the agent could neither see its own plan nor answer "which item is still
+        # unticked?" — and in a real session it could not, when the user asked
+        # exactly that. Replayed every turn, so losing the conversation cannot
+        # lose the plan with it.
+        plan = self.store.list_todos(self.session_id) if self.store is not None else []
+        if plan:
+            done = sum(1 for item in plan if item["status"] == "completed")
+            rows = []
+            for item in plan:
+                mark = {"completed": "[x]", "in_progress": "[>]"}.get(item["status"], "[ ]")
+                rows.append(f"- {mark} {item['content']}")
+            open_items = [item["content"] for item in plan if item["status"] != "completed"]
+            section = (
+                "## Your plan, as the user is looking at it\n"
+                f"This is the Plan tab in their window right now ({done}/{len(plan)} "
+                "done). It stays on screen after the turn ends, so an unfinished item "
+                "reads as work you abandoned — and they may ask you about an item by "
+                "name, so this list is the only thing that lets you answer. Keep it "
+                "true before you finish: `todo_write` the whole list as items start "
+                "and finish, rather than leaving one in progress while you answer "
+                "something else.\n\n" + "\n".join(rows)
+            )
+            if open_items:
+                section += (
+                    "\n\nNot finished on that list: "
+                    + "; ".join(open_items)
+                    + ". Either finish them, tick them off, or say plainly that they "
+                    "are not done."
+                )
+            sections.append(section)
+
+        return "\n\n".join(sections)
 
     def _version_control_section(self) -> str:
         """The version-control facts for this project, or "" when there are none."""
