@@ -629,15 +629,28 @@ function renderContextMeter() {
   const reply = Number(usage.completion_tokens || 0);
   const used = sent + reply;
   const share = Math.min(1, used / budget);
+  // How much of what we sent the provider already had cached. It is the cost
+  // story in one number: a cache hit is a fiftieth of a miss, so this falling
+  // means something at the *front* of the request changed and invalidated the
+  // prefix — which is exactly what the plan, the notebook and the file listing
+  // used to do from inside the system prompt.
+  const cached = Math.min(Number(usage.cached_tokens || 0), sent);
+  const hitRate = sent > 0 ? cached / sent : 0;
   el.rightbarMeter.hidden = false;
   el.rightbarMeter.dataset.level = share >= 0.9 ? "high" : share >= 0.7 ? "warm" : "ok";
   el.meterFill.style.width = `${(share * 100).toFixed(1)}%`;
-  el.meterLabel.textContent = `${formatTokens(used)} / ${formatTokens(budget)}`;
+  el.meterLabel.textContent =
+    `${formatTokens(used)} / ${formatTokens(budget)}` +
+    (sent ? ` · cache ${Math.round(hitRate * 100)}%` : "");
   const window_ = Number(state.contextWindow) || 0;
   el.rightbarMeter.title =
     `This conversation is carrying about ${used.toLocaleString()} tokens of a ` +
     `${budget.toLocaleString()}-token working budget (${sent.toLocaleString()} sent, ` +
     `${reply.toLocaleString()} written).` +
+    (sent
+      ? ` ${cached.toLocaleString()} of the sent tokens were already cached ` +
+        `(${Math.round(hitRate * 100)}%), which is what keeps a long conversation cheap.`
+      : "") +
     (window_ ? ` The model itself accepts ${window_.toLocaleString()}.` : "") +
     " The oldest turns fall out of the model's view as it fills, so start a new" +
     " conversation when the work moves on.";

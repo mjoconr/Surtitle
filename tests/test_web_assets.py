@@ -732,6 +732,18 @@ class TestTheContextMeter:
         assert "used / budget" in block, "the ratio is over the budget"
         assert "state.contextWindow" in block, "the window is still reported, as context"
 
+    def test_the_cache_hit_share_is_shown(self, script):
+        """A cache hit is a fiftieth of a miss, so this is the cost story in one number.
+
+        It is also the only way to see whether the head of the request moved: the
+        plan, the notebook and the project listing used to sit in the system prompt,
+        invalidating the prefix on nearly every turn of a coding session.
+        """
+        block = script[script.index("function renderContextMeter(") :]
+        block = block[: block.index("\n}\n")]
+        assert "usage.cached_tokens" in block, "the provider reports it; nothing read it"
+        assert "cache " in block, "the share is shown, not merely measured"
+
     def test_a_million_token_window_does_not_read_as_a_thousand_k(self, script):
         block = script[script.index("function formatTokens(") :]
         block = block[: block.index("\n}\n")]
