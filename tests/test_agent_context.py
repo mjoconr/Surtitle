@@ -245,8 +245,9 @@ class TestProjectInstructionsAreInjected:
         # standing instructions and a little project context — so the total tracks
         # the cap. The bound is loose on purpose: what it catches is an unbounded
         # file, not a prompt that grew by a paragraph (the version-control primer
-        # added about 1,700 characters when it was introduced).
-        assert len(prompt) < 34_000, "an unbounded instruction file crowded the conversation"
+        # added about 1,700 characters when it was introduced, and the section
+        # describing the interface about 1,200).
+        assert len(prompt) < 36_000, "an unbounded instruction file crowded the conversation"
 
     def test_the_base_prompt_is_always_present(self, project_session):
         session, _root = project_session
@@ -447,6 +448,29 @@ class TestNeverAssume:
         assert "<say>" in prompt
         assert "<display>" in prompt
         assert "Never state an assumption as fact" in prompt
+
+    def test_a_checkable_assumption_is_checked_rather_than_offered(self):
+        """The rule must not teach the agent to announce its uncertainty.
+
+        It used to demonstrate the labelling with "I have not confirmed this, but
+        … Shall I check?", which is exactly the behaviour the user objected to:
+        checking is the standing expectation, so saying that you are about to do
+        it is noise on every turn, and it was crowding out the answer. An
+        assumption worth stating is one looking cannot settle.
+        """
+        prompt = " ".join(build_system_prompt("p").split())
+        assert "Shall I check?" not in prompt, (
+            "offering to check something checkable is the same sentence every turn"
+        )
+        assert "is not a disclaimer to hand the user" in prompt, (
+            "the rule must say that a checkable assumption is the next thing to do"
+        )
+
+    def test_announcing_a_check_is_forbidden(self):
+        prompt = " ".join(build_system_prompt("p").split())
+        assert "Checking is the default, so do not announce it" in prompt, (
+            "without this the model narrates 'I'll need to look at that' instead of looking"
+        )
 
 
 class TestRepeatCallGuard:
