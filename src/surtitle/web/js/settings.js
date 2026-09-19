@@ -12,16 +12,6 @@
  * would silently do nothing.
  */
 
-const SECTION_LABELS = {
-  model: "Model",
-  agent: "Agent",
-  search: "Search",
-  voice: "Voice",
-  general: "General",
-};
-
-const SECTION_ORDER = ["model", "agent", "search", "voice", "general"];
-
 export class SettingsPanel {
   constructor({ onSaved, onToast, onMicrophoneChange, onSpeakerChange, playback }) {
     this.onSaved = onSaved;
@@ -32,6 +22,16 @@ export class SettingsPanel {
     this.playback = playback;
     this.described = null;
     this.activeSection = "model";
+    // Set while a device picker is on screen, so a device that appears or is
+    // unplugged updates it. Without this the list is whatever it was when the panel
+    // was opened: granting permission by using the microphone left the page saying
+    // "one input, unnamed" for the rest of the session, because nothing asked again.
+    this.refreshDevices = null;
+    if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) {
+      navigator.mediaDevices.addEventListener("devicechange", () => {
+        if (this.refreshDevices) this.refreshDevices();
+      });
+    }
     this.pending = new Set();
 
     this.modal = document.getElementById("settingsModal");
@@ -71,23 +71,29 @@ export class SettingsPanel {
     this.render();
   }
 
+  /**
+   * The navigation is the server's capability table, not a list kept here.
+   *
+   * There is no separate "API keys" page: every provider belongs to the capability
+   * it serves, and its key is configured in that section. A page of keys apart from
+   * the choice that needs them is how a key gets saved without anything using it,
+   * and how somebody goes looking for "Tavily setup" and finds nothing.
+   */
   renderNav() {
-    const sections = Object.keys(this.described.sections || {});
-    const ordered = SECTION_ORDER.filter((name) => sections.includes(name)).concat(
-      sections.filter((name) => !SECTION_ORDER.includes(name)),
-    );
+    const order = this.described.section_order || Object.keys(this.described.sections || {});
+    const labels = this.described.section_labels || {};
+    const present = new Set(Object.keys(this.described.sections || {}));
+    const ordered = order.filter((name) => present.has(name));
+    for (const name of present) {
+      if (!ordered.includes(name)) ordered.push(name);
+    }
 
     this.nav.replaceChildren();
-    for (const section of [...ordered, "microphone", "providers"]) {
+    for (const section of [...ordered, "microphone"]) {
       const button = document.createElement("button");
       button.type = "button";
       button.className = "modal__navItem";
-      button.textContent =
-        section === "providers"
-          ? "API keys"
-          : section === "microphone"
-            ? "Microphone"
-            : SECTION_LABELS[section] || section;
+      button.textContent = section === "microphone" ? "Microphone" : labels[section] || section;
       button.setAttribute("aria-current", String(this.activeSection === section));
       button.addEventListener("click", () => {
         this.activeSection = section;
@@ -98,22 +104,34 @@ export class SettingsPanel {
     }
   }
 
+  /** The capability a section is about, or null for a section that is not one. */
+  capabilityFor(section) {
+    return (this.described.capabilities || []).find((item) => item.id === section) || null;
+  }
+
   render() {
+    this.refreshDevices = null;
+    this.micPicker = null;
+    this.speakerPicker = null;
+    const labels = this.described.section_labels || {};
     this.title.textContent =
-      this.activeSection === "providers"
-        ? "API keys"
-        : this.activeSection === "microphone"
-          ? "Microphone"
-          : SECTION_LABELS[this.activeSection] || this.activeSection;
+      this.activeSection === "microphone"
+        ? "Microphone"
+        : labels[this.activeSection] || this.activeSection;
     this.body.replaceChildren();
 
-    if (this.activeSection === "providers") {
-      this.renderProviders();
-    } else if (this.activeSection === "microphone") {
+    if (this.activeSection === "microphone") {
       this.renderMicrophone();
-    } else {
-      this.renderFields(this.described.sections[this.activeSection] || []);
+      return;
     }
+
+    const fields = this.described.sections[this.activeSection] || [];
+    this.renderFields(fields);
+    // The provider a capability is served by, right under the choice between them:
+    // its key, whether it is ready, and how to install it if it runs here.
+    const capability = this.capabilityFor(this.activeSection);
+    if (capability) this.renderProviders(capability);
+    if (this.activeSection === "general") this.renderStorage();
   }
 
   /**
@@ -160,18 +178,44 @@ export class SettingsPanel {
     status.className = "notice";
     this.body.append(status);
 
+    const actions = document.createElement("div");
+    actions.className = "provider__actions";
+    actions.style.marginTop = "10px";
+
+    const allow = document.createElement("button");
+    allow.type = "button";
+    allow.className = "button button--primary";
+    allow.textContent = "Allow microphone access";
+    allow.hidden = true;
+    allow.addEventListener("click", async () => {
+      allow.disabled = true;
+      const granted = await this.requestMicrophoneAccess(status);
+      allow.disabled = false;
+      // Both lists: the outputs are named by the same grant.
+      if (granted) this.refreshDevicePickers();
+    });
+
     const refresh = document.createElement("button");
     refresh.type = "button";
     refresh.className = "button button--ghost";
     refresh.textContent = "Refresh device list";
-    refresh.style.marginTop = "10px";
-    refresh.addEventListener("click", () => this.populateMicrophones(select, status, refresh));
-    this.body.append(refresh);
+    refresh.addEventListener("click", () => this.populateMicrophones(select, status, refresh, allow));
 
-    this.populateMicrophones(select, status, refresh);
+    actions.append(allow, refresh);
+    this.body.append(actions);
 
-    this.body.append(document.createElement("hr")).style.cssText =
+    this.micPicker = { select, status, refresh, allow };
+    this.populateMicrophones(select, status, refresh, allow);
+    this.refreshDevices = () => this.refreshDevicePickers();
+
+    // `append()` returns undefined, so it cannot be styled on the way in. Written
+    // the other way this threw here — which meant the output-device picker below it
+    // never rendered at all, and a feature that works looked like one that does not
+    // exist. There is no visible symptom except a section that stops early.
+    const divider = document.createElement("hr");
+    divider.style.cssText =
       "border:none;border-top:0.5px solid var(--dsw-alias-border-l2);margin:18px 0";
+    this.body.append(divider);
 
     this.renderSpeaker();
   }
@@ -232,6 +276,7 @@ export class SettingsPanel {
     refresh.addEventListener("click", () => this.populateSpeakers(select, status, refresh));
     this.body.append(refresh);
 
+    this.speakerPicker = { select, status, refresh };
     this.populateSpeakers(select, status, refresh);
   }
 
@@ -241,7 +286,8 @@ export class SettingsPanel {
     if (refresh) refresh.disabled = true;
 
     const current = this.getSpeakerPreference();
-    const devices = this.playback ? await this.playback.listOutputDevices() : [];
+    const report = await this.describeDevices("audiooutput");
+    const devices = report.devices;
 
     select.append(new Option("System default", ""));
 
@@ -256,12 +302,8 @@ export class SettingsPanel {
       missing.selected = true;
       select.append(missing);
       status.textContent = "The saved output is not connected; the system default is in use.";
-    } else if (devices.length === 0) {
-      status.textContent =
-        "No outputs are listed yet. Devices are named once audio has played or the " +
-        "microphone has been granted, then refresh.";
     } else {
-      status.textContent = `${devices.length} output device(s) found.`;
+      status.textContent = this.describeDeviceStatus(report, "output");
     }
 
     if (refresh) refresh.disabled = false;
@@ -301,13 +343,14 @@ export class SettingsPanel {
     }
   }
 
-  async populateMicrophones(select, status, refresh) {
+  async populateMicrophones(select, status, refresh, allow) {
     select.replaceChildren();
     status.textContent = "Checking available inputs…";
     if (refresh) refresh.disabled = true;
 
     const current = this.getMicrophonePreference();
-    const devices = await this.listMicrophones();
+    const report = await this.describeDevices("audioinput");
+    const devices = report.devices;
 
     const auto = document.createElement("option");
     auto.value = "";
@@ -332,13 +375,12 @@ export class SettingsPanel {
       select.append(missing);
       status.textContent =
         "The saved device is not connected. The system default will be used until it returns.";
-    } else if (devices.length <= 1) {
-      status.textContent =
-        "Only one input is visible. Open the microphone once to grant permission, then " +
-        "refresh to see every device by name.";
     } else {
-      status.textContent = `${devices.length} input device(s) found.`;
+      status.textContent = this.describeDeviceStatus(report, "input");
     }
+    // Offered only when it would change something: an unnamed or empty list is what
+    // a page without the microphone sees.
+    if (allow) allow.hidden = !["unnamed", "none"].includes(report.reason);
 
     if (refresh) refresh.disabled = false;
 
@@ -352,17 +394,124 @@ export class SettingsPanel {
     });
   }
 
-  async listMicrophones() {
+  /**
+   * What the browser will say about audio devices, and why it said it.
+   *
+   * The count alone is not enough to explain anything. "One input" is what a page
+   * with no permission sees, and it is also what a machine with one microphone
+   * sees, and what a page that cannot enumerate devices at all ends up with — three
+   * different situations that used to produce one message telling the user to open
+   * the microphone and press refresh, which is what they had already done.
+   */
+  async describeDevices(kind) {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) {
+      return { devices: [], reason: "unsupported", permission: null };
+    }
+    let found;
     try {
-      const devices = await navigator.mediaDevices.enumerateDevices();
-      return devices
-        .filter((device) => device.kind === "audioinput")
-        .map((device, index) => ({
-          deviceId: device.deviceId,
-          label: device.label || `Input ${index + 1} (name hidden until permission is granted)`,
-        }));
+      found = await navigator.mediaDevices.enumerateDevices();
     } catch {
-      return [];
+      return { devices: [], reason: "refused", permission: null };
+    }
+    const noun = kind === "audioinput" ? "Input" : "Output";
+    const raw = found
+      .filter((device) => device.kind === kind)
+      .map((device, index) => ({
+        deviceId: device.deviceId,
+        // Whether the browser named it, decided before the placeholder goes on: a
+        // list of "Input 1", "Input 2" is exactly what a page without permission
+        // sees, and reporting that as "2 devices found" hides the reason.
+        named: Boolean(device.label),
+        label: device.label || `${noun} ${index + 1}`,
+      }));
+    const named = raw.length > 0 && raw.every((device) => device.named);
+    const reason = raw.length === 0 ? "none" : named ? "named" : "unnamed";
+    return {
+      devices: raw.map(({ deviceId, label }) => ({ deviceId, label })),
+      reason,
+      permission: await this.microphonePermission(),
+    };
+  }
+
+  /** Re-read both device lists, for whatever is on screen. */
+  refreshDevicePickers() {
+    const mic = this.micPicker;
+    if (mic) this.populateMicrophones(mic.select, mic.status, mic.refresh, mic.allow);
+    const speaker = this.speakerPicker;
+    if (speaker) this.populateSpeakers(speaker.select, speaker.status, speaker.refresh);
+  }
+
+  /**
+   * Ask for the microphone, from this page.
+   *
+   * Device names are hidden until the page asking has been granted the microphone,
+   * and the page that needs them is the one being looked at. Telling somebody to go
+   * and use the microphone somewhere else leaves them exactly where they started
+   * when the window they are looking at is not the window that has permission —
+   * which is easy to end up with, since a browser grants it per origin and a second
+   * window on the other spelling of localhost is a different origin.
+   *
+   * The stream is stopped immediately: this is asking for permission, not recording,
+   * and the application opens its own when the microphone is switched on.
+   */
+  async requestMicrophoneAccess(status) {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      status.textContent = "This browser cannot open a microphone from this page.";
+      return false;
+    }
+    status.textContent = "Waiting for the browser's permission prompt…";
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      for (const track of stream.getTracks()) track.stop();
+      return true;
+    } catch (error) {
+      const name = error && error.name ? error.name : "unknown error";
+      status.textContent =
+        name === "NotAllowedError"
+          ? "The browser refused microphone access for this page. Allow it in the " +
+            "browser's site settings, then reload."
+          : `Could not open the microphone: ${name}.`;
+      return false;
+    }
+  }
+
+  /** "granted" | "denied" | "prompt", or null where the browser will not say. */
+  async microphonePermission() {
+    try {
+      const status = await navigator.permissions.query({ name: "microphone" });
+      return status.state;
+    } catch {
+      return null;
+    }
+  }
+
+  /** A sentence about audio devices that is true whatever the browser reported. */
+  describeDeviceStatus(report, noun) {
+    const count = report.devices.length;
+    switch (report.reason) {
+      case "unsupported":
+        return (
+          "This page cannot list audio devices: the browser only allows it in a " +
+          "secure context, which means localhost or https."
+        );
+      case "refused":
+        return `The browser refused to list ${noun} devices.`;
+      case "none":
+        return (
+          report.permission === "denied"
+            ? `No ${noun} devices: the microphone is blocked for this page. Allow it in ` +
+              "the browser's site settings, then reload."
+            : `No ${noun} devices are visible yet. Open the microphone once — the list ` +
+              "updates by itself when the browser starts reporting them."
+        );
+      case "unnamed":
+        return (
+          `${count} ${noun} device(s), but the browser is hiding their names until this ` +
+          "page is granted the microphone. Allow it below, or switch the microphone on — " +
+          "the list updates by itself either way."
+        );
+      default:
+        return `${count} ${noun} device(s) found.`;
     }
   }
 
@@ -520,11 +669,14 @@ export class SettingsPanel {
     }
   }
 
-  renderProviders() {
-    for (const provider of this.described.providers || []) {
-      this.body.append(this.buildProviderCard(provider));
+  renderProviders(capability) {
+    for (const provider of capability.providers || []) {
+      this.body.append(this.buildProviderCard(provider, capability));
     }
+  }
 
+  /** Where the files live and what happens to a key. Storage, not configuration. */
+  renderStorage() {
     const paths = document.createElement("div");
     paths.className = "detail";
     paths.style.marginTop = "16px";
@@ -545,21 +697,33 @@ export class SettingsPanel {
     this.body.append(note);
   }
 
-  buildProviderCard(provider) {
+  /**
+   * One provider, configured where it is used.
+   *
+   * Three shapes, because they need three different things from the user: an API
+   * key for somebody else's service, an install for an engine that runs here, and
+   * nothing at all for a provider this application performs itself. A card that
+   * always shows a key field is how the keyless one came to have a blank box in it.
+   */
+  buildProviderCard(provider, capability) {
     const credential = provider.credential || {};
+    const selected =
+      capability && capability.setting
+        ? (capability.providers.find((item) => item.id === provider.id) && this.valueOf(capability.setting)) ===
+          provider.id
+        : false;
+
     const card = document.createElement("div");
     card.className = "provider";
+    if (selected) card.dataset.selected = "true";
 
     const head = document.createElement("div");
     head.className = "provider__head";
 
     const dot = document.createElement("span");
-    dot.className = `provider__dot ${credential.configured ? "provider__dot--on" : "provider__dot--off"}`;
+    dot.className = `provider__dot ${this.providerIsReady(provider) ? "provider__dot--on" : "provider__dot--off"}`;
     dot.setAttribute("role", "img");
-    dot.setAttribute(
-      "aria-label",
-      credential.configured ? "API key configured" : "API key missing",
-    );
+    dot.setAttribute("aria-label", this.providerIsReady(provider) ? "Ready" : "Not ready");
 
     const name = document.createElement("span");
     name.className = "provider__name";
@@ -567,6 +731,12 @@ export class SettingsPanel {
 
     head.append(dot, name);
 
+    if (selected) {
+      const badge = document.createElement("span");
+      badge.className = "badge";
+      badge.textContent = "in use";
+      head.append(badge);
+    }
     if (credential.source === "env") {
       const badge = document.createElement("span");
       badge.className = "badge";
@@ -583,6 +753,14 @@ export class SettingsPanel {
 
     const body = document.createElement("div");
     body.className = "provider__body";
+
+    if (!provider.api_key_env) {
+      // Nothing to type. Say what it is and, if it has to be installed, whether it
+      // is here yet — with the action beside the fact.
+      body.append(this.buildKeylessBody(provider));
+      card.append(body);
+      return card;
+    }
 
     const label = document.createElement("label");
     label.className = "setting__title";
@@ -673,6 +851,108 @@ export class SettingsPanel {
 
     card.append(body);
     return card;
+  }
+
+  /** The value a preference currently holds, from the payload we were given. */
+  valueOf(name) {
+    for (const fields of Object.values(this.described.sections || {})) {
+      const field = fields.find((item) => item.name === name);
+      if (field) return field.value;
+    }
+    return null;
+  }
+
+  /**
+   * Whether a provider can serve right now.
+   *
+   * An API provider needs its key; a local one needs to be installed; one that this
+   * application performs itself always can. The dot in the corner of the card is
+   * the same question for all three.
+   */
+  providerIsReady(provider) {
+    if (provider.kind === "local") return Boolean(provider.local && provider.local.ready);
+    if (provider.kind === "builtin") return true;
+    return Boolean(provider.credential && provider.credential.configured);
+  }
+
+  /** What a provider that needs no key needs instead: nothing, or an install. */
+  buildKeylessBody(provider) {
+    const wrap = document.createElement("div");
+
+    const note = document.createElement("p");
+    note.className = "notice";
+    note.style.marginTop = "0";
+    note.textContent =
+      provider.kind === "local"
+        ? "Recognises and speaks on this machine. Nothing leaves it, and nothing is billed."
+        : "This application does the search itself, so there is no key and no account. " +
+          "It is slower and rate-limited compared with a search API.";
+    wrap.append(note);
+
+    if (provider.kind === "local" && provider.local) {
+      const status = document.createElement("p");
+      status.className = "provider__meta";
+      status.textContent = provider.local.ready
+        ? `Ready. ${provider.local.detail}.`
+        : provider.local.detail.charAt(0).toUpperCase() + provider.local.detail.slice(1) + "." +
+          (provider.local.missing_bytes
+            ? ` About ${Math.round(provider.local.missing_bytes / (1024 * 1024))} MB to download.`
+            : "");
+      wrap.append(status);
+
+      if (!provider.local.ready) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "button button--primary";
+        button.textContent = "Install";
+        button.addEventListener("click", () => this.startVoiceInstall(button, status));
+        wrap.append(button);
+      }
+    }
+
+    if (provider.docs_url) {
+      const meta = document.createElement("p");
+      meta.className = "provider__meta";
+      meta.textContent = "More at " + provider.docs_url;
+      wrap.append(meta);
+    }
+
+    return wrap;
+  }
+
+  /**
+   * Start the local-engine download and report what happens.
+   *
+   * The server owns the job and reports progress on the tray poll, so this asks for
+   * it to start and then says so; the Settings panel is not the place to render a
+   * progress bar for something that outlives it.
+   */
+  async startVoiceInstall(button, status) {
+    button.disabled = true;
+    button.textContent = "Starting…";
+    try {
+      const response = await fetch("/api/voice/install", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ kind: "all" }),
+      });
+      const payload = await response.json();
+      if (!response.ok) {
+        status.textContent = payload.error || "Could not start the install.";
+        button.disabled = false;
+        button.textContent = "Install";
+        return;
+      }
+      button.textContent = "Installing…";
+      status.textContent =
+        "Downloading the engines and their models. This continues in the background; " +
+        "the tray shows progress.";
+      if (this.onToast) this.onToast("Downloading the local speech engines.", "ok");
+    } catch (cause) {
+      status.textContent = `Could not start the install: ${cause.message}`;
+      button.disabled = false;
+      button.textContent = "Install";
+    }
   }
 
   async saveCredential(provider, input, error, button) {

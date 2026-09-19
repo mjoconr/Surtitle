@@ -439,17 +439,30 @@ class TestEveryProvidersKeyReachesTheCodeThatUsesIt:
         from surtitle.config import Settings
         from surtitle.store.settings_store import PROVIDER_SPECS, SettingsStore
 
+        keyed = [spec for spec in PROVIDER_SPECS.values() if spec.api_key_env]
+        assert keyed, "every provider being keyless would make this vacuous"
+
         store = SettingsStore(Settings(SURTITLE_HOME=str(tmp_path)))
-        for spec in PROVIDER_SPECS.values():
+        for spec in keyed:
             store.set_credential(spec.api_key_env, f"value-for-{spec.id}")
 
         effective = store.effective()
 
-        for spec in PROVIDER_SPECS.values():
-            field = spec.api_key_env.lower()
-            stored = getattr(effective, field)
+        for spec in keyed:
+            stored = getattr(effective, spec.api_key_env.lower())
             assert stored is not None, f"{spec.api_key_env} never reached Settings"
             assert stored.get_secret_value() == f"value-for-{spec.id}"
+
+    def test_a_provider_that_needs_no_key_is_not_a_credential(self, tmp_path):
+        """A local engine and a search this application performs itself have no key,
+        and asking for one is how the keyless card came to show a blank input."""
+        from surtitle.store.settings_store import PROVIDER_SPECS
+
+        keyless = {spec.id for spec in PROVIDER_SPECS.values() if not spec.needs_key}
+
+        assert keyless == {"local", "duckduckgo"}
+        for provider_id in keyless:
+            assert PROVIDER_SPECS[provider_id].api_key_env is None
 
     def test_the_tavily_key_in_particular(self, tmp_path):
         """The one this was found by: web search reads `settings.tavily_key()`."""
@@ -493,3 +506,133 @@ class TestEveryProvidersKeyReachesTheCodeThatUsesIt:
 
         with pytest.raises(SettingsValidationError):
             store.save_settings({"search_provider": "somebody-elses-search"})
+
+
+class TestServicesAreGroupedByCapability:
+    """Settings are organised the way a person thinks about them.
+
+    Not "here is a list of vendors", but "here is the model, here is speech to text,
+    here is the voice, here is search" — and each one's key or install lives in its
+    own section. Before this, the keys were on a page of their own: a key could be
+    saved without anything using it, and somebody looking for a provider's setup
+    found a list of names instead.
+    """
+
+    def test_every_provider_serves_a_capability(self):
+        from surtitle.store.settings_store import CAPABILITIES, PROVIDER_SPECS
+
+        known = {capability.id for capability in CAPABILITIES}
+
+        for spec in PROVIDER_SPECS.values():
+            assert spec.capabilities, f"{spec.id} serves nothing"
+            assert set(spec.capabilities) <= known, f"{spec.id} serves an unknown capability"
+
+    def test_every_capability_names_providers_that_exist(self):
+        from surtitle.store.settings_store import CAPABILITIES, PROVIDER_SPECS
+
+        for capability in CAPABILITIES:
+            assert capability.providers, f"{capability.id} has nothing to configure"
+            for provider_id in capability.providers:
+                assert provider_id in PROVIDER_SPECS
+                assert capability.id in PROVIDER_SPECS[provider_id].capabilities, (
+                    f"{provider_id} is offered for {capability.id} but does not claim it"
+                )
+
+    def test_a_selector_offers_exactly_the_providers_of_its_capability(self):
+        """The selector is generated, so its choices and the providers shown under it
+        cannot drift apart."""
+        from surtitle.store.settings_store import CAPABILITIES, SETTINGS_FIELDS
+
+        by_name = {field.name: field for field in SETTINGS_FIELDS}
+        for capability in CAPABILITIES:
+            if capability.setting is None:
+                continue
+            field = by_name[capability.setting]
+            choices = set(field.choices or ())
+            expected = set(capability.providers)
+            if capability.automatic:
+                expected.add(capability.automatic)
+                assert field.choices[0] == capability.automatic, "the default comes first"
+            assert choices == expected, f"{capability.setting}: {choices} != {expected}"
+
+    def test_a_provider_may_serve_more_than_one_capability(self):
+        """Deepgram recognises and speaks; so do the local engines. One key, two
+        capabilities, and the spec says so rather than being listed twice."""
+        from surtitle.store.settings_store import PROVIDER_SPECS
+
+        assert PROVIDER_SPECS["deepgram"].capabilities == ("stt", "tts")
+        assert PROVIDER_SPECS["local"].capabilities == ("stt", "tts")
+
+    def test_the_screen_is_given_the_sections_in_order_with_their_labels(self, tmp_path):
+        from surtitle.config import Settings
+        from surtitle.store.settings_store import CAPABILITIES, SettingsStore
+
+        store = SettingsStore(Settings(SURTITLE_HOME=str(tmp_path)))
+
+        described = store.describe()
+
+        assert described["section_order"][: len(CAPABILITIES)] == [
+            capability.id for capability in CAPABILITIES
+        ]
+        for capability in CAPABILITIES:
+            assert described["section_labels"][capability.id] == capability.label
+            assert capability.id in described["sections"], (
+                f"{capability.id} has no section, so it cannot be configured"
+            )
+
+    def test_each_capability_carries_its_providers_and_their_setup(self, tmp_path):
+        from surtitle.config import Settings
+        from surtitle.store.settings_store import SettingsStore
+
+        store = SettingsStore(Settings(SURTITLE_HOME=str(tmp_path)))
+
+        described = {item["id"]: item for item in store.describe()["capabilities"]}
+
+        search = described["search"]
+        assert search["automatic"] == "automatic"
+        assert search["setting"] == "search_provider"
+        tavily = next(item for item in search["providers"] if item["id"] == "tavily")
+        assert tavily["api_key_env"] == "TAVILY_API_KEY"
+        assert tavily["credential"]["configured"] is False
+        keyless = next(item for item in search["providers"] if item["id"] == "duckduckgo")
+        assert keyless["credential"] is None, "nothing to configure, so nothing is claimed"
+
+        stt = described["stt"]
+        local = next(item for item in stt["providers"] if item["id"] == "local")
+        assert local["install"] == "voice", "choosing it is not enough; it has to be installed"
+
+    def test_the_local_engines_state_is_reported_when_they_are_chosen(self, tmp_path, monkeypatch):
+        """Statting model files is cheap but not free, and there is no reason to do it
+        for a configuration that is entirely hosted."""
+        from surtitle.config import Settings
+        from surtitle.store import settings_store
+        from surtitle.store.settings_store import SettingsStore
+
+        calls = []
+
+        def fake_state(settings):
+            calls.append(settings)
+            return {
+                "ready": False,
+                "detail": "the local speech engines are not installed",
+                "missing_models": 2,
+                "missing_bytes": 250 * 1024 * 1024,
+            }
+
+        monkeypatch.setattr(settings_store, "_local_engine_state", fake_state)
+
+        hosted = SettingsStore(Settings(SURTITLE_HOME=str(tmp_path)))
+        hosted.describe()
+        assert calls == [], "nothing local is selected"
+
+        chosen = SettingsStore(
+            Settings(
+                SURTITLE_HOME=str(tmp_path), SURTITLE_VOICE="true", SURTITLE_STT_BACKEND="local"
+            )
+        )
+        described = {item["id"]: item for item in chosen.describe()["capabilities"]}
+        local = next(item for item in described["stt"]["providers"] if item["id"] == "local")
+
+        assert calls, "a local engine was chosen, so its state matters"
+        assert local["local"]["missing_models"] == 2
+        assert local["local"]["ready"] is False

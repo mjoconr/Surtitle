@@ -39,19 +39,49 @@ def settings(tmp_path):
     )
 
 
-def function_source(script: str, name: str) -> str:
-    """One shipped function, as text.
+_COMMENTS = re.compile(r"//[^\n]*|/\*.*?\*/", re.S)
 
-    Slicing to the first column-zero `}` is how these tests read a function, and
-    getting the slice wrong — or the string wrong — silently asserts nothing. The
-    name is checked, so a renamed function fails the test that cares about it rather
-    than quietly matching an empty block.
+
+def function_source(script: str, name: str) -> str:
+    """One shipped function or method, as text.
+
+    Matched by brace counting rather than by looking for a column-zero `}`: the
+    settings panel is a class, so its functions close on an indented brace, and the
+    first column-zero one after them belongs to something else entirely — which
+    silently made a whole method's body part of the block under test.
+
+    The name is checked, so a renamed function fails the test that cares about it
+    rather than quietly matching an empty block.
     """
-    marker = f"function {name}("
-    assert marker in script, f"{marker} is not in the shipped script"
-    block = script[script.index(marker) :]
-    end = block.find("\n}\n")
-    return block if end == -1 else block[:end]
+    candidates = (f"function {name}(", f"\n  {name}(", f"\n  async {name}(")
+    for marker in candidates:
+        index = script.find(marker)
+        if index != -1:
+            break
+    else:
+        raise AssertionError(f"{name} is not in the shipped script")
+
+    # Comments go first: they are prose, and an apostrophe in one ("the reader's
+    # own") starts a string as far as a scanner is concerned and never ends it, so
+    # the braces after it stop adding up. Dropping them also means a test cannot be
+    # satisfied by a comment that merely mentions the code it is looking for.
+    body = _COMMENTS.sub("", script)
+    start = body.index("{", body.find(marker))
+    depth = 0
+    for i in range(start, len(body)):
+        if body[i] == "{":
+            depth += 1
+        elif body[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return body[body.find(marker) : i + 1]
+    raise AssertionError(f"{name} is not closed in the shipped script")
+
+
+@pytest.fixture(scope="module")
+def settings_script() -> str:
+    """The settings panel, which is its own module."""
+    return (WEB / "js" / "settings.js").read_text(encoding="utf-8")
 
 
 @pytest.fixture(scope="module")
@@ -1825,3 +1855,138 @@ class TestAVoiceProblemThatEndsIsTakenOffTheScreen:
         assert (
             'appendError(turn, data.message || "Something went wrong.", data.kind_detail)' in script
         )
+
+
+class TestProvidersAreConfiguredWhereTheyAreUsed:
+    """The panel's navigation and its key fields come from the capability table.
+
+    There is no "API keys" page any more. A page of vendors, separate from the choice
+    that uses them, is how a key gets saved without anything reading it and how
+    somebody goes looking for a provider's setup and finds a list of names instead.
+    """
+
+    def test_the_navigation_is_built_from_the_servers_tables(self, settings_script):
+        block = function_source(settings_script, "renderNav")
+
+        assert "this.described.section_order" in block
+        assert "this.described.section_labels" in block
+        assert "SECTION_LABELS" not in settings_script, "no second list of labels to drift"
+        assert "SECTION_ORDER" not in settings_script
+
+    def test_there_is_no_separate_api_keys_page(self, settings_script):
+        code = _COMMENTS.sub("", settings_script)
+
+        assert 'section === "providers"' not in code
+        assert "API keys" not in code
+        assert "renderProviders" in code, "the cards moved, they did not go away"
+
+    def test_a_capability_section_shows_its_providers(self, settings_script):
+        block = function_source(settings_script, "render")
+
+        assert "this.capabilityFor(this.activeSection)" in block
+        assert "this.renderProviders(capability)" in block
+
+    def test_a_provider_with_no_key_gets_no_key_field(self, settings_script):
+        """A blank input on a provider that needs nothing is a question with no
+        answer. The local engines were already in this state; search made it visible."""
+        block = function_source(settings_script, "buildProviderCard")
+
+        assert "if (!provider.api_key_env)" in block
+        assert "buildKeylessBody(provider)" in block
+        # The key field is built after that early return, so a keyless provider
+        # never reaches it.
+        assert block.index("buildKeylessBody(provider)") < block.index("cred-${provider.id}")
+
+    def test_the_local_engines_are_offered_an_install_beside_the_choice(self, settings_script):
+        block = function_source(settings_script, "buildKeylessBody")
+
+        assert "provider.local.ready" in block
+        assert 'button.textContent = "Install"' in block
+        assert "startVoiceInstall" in block
+
+    def test_the_card_says_which_provider_is_in_use(self, settings_script):
+        assert 'badge.textContent = "in use"' in settings_script
+        assert "providerIsReady(provider)" in settings_script
+
+
+class TestTheMicrophonePageActuallyWorks:
+    """The device settings were dead, and looked like a missing feature.
+
+    `append()` returns undefined — unlike `appendChild`, which returns the node — so
+    `body.append(document.createElement("hr")).style.cssText = …` threw a TypeError.
+    It threw *before* the output-device picker below it was built, so the speaker
+    section never appeared at all: a working feature that nobody could see, with the
+    only symptom being a panel that stopped early.
+    """
+
+    def test_no_append_result_is_used_as_a_node(self, settings_script):
+        assert not re.search(
+            r"\.append\([^;]*\)\.(style|textContent|className|dataset)", settings_script
+        ), "append() returns undefined; the node has to be built first"
+
+    def test_the_divider_is_built_before_it_is_appended(self, settings_script):
+        block = function_source(settings_script, "renderMicrophone")
+
+        assert "const divider = document.createElement" in block
+        assert "this.body.append(divider)" in block
+
+    def test_the_output_picker_is_reached(self, settings_script):
+        """It is the line after the divider, so anything that throws above it takes
+        the whole section with it."""
+        block = function_source(settings_script, "renderMicrophone")
+
+        assert "this.renderSpeaker()" in block
+        assert block.index("this.body.append(divider)") < block.index("this.renderSpeaker()")
+
+    def test_a_device_appearing_updates_the_list_by_itself(self, settings_script):
+        """Granting permission by using the microphone is what makes the browser
+        report names, and nothing asked again — so the page went on saying "one
+        input, unnamed" while the microphone was in active use."""
+        assert 'addEventListener("devicechange"' in settings_script
+        assert "this.refreshDevices" in settings_script
+
+        block = function_source(settings_script, "render")
+        assert "this.refreshDevices = null" in block, "only while the pickers are on screen"
+
+    def test_a_refresh_reloads_both_pickers(self, settings_script):
+        block = function_source(settings_script, "refreshDevicePickers")
+
+        assert "this.populateMicrophones(" in block
+        assert "this.populateSpeakers(" in block, "a device change is not input-specific"
+
+    def test_the_page_asks_for_the_microphone_itself(self, settings_script):
+        """Device names belong to the page that was granted the microphone, and the
+        page that needs them is the one being looked at. Sending somebody to go and
+        use the microphone somewhere else leaves them where they started when the
+        window they are looking at is not the window that has permission — which is
+        easy to reach, since a browser grants it per origin and a second window on
+        the other spelling of localhost is a different origin."""
+        block = function_source(settings_script, "requestMicrophoneAccess")
+
+        assert "getUserMedia({ audio: true })" in block
+        assert "track.stop()" in block, "asking for permission is not recording"
+
+    def test_the_action_is_only_offered_when_it_would_help(self, settings_script):
+        block = function_source(settings_script, "populateMicrophones")
+
+        assert 'allow.hidden = !["unnamed", "none"].includes(report.reason)' in block
+
+    def test_granting_names_the_outputs_too(self, settings_script):
+        block = function_source(settings_script, "renderMicrophone")
+
+        assert "if (granted) this.refreshDevicePickers()" in block
+
+    def test_the_page_says_what_it_can_see_and_why(self, settings_script):
+        block = function_source(settings_script, "describeDeviceStatus")
+
+        for reason in ("unsupported", "refused", "none", "unnamed"):
+            assert f'case "{reason}"' in block, reason
+
+    def test_an_unnamed_device_is_not_reported_as_found(self, settings_script):
+        """The placeholder goes on after the check. Deciding it the other way round
+        makes every hidden label look like a name, which is how "1 device found"
+        replaced the one message that explained anything."""
+        block = function_source(settings_script, "describeDevices")
+
+        assert "named: Boolean(device.label)" in block
+        assert block.index("named: Boolean(device.label)") < block.index("device.label ||")

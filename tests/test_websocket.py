@@ -571,7 +571,7 @@ class TestUnconfiguredStartup:
         client, _app, _project, _session = bare
         response = client.put("/api/settings", json={"reasoning_effort": "high"})
         assert response.status_code == 200
-        assert response.json()["sections"]["model"]
+        assert response.json()["sections"]["llm"]
 
 
 class TestReadyReportsTheVoiceEngines:

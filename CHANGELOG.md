@@ -7,7 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Settings are organised by what you are choosing, not by who provides it.** The
+  sections are now the Model, Speech to text, Text to speech and Search, and each
+  one holds everything that belongs to it: the choice, that provider's models, and
+  its API key — where before the keys lived on a separate page, so a key could be
+  saved without anything reading it and looking for a provider's setup found a list
+  of names. The pages are generated from one table describing each capability and
+  the providers that serve it, so a provider that serves two of them (Deepgram
+  recognises and speaks; so do the local engines) is described once. A provider that
+  needs nothing gets no key field: the local engines show whether they are installed
+  with an **Install** beside the choice, and the search this application performs
+  itself says so instead of offering an empty box.
+
 ### Fixed
+
+- **The Microphone page works, and its output picker is finally visible.** It threw
+  a `TypeError` while building a divider — `append()` returns undefined, unlike
+  `appendChild` — and it threw *before* the output-device picker below it was built,
+  so a working speaker selector had never appeared for anyone: the only symptom was
+  a panel that stopped early. Both pickers are now on the page, and both list
+  devices by name.
+
+- **The device lists keep themselves current, and say what they can actually see.**
+  Granting the microphone is what makes the browser report device names, and nothing
+  asked again — the page went on reporting one unnamed input while the microphone was
+  in active use, next to a note telling you to open the microphone and press refresh.
+  The list now updates by itself when a device appears or is unplugged, and the
+  message distinguishes the four things that look identical from the count alone: a
+  page that cannot list devices at all, a browser that refused, no devices yet, and
+  devices whose names are being hidden until permission is granted. When that last
+  one is the answer, the page offers to ask for the microphone itself — a browser
+  grants that per origin, so the window you are looking at is not always the window
+  that has it, and being told to go and switch the microphone on somewhere else is
+  no help when you are already using it in the other one. Granting it names both
+  lists, inputs and outputs alike.
 
 - **A dropped speech-recognition socket no longer claims your key is wrong, and the
   notice is taken down when it comes back.** Deepgram closes healthy sockets with

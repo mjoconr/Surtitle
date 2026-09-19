@@ -64,29 +64,84 @@ class SettingsValidationError(ValueError):
 
 
 @dataclass(slots=True, frozen=True)
-class ProviderSpec:
-    """How one provider is addressed: its key reference and endpoint.
+class Capability:
+    """One thing Surtitle needs a service for, and how a provider is chosen.
 
-    ``api_key_env`` is a *reference* (the environment variable name), never the
-    secret itself, so provider configuration can be stored and displayed safely.
+    The unit the settings screen is built around, and the unit a person thinks in:
+    which model, which speech recognition, which voice, which search. Everything the
+    screen shows for a capability — its section, its selector, its providers, their
+    key fields, their install state — is derived from this table and
+    :data:`PROVIDER_SPECS`, so adding a provider is one entry rather than an entry
+    here, an entry there, and a page of hand-written UI.
     """
 
     id: str
     label: str
-    api_key_env: str
-    base_url: str
-    models: tuple[str, ...]
-    default_model: str
-    docs_url: str
+    # The preference that selects the provider, when there is a choice to make. A
+    # capability with one provider has nothing to select — the LLM has one today —
+    # and the section shows that provider's settings instead of a selector with a
+    # single option.
+    setting: str | None
+    providers: tuple[str, ...]
+    # A choice meaning "pick for me", offered first. Only search has one: the best
+    # provider there depends on whether a key is configured at all.
+    automatic: str | None = None
+
+
+# The four services, in the order they are configured. Speech to text before text
+# to speech because a voice conversation starts with the microphone.
+CAPABILITIES: tuple[Capability, ...] = (
+    Capability("llm", "Model", None, ("deepseek",)),
+    Capability("stt", "Speech to text", "stt_backend", ("deepgram", "local")),
+    Capability("tts", "Text to speech", "tts_backend", ("deepgram", "local")),
+    Capability(
+        "search",
+        "Search",
+        "search_provider",
+        ("duckduckgo", "tavily"),
+        automatic="automatic",
+    ),
+)
+
+CAPABILITIES_BY_ID = {capability.id: capability for capability in CAPABILITIES}
+
+
+@dataclass(slots=True, frozen=True)
+class ProviderSpec:
+    """How one provider is addressed: what it can do, and how to reach it.
+
+    ``api_key_env`` is a *reference* (the environment variable name), never the
+    secret itself, so provider configuration can be stored and displayed safely.
+    It is ``None`` for a provider that needs no credential — a local engine, or a
+    search that this application performs itself.
+    """
+
+    id: str
+    label: str
+    # What this provider can serve. A provider may serve more than one capability:
+    # Deepgram recognises and speaks, and the local engines do both.
+    capabilities: tuple[str, ...]
+    base_url: str = ""
+    # The environment variable that holds its key, or None when it needs none.
+    api_key_env: str | None = None
+    models: tuple[str, ...] = ()
+    default_model: str = ""
+    docs_url: str = ""
     # ``models`` endpoint used to validate a key and refresh the model list.
     discovery_path: str | None = "/models"
     needs_key: bool = True
+    # "api" is somebody else's service, "local" runs on this machine and has to be
+    # installed, "builtin" is done by this application with no service at all.
+    kind: str = "api"
+    # The install action a local provider needs, if any.
+    install: str | None = None
 
 
 PROVIDER_SPECS: dict[str, ProviderSpec] = {
     "deepseek": ProviderSpec(
         id="deepseek",
         label="DeepSeek",
+        capabilities=("llm",),
         api_key_env="DEEPSEEK_API_KEY",
         base_url="https://api.deepseek.com",
         models=("deepseek-flash", "deepseek-v4-pro"),
@@ -95,7 +150,8 @@ PROVIDER_SPECS: dict[str, ProviderSpec] = {
     ),
     "deepgram": ProviderSpec(
         id="deepgram",
-        label="Deepgram (voice)",
+        label="Deepgram",
+        capabilities=("stt", "tts"),
         api_key_env="DEEPGRAM_API_KEY",
         base_url="https://api.deepgram.com",
         models=(DEEPGRAM_STT_MODEL, DEEPGRAM_TTS_MODEL),
@@ -105,16 +161,31 @@ PROVIDER_SPECS: dict[str, ProviderSpec] = {
         # socket probe in :mod:`surtitle.doctor` is the validation path.
         discovery_path=None,
     ),
+    "local": ProviderSpec(
+        id="local",
+        label="On this machine",
+        capabilities=("stt", "tts"),
+        needs_key=False,
+        kind="local",
+        # The engines and their models are hundreds of megabytes, so choosing this
+        # is not enough: the section has to say whether they are here and offer to
+        # fetch them.
+        install="voice",
+    ),
+    "duckduckgo": ProviderSpec(
+        id="duckduckgo",
+        label="This application fetches them",
+        capabilities=("search",),
+        needs_key=False,
+        kind="builtin",
+        docs_url="https://duckduckgo.com/",
+    ),
     "tavily": ProviderSpec(
         id="tavily",
-        label="Tavily (web search)",
+        label="Tavily",
+        capabilities=("search",),
         api_key_env="TAVILY_API_KEY",
         base_url="https://api.tavily.com",
-        # Nothing to choose between: the search tool is either given a key or it
-        # is not. The empty tuple is what the settings panel renders as "no models
-        # to pick", and `default_model` is required by the spec rather than used.
-        models=(),
-        default_model="",
         docs_url="https://app.tavily.com/home",
         # A key is validated by asking what it has used. It is a real authenticated
         # call, it costs nothing, and it distinguishes a revoked key from a working
@@ -165,7 +236,7 @@ SETTINGS_FIELDS: tuple[_Field, ...] = (
         "Model",
         "DeepSeek model used for the agent loop.",
         choices=PROVIDER_SPECS["deepseek"].models,
-        section="model",
+        section="llm",
     ),
     _Field(
         "reasoning_effort",
@@ -175,7 +246,7 @@ SETTINGS_FIELDS: tuple[_Field, ...] = (
         "low effort costs the work rather than the speaking; lower it only if "
         "spoken turns feel slow.",
         choices=("minimal", "low", "medium", "high"),
-        section="model",
+        section="llm",
     ),
     _Field(
         "search_provider",
@@ -194,7 +265,7 @@ SETTINGS_FIELDS: tuple[_Field, ...] = (
         bool,
         "Thinking mode",
         "Stream the model's reasoning to the UI. Reasoning is never spoken aloud.",
-        section="model",
+        section="llm",
     ),
     _Field(
         "temperature",
@@ -203,7 +274,7 @@ SETTINGS_FIELDS: tuple[_Field, ...] = (
         "Higher is more varied, lower is more predictable.",
         minimum=0.0,
         maximum=2.0,
-        section="model",
+        section="llm",
     ),
     _Field(
         "max_steps",
@@ -220,7 +291,7 @@ SETTINGS_FIELDS: tuple[_Field, ...] = (
         bool,
         "Voice output",
         "Speak replies aloud. Turning this off gives a text-only session.",
-        section="voice",
+        section="general",
     ),
     _Field(
         "stt_backend",
@@ -229,7 +300,7 @@ SETTINGS_FIELDS: tuple[_Field, ...] = (
         "'deepgram' streams from the hosted service (needs a key). "
         "'local' recognises on this machine, offline.",
         choices=("deepgram", "local"),
-        section="voice",
+        section="stt",
     ),
     _Field(
         "tts_backend",
@@ -238,35 +309,35 @@ SETTINGS_FIELDS: tuple[_Field, ...] = (
         "'deepgram' uses the hosted Aura voices (needs a key). "
         "'local' speaks on this machine, offline.",
         choices=("deepgram", "local"),
-        section="voice",
+        section="tts",
     ),
     _Field(
         "stt_model",
         str,
         "Deepgram speech-to-text model",
         "Listen model used for transcription when the engine is deepgram.",
-        section="voice",
+        section="stt",
     ),
     _Field(
         "tts_model",
         str,
         "Deepgram text-to-speech voice",
         "Aura voice used for spoken replies when the engine is deepgram.",
-        section="voice",
+        section="tts",
     ),
     _Field(
         "local_stt_model",
         str,
         "Local speech-to-text model",
         "Model key from `surtitle models list`. Used when the engine is local.",
-        section="voice",
+        section="stt",
     ),
     _Field(
         "local_tts_model",
         str,
         "Local text-to-speech voice",
         "Model key from `surtitle models list`. Used when the engine is local.",
-        section="voice",
+        section="tts",
     ),
     _Field(
         "local_eot_silence_ms",
@@ -276,7 +347,7 @@ SETTINGS_FIELDS: tuple[_Field, ...] = (
         "A local model has no contextual end-of-turn detector, so this is a timer.",
         minimum=200,
         maximum=5000,
-        section="voice",
+        section="stt",
     ),
     _Field(
         "local_eot_extend_ms",
@@ -286,7 +357,7 @@ SETTINGS_FIELDS: tuple[_Field, ...] = (
         "so a half-finished thought is not cut off.",
         minimum=200,
         maximum=8000,
-        section="voice",
+        section="stt",
     ),
     _Field(
         "local_max_utterance_ms",
@@ -297,7 +368,7 @@ SETTINGS_FIELDS: tuple[_Field, ...] = (
         "the first pause after this much continuous speech — never mid-sentence.",
         minimum=5000,
         maximum=600000,
-        section="voice",
+        section="stt",
     ),
     _Field(
         "tts_speed",
@@ -306,7 +377,7 @@ SETTINGS_FIELDS: tuple[_Field, ...] = (
         "1.0 is natural. Lower is slower and more deliberate.",
         minimum=0.5,
         maximum=2.0,
-        section="voice",
+        section="tts",
     ),
     _Field(
         "endpointing_ms",
@@ -315,7 +386,7 @@ SETTINGS_FIELDS: tuple[_Field, ...] = (
         "How long you must pause before your turn is considered finished.",
         minimum=100,
         maximum=2000,
-        section="voice",
+        section="stt",
     ),
 )
 
@@ -478,6 +549,10 @@ class SettingsStore:
         from pydantic import SecretStr
 
         for spec in PROVIDER_SPECS.values():
+            # Keyless providers — a local engine, a search this application does
+            # itself — have no credential to apply.
+            if not spec.api_key_env:
+                continue
             field = spec.api_key_env.lower()
             if field not in type(target).model_fields:
                 continue
@@ -660,19 +735,39 @@ class SettingsStore:
                 }
             )
 
-        providers = []
-        for spec in PROVIDER_SPECS.values():
-            state = self.credential_state(spec.api_key_env)
-            providers.append(
-                {
+        # Capabilities, each with the providers that serve it and everything needed
+        # to configure one: the section a person opens, the selector, the key field
+        # for the provider that needs one, and whether a local engine is here yet.
+        local = _local_engine_state(effective) if self._wants_local_engines(effective) else None
+        capabilities = []
+        for capability in CAPABILITIES:
+            providers = []
+            for provider_id in capability.providers:
+                spec = PROVIDER_SPECS[provider_id]
+                entry: dict[str, Any] = {
                     "id": spec.id,
                     "label": spec.label,
+                    "kind": spec.kind,
                     "api_key_env": spec.api_key_env,
                     "base_url": spec.base_url,
                     "models": list(spec.models),
                     "default_model": spec.default_model,
                     "docs_url": spec.docs_url,
-                    "credential": state.to_dict(),
+                    "install": spec.install,
+                    "credential": self.credential_state(spec.api_key_env).to_dict()
+                    if spec.api_key_env
+                    else None,
+                }
+                if spec.kind == "local" and local is not None:
+                    entry["local"] = local
+                providers.append(entry)
+            capabilities.append(
+                {
+                    "id": capability.id,
+                    "label": capability.label,
+                    "setting": capability.setting,
+                    "automatic": capability.automatic,
+                    "providers": providers,
                 }
             )
 
@@ -681,8 +776,26 @@ class SettingsStore:
             "settings_path": str(self.settings_path),
             "credentials_path": str(self.credentials_path),
             "sections": sections,
-            "providers": providers,
+            "capabilities": capabilities,
+            # The screen builds its navigation from these rather than keeping its own
+            # list, so a capability added here appears there without an edit.
+            "section_labels": {
+                **{capability.id: capability.label for capability in CAPABILITIES},
+                "agent": "Agent",
+                "general": "General",
+            },
+            "section_order": [*[c.id for c in CAPABILITIES], "agent", "general"],
         }
+
+    def _wants_local_engines(self, settings: Settings) -> bool:
+        """Whether anything selected would run on this machine.
+
+        Statting the model files and asking whether the runtime imports is cheap but
+        not free, and there is no reason to do it for a configuration that is all
+        hosted.
+        """
+        selected = {settings.stt_backend, settings.tts_backend}
+        return "local" in selected and settings.voice_enabled
 
 
 _ENV_FOR_PREF = {
@@ -695,6 +808,25 @@ _ENV_FOR_PREF = {
     "local_stt_model": "SURTITLE_LOCAL_STT_MODEL",
     "local_tts_model": "SURTITLE_LOCAL_TTS_MODEL",
 }
+
+
+def _local_engine_state(settings: Settings) -> dict[str, Any]:
+    """Whether the on-this-machine speech engines are ready, and what is missing.
+
+    Imported here rather than at module scope: the voice package pulls in audio and
+    model code that a machine using hosted engines never needs, and this runs only
+    when something local is actually selected. Nothing is loaded — the models are
+    stat-ed and the runtime is imported, which is what the tray polls already.
+    """
+    from surtitle.voice.install import state as install_state
+
+    snapshot = install_state(settings)
+    return {
+        "ready": snapshot.ready,
+        "detail": snapshot.detail,
+        "missing_models": snapshot.missing_models,
+        "missing_bytes": snapshot.missing_bytes,
+    }
 
 
 def _env_locked(name: str) -> bool:

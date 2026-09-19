@@ -41,6 +41,20 @@ async def client(settings):
     await app.state.app_state.aclose()
 
 
+def provider_view(payload: dict, provider_id: str) -> dict:
+    """One provider as the settings screen sees it.
+
+    Providers are offered per capability now, so there is no flat list to search:
+    Deepgram appears under both speech capabilities, and asking for it by id finds
+    the first capability that offers it.
+    """
+    for capability in payload["capabilities"]:
+        for provider in capability["providers"]:
+            if provider["id"] == provider_id:
+                return provider
+    raise AssertionError(f"{provider_id} is not offered by any capability")
+
+
 class TestHealth:
     async def test_reports_configuration_state(self, client):
         response = await client.get("/api/health")
@@ -373,8 +387,8 @@ class TestSettingsApi:
         assert "1234567890" not in text
 
     async def test_credentials_report_status_without_values(self, client):
-        providers = (await client.get("/api/settings")).json()["providers"]
-        deepseek = next(p for p in providers if p["id"] == "deepseek")
+        view = (await client.get("/api/settings")).json()
+        deepseek = provider_view(view, "deepseek")
         assert deepseek["credential"]["configured"] is True
         assert deepseek["credential"]["source"] == "env"
         assert deepseek["credential"]["writable"] is False
@@ -384,7 +398,7 @@ class TestSettingsApi:
         response = await client.put("/api/settings", json={"reasoning_effort": "high"})
         assert response.status_code == 200
         body = response.json()
-        effort = next(f for f in body["sections"]["model"] if f["name"] == "reasoning_effort")
+        effort = next(f for f in body["sections"]["llm"] if f["name"] == "reasoning_effort")
         assert effort["value"] == "high"
         assert effort["stored"] is True
 
@@ -602,7 +616,7 @@ class TestCredentialEditing:
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
             view = (await client.get("/api/settings")).json()
-            deepseek = next(p for p in view["providers"] if p["id"] == "deepseek")
+            deepseek = provider_view(view, "deepseek")
             assert deepseek["credential"]["writable"] is False
             assert deepseek["credential"]["source"] == "env"
 
