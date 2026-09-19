@@ -623,6 +623,66 @@ class TestTheRightPanel:
         assert "state.touched.clear()" in block
 
 
+class TestTheCentreSaysWhatItIsDoing:
+    """The transcript is a live view, not a column of collapsed rows.
+
+    Reported as: the centre has little activity while the agent works, where
+    DeepSeek Harness shows the thinking and the learning as it goes. Everything
+    here is one of those two things — the reasoning as it streams, and the
+    conclusions worth keeping.
+    """
+
+    def test_a_think_block_folds_when_its_step_starts_acting(self, script):
+        """Reasoning is settled by the call it produced; the call takes the space."""
+        block = script[script.index("function noteStepTool(") :]
+        block = block[: block.index("\n}\n")]
+        assert "collapseThink(step.think)" in block
+        assert "step.toolCount === 1" in block, "only the step's first call folds it"
+
+    def test_the_folded_summary_keeps_moving(self, script):
+        """Written once, it showed the first line forever — minutes out of date."""
+        block = script[script.index("function addThinking(") :]
+        block = block[: block.index("\n}\n")]
+        assert "scheduleThinkPeek(step.think)" in block
+        peek = script[script.index("function scheduleThinkPeek(") :]
+        peek = peek[: peek.index("\n}\n")]
+        assert "latestLineOf(target.text)" in peek
+        assert "thinkPeekTimer" in peek, "a write per token is what this exists to avoid"
+
+    def test_the_working_line_names_the_call_in_flight(self, script):
+        """A generic verb plus a clock is the spinner it replaced."""
+        block = script[script.index("function describeWorking(") :]
+        block = block[: block.index("\n}\n")]
+        assert "Running ${record.name}" in block
+        assert "!record.endedAt" in block
+        assert "record.startedAt >= turn.startedAt" in block, (
+            "a row left running by an earlier turn must not be reported as current"
+        )
+
+    def test_the_working_line_is_what_shows_it(self, script):
+        block = script[script.index("function updateWorkingLine(") :]
+        block = block[: block.index("\n}\n")]
+        assert 'querySelector(".working__label").textContent = describeWorking(turn)' in block
+
+    def test_a_notebook_write_is_shown_as_learning(self, script):
+        """The notebook is the durable result, and it was entirely invisible."""
+        assert "function appendLearned(" in script
+        block = script[script.index('case "tool_result": {') :]
+        block = block[: block.index("break;")]
+        assert 'data.name === "remember"' in block
+        assert "appendLearned(" in block
+        assert "record.arguments.note" in block, (
+            "the note itself is the point; the tool's display is a character count"
+        )
+
+    def test_a_reopened_conversation_shows_what_it_learned(self, script):
+        block = script[script.index("function replayToolCall(") :]
+        block = block[: block.index("\n}\n")]
+        assert 'call.name === "remember"' in block, (
+            "otherwise the notebook looks as though it filled itself"
+        )
+
+
 class TestStepGrouping:
     """A turn's process must be grouped by the step that produced it.
 

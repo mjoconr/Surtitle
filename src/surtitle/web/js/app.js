@@ -215,11 +215,13 @@ function updateTimers() {
 }
 
 /**
- * "Deep diving… 14m 38s" — the line that says the turn is still moving.
+ * "Reading the notes… 14m 38s" — the line that says what the turn is doing.
  *
  * A turn that thinks and calls tools for ten minutes in silence is
  * indistinguishable from one that has died, and the state pill alone says
- * "Thinking" whether that has been true for one second or twenty minutes.
+ * "Thinking" whether that has been true for one second or twenty minutes. What
+ * it is *doing* is the part that makes the wait legible: a generic verb plus a
+ * clock is the same information as the spinner it replaced.
  */
 function updateWorkingLine(now, anyLive) {
   const turn = state.currentTurn;
@@ -237,11 +239,34 @@ function updateWorkingLine(now, anyLive) {
   }
   if (!workingLine) {
     workingLine = node("div", "working");
-    workingLine.append(node("span", "working__dots", "Deep diving"));
+    workingLine.append(node("span", "working__label", "Deep diving"));
+    workingLine.append(node("span", "working__dots", ""));
     workingLine.append(node("span", "working__time", ""));
   }
   if (workingLine.parentNode !== root) root.append(workingLine);
+  workingLine.querySelector(".working__label").textContent = describeWorking(turn);
   workingLine.querySelector(".working__time").textContent = formatDuration(now - turn.startedAt);
+}
+
+/**
+ * What the turn is doing, in as few words as are honest.
+ *
+ * A call in flight is the most specific thing that can be said — it names the
+ * tool and, through it, whether the agent is reading, searching or running
+ * something. Failing that, the step's own summary of what it has called so far.
+ * Only this turn's rows count: the tool map belongs to the conversation, so a
+ * row left running by an earlier turn would otherwise be reported as current.
+ */
+function describeWorking(turn) {
+  for (const record of turn.toolRows.values()) {
+    if (record.startedAt && !record.endedAt && record.startedAt >= turn.startedAt) {
+      return `Running ${record.name}`;
+    }
+  }
+  const step = turn.stepRows.get(currentStepIndex());
+  const summary = step && step.summary ? step.summary.textContent : "";
+  if (summary && summary !== "thinking…") return summary;
+  return "Deep diving";
 }
 
 let workingLine = null;
@@ -455,6 +480,18 @@ function noteStepTool(step, name) {
   step.toolCount += 1;
   step.counts.set(name, (step.counts.get(name) || 0) + 1);
   step.summary.textContent = planSummary(step);
+  // The first call is the moment the step stops considering and starts acting.
+  // The reasoning that produced it is settled, so it folds down to its one-line
+  // summary and the call takes the space: a long turn otherwise becomes a wall
+  // of open thinking with the work buried underneath it.
+  if (step.toolCount === 1) collapseThink(step.think);
+}
+
+/** Fold a Think block down to its one-line summary. */
+function collapseThink(think) {
+  if (!think) return;
+  think.head.setAttribute("aria-expanded", "false");
+  think.body.hidden = true;
 }
 
 /** "14 commands", "read_file ×3, run_shell ×2", etc. */
@@ -504,10 +541,11 @@ function addThinking(turn, text, stepNumber) {
   step.think.text += text;
   step.think.body.textContent = step.think.text;
   // A one-line gist, so a collapsed step still says what was being considered.
-  // Static per block: rewriting it on every token is what made the panel churn.
+  // Written once so the panel does not churn on every token; `scheduleThinkPeek`
+  // is what keeps it current from then on.
   if (!step.think.peek.textContent) {
     step.think.peek.textContent = gistOf(step.think.text);
-    // The Activity panel renders from `state.activity`, not from the transcript's
+    // The Thinking panel renders from `state.activity`, not from the transcript's
     // DOM, so the gist is recorded there too — otherwise its Think rows are
     // silently empty and the panel shows commands with no reasoning above them.
     pushActivity({
@@ -518,6 +556,31 @@ function addThinking(turn, text, stepNumber) {
       detail: step.think.peek.textContent,
     });
   }
+  scheduleThinkPeek(step.think);
+}
+
+let thinkPeekTimer = null;
+let thinkPeekTarget = null;
+
+/**
+ * Keep a Think block's collapsed summary moving, without a write per token.
+ *
+ * The peek is what a folded block shows, and it used to be written exactly once
+ * — so a block that had been open and then folded showed whatever its first line
+ * had been, possibly minutes earlier. Only one step streams at a time, so one
+ * throttled write is enough; the delay is what keeps this off the hot path that
+ * reasoning deltas arrive on.
+ */
+function scheduleThinkPeek(think) {
+  if (!think) return;
+  thinkPeekTarget = think;
+  if (thinkPeekTimer) return;
+  thinkPeekTimer = setTimeout(() => {
+    thinkPeekTimer = null;
+    const target = thinkPeekTarget;
+    thinkPeekTarget = null;
+    if (target && target.peek) target.peek.textContent = latestLineOf(target.text);
+  }, 250);
 }
 
 /** First line of some thinking, trimmed to something a row can show. */
@@ -557,6 +620,26 @@ function assistantTurn() {
   const turn = beginTurn("assistant");
   state.currentTurn = turn;
   return turn;
+}
+
+/**
+ * "Learned" — a note this turn wrote to the project notebook.
+ *
+ * The notebook is the app's real memory: it is injected at the start of every
+ * later conversation, which makes it the most durable thing a turn can produce.
+ * It was also entirely invisible, so the one lasting result never appeared in the
+ * conversation that produced it. Shown as a conclusion rather than as a tool
+ * call, because that is what it is — the `remember` call itself still appears
+ * below with everything else the turn ran.
+ */
+function appendLearned(turn, text) {
+  const body = String(text || "").trim();
+  if (!body) return;
+  const block = node("div", "learned");
+  block.append(node("div", "learned__title", "Learned"));
+  block.append(node("div", "learned__text", body));
+  turn.root.append(block);
+  scrollToBottom();
 }
 
 function appendSaid(turn, text) {
@@ -1640,6 +1723,15 @@ function handleEvent(event) {
       clearApprovalFor(data.call_id);
       const record = view()?.toolRows.get(data.call_id);
       if (record) settleToolRow(record, data);
+      // A notebook write is the turn learning something durable. The note is the
+      // only part of it worth showing — the tool's own display is a character
+      // count — and it is already on the wire as the call's argument.
+      if (data.name === "remember" && data.ok) {
+        appendLearned(
+          assistantTurn(),
+          (record && record.arguments && record.arguments.note) || data.display,
+        );
+      }
       const step = stepFor(assistantTurn(), data.step);
       if (step) {
         step.end = Date.now();
@@ -2684,6 +2776,11 @@ function replayToolCall(turn, call) {
   if (call.approved === false) {
     record.row.dataset.state = "stopped";
     record.summary.textContent = "declined";
+  }
+  // What a previous conversation learned belongs in the reopened transcript too,
+  // or the notebook looks like it filled itself.
+  if (call.name === "remember" && ok) {
+    appendLearned(turn, (call.arguments && call.arguments.note) || call.result || "");
   }
   step.end = step.end || (call.created_at ? call.created_at * 1000 : Date.now());
   step.root.dataset.state = ok ? "ok" : "error";

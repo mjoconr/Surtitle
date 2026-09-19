@@ -600,6 +600,38 @@ button, input, textarea, select {
 
 .said--muted .said__glyph { background: var(--dsw-alias-label-caption); }
 
+/* What the turn wrote to the project notebook.
+ *
+ * Styled as a conclusion rather than a tool call: it is the one thing here that
+ * outlives the conversation, since the notebook is read at the start of every
+ * later one. The accent border is the same one a spoken line gets, because it is
+ * the same kind of thing — something the turn decided.
+ */
+.learned {
+  margin-top: 8px;
+  padding: 8px 12px;
+  border-left: 2px solid var(--dsw-alias-state-business-primary);
+  background: var(--dsw-alias-markdown-code-block);
+  border-radius: 0 10px 10px 0;
+}
+
+.learned__title {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--dsw-alias-label-caption);
+}
+
+.learned__text {
+  margin-top: 2px;
+  font-size: var(--dsh-content-font-size-secondary);
+  line-height: 20px;
+  color: var(--dsw-alias-label-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .shown {
   font-size: var(--dsh-content-font-size-secondary);
   color: var(--dsw-alias-label-secondary);
@@ -790,6 +822,9 @@ button, input, textarea, select {
   content: "…";
   animation: working-pulse 1.6s ease-in-out infinite;
 }
+
+/* The ellipsis belongs to the label, not beside it as a separate item. */
+.working__dots { margin-left: -5px; }
 
 @keyframes working-pulse {
   0%, 100% { opacity: 0.35; }
