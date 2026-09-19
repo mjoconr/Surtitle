@@ -7,6 +7,101 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-09-19
+
+### Added
+
+- **The right-hand panel now answers four questions instead of offering three
+  unlabelled lists.** **Plan** leads and is always there — it was the last tab and
+  hidden until the agent happened to write a plan, so the panel opened on a file
+  browser and the useful view was the one nobody had seen. **Thinking** is what the
+  tab formerly called Activity always was: the step, the reasoning behind it, the
+  tool it called, and the result, now reading oldest-first and following the newest
+  so it visibly moves, with the running step's reasoning shown in full.
+  **Notes** is the project notebook — what `remember` has written and what the
+  agent is given at the start of every conversation. It was completely invisible:
+  the one durable thing a turn produces was the one thing you could not check, and
+  the only route to it was finding `.surtitle/notes.md` on disk. **Files** leads
+  with what the turn read and wrote, and the project tree is folded behind one
+  line — it was a wall of dot-directories saying what exists, which you already
+  knew. Which tab is open is remembered per conversation.
+- **Stop and Push, and a request that no longer has to wait.** A message typed
+  while the agent works used to be refused with "Still working on the previous
+  request. Stop it first or wait", and an utterance captured in the same window was
+  dropped with no message at all. It is held and run when the turn ends, shown in
+  the transcript where you typed it. **Push** stops the turn and takes its place;
+  **Stop** halts the work and drops what was waiting behind it. Both appear only
+  while a turn is running, and modifier+Enter is the keyboard form of Push.
+- **A context meter, above every tab.** It reports how much of a 128k working
+  budget the conversation is carrying, how much of that the provider served from
+  its cache, and the model's own window beside them. The one number previously on
+  screen was a running total of every token the process had ever sent, which grows
+  forever and says nothing about the conversation in front of you.
+- The agent's notebook writes appear in the transcript as **Learned** blocks, and
+  the line that says the turn is still working now names what it is doing
+  ("Running run_shell") rather than only that time is passing.
+
+### Changed
+
+- **The conversation's changing context moved out of the system prompt.** The plan,
+  the notebook and the project's top-level listing were sections of the system
+  message — the head of every request — and all three change during a session, so
+  nearly every turn began by invalidating the provider's prefix cache. DeepSeek
+  serves a cache hit for a fiftieth of a miss. They are delivered as a message
+  after the history now; the agent still receives all of it every turn.
+- **A tool result is pruned head-and-tail instead of being cut short**, and to
+  6,000 characters rather than 24,000. Every result of the current turn stays in
+  the request until the turn ends, so a long turn could previously add a quarter of
+  a million characters to a single request. The middle is what goes, the count of
+  what went is stated, and the opening and the conclusion survive.
+- **An old turn's work log is shortened, once.** Past the newest six turns, each
+  action keeps its tool and target and loses the tail of its outcome, and beyond
+  the twelfth action the count of what went is stated. Written once into the
+  model's copy so the replayed history stays byte-stable, which is what keeps the
+  cache working; the transcript you read keeps every action.
+- **The context window is taken from the model rather than assumed.** A 128k
+  default against `deepseek-flash`'s published 1M read "55% full" at 7%. The
+  window comes from the same table as the prices, `SURTITLE_CONTEXT_LIMIT`
+  overrides it, and `SURTITLE_CONTEXT_BUDGET` sets the working budget the meter
+  measures against. An unknown model gets no meter rather than a wrong one.
+
+### Fixed
+
+- **A turn that finished with nothing to say is no longer stored as a success.**
+  Reported on 0.8.1 as the agent stopping again: a turn opened with a spoken
+  preamble, worked four rounds and nine tool calls, and finished on a round that
+  produced nothing at all — no speech, no display, no call. Whether the closing
+  round said anything was asked of the *turn*, and the opening preamble satisfied
+  it, so the turn completed quietly and the user heard a preamble and then silence.
+  It is asked of the closing round now: one wrap-up request, and if that also comes
+  back empty the turn is reported as having no answer — stored, banner'd and
+  spoken. The transcript also ends with a closing section of its own when a turn
+  produced no answer, because a turn that stops mid-work otherwise ends on a Think
+  block, which reads as "still going".
+- **A session that has been closed no longer keeps its socket.** Reported as
+  "I just restarted but it seems broken, text and voice", cured only by a page
+  refresh. The session underneath had been torn down — engines stopped, events
+  dropped — while its connection kept dispatching into it, so a turn ran, stored
+  its work, and reached neither the screen nor the speaker. The connection now ends
+  and the browser reconnects into a working session, and both close paths are
+  logged.
+- **The microphone can no longer be switched off while audio is still being
+  recognised.** Capture posted its mute message to the audio worklet only when the
+  backend was labelled `worklet`, so a worklet attached under another label kept
+  sending frames; and the server never checked whether the microphone was open, so
+  it fed them to the recogniser regardless. The log showed a microphone closed at
+  15:04:42 and an utterance committed at 15:04:55 from 236 seconds of audio. The
+  worklet is told whenever there is a node to tell, and frames for a closed
+  microphone are refused and counted.
+- **The Notes panel no longer reports an empty notebook when the read failed.** A
+  failed fetch was cached as "nothing recorded yet", so a notebook with 3,700
+  characters in it sat behind an empty panel long after the reason had gone. It is
+  re-read whenever the tab is opened.
+- **Closing a turn no longer discards the turn the queue has just started.**
+  `cancel_turn` cleared the session's turn after awaiting the cancelled task, and
+  that task's exit drains the queue — so Stop or Push could leave a live turn
+  untracked, unreachable by a later stop.
+
 ## [0.8.1] - 2026-09-19
 
 ### Added
@@ -687,7 +782,8 @@ Then:
 - Speech models are **not** carried over by the `.env` change alone. If you skip
   the data-directory move, run `surtitle models download` to fetch them again.
 
-[Unreleased]: https://github.com/mjoconr/Surtitle/compare/v0.8.1...HEAD
+[Unreleased]: https://github.com/mjoconr/Surtitle/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/mjoconr/Surtitle/releases/tag/v0.9.0
 [0.8.1]: https://github.com/mjoconr/Surtitle/releases/tag/v0.8.1
 [0.8.0]: https://github.com/mjoconr/Surtitle/releases/tag/v0.8.0
 [0.7.0]: https://github.com/mjoconr/Surtitle/releases/tag/v0.7.0
