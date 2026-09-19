@@ -25,6 +25,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rate-limited, the reliable route is a provider key, and the provider is one function
   wide.
 
+### Fixed
+
+- **A turn reads top-down now, with the answer at the bottom.** The reply used to be
+  announced at the top of a turn with the steps accumulating underneath it, so the
+  line the agent was speaking drifted further from where you were looking as the turn
+  went on, and a turn with a few steps left the answer a screenful above the work it
+  was describing. A turn is now the order it happened in: the steps and their tool
+  calls, then anything the agent chose to *show* — a table, a list — and the spoken
+  answer last, where a reply belongs.
+
+- **The Thinking tab is a reader instead of a column of summaries.** It rendered one
+  card per step holding a single line of that step's reasoning, which told you a step
+  had thought without showing you anything it had thought — and after reopening a
+  conversation it had only those lines, so the tab showed less than the transcript
+  folded away. It now shows one step's reasoning in full, following the newest as it
+  is written, with a row of steps to walk back through; the row covers the whole
+  conversation, because the long working turn is almost never the last one. Picking a
+  step pins it, and the next turn lets go of it.
+
 ## [0.12.0] - 2026-09-19
 
 ### Added
