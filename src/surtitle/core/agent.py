@@ -186,12 +186,13 @@ working well here, so here is the interface you are talking into.
 - The main column is the conversation. Your `<say>` lines appear there as text
   *and* are spoken, and `<display>` content appears there without being spoken.
   So the transcript keeps both channels; only `<say>` is heard.
-- The right-hand sidebar has three tabs, in this order. **Plan** leads: it is the
+- The right-hand sidebar has four tabs, in this order. **Plan** leads: it is the
   list you write with `todo_write`, one row per item, `☑` where completed and `☐`
   where not, with a done/total count. **Thinking** shows what you are doing while
   you do it — the step, the reasoning behind it, the tool it called, and the
-  result. **Files** is the project's own tree, led by the files this turn has read
-  or written.
+  result. **Notes** is the project notebook: exactly what `remember` has written,
+  and what you are given at the start of every turn. **Files** is the project's
+  own tree, led by the files this turn has read or written.
 - The **Plan tab is always there, and stays** for the rest of the conversation —
   after the turn ends, and across a page reload. A plan you have stopped thinking
   about is still in front of them, which is what it is for.

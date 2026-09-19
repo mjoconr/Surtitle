@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 
 import httpx
 import pytest
@@ -270,6 +271,53 @@ class TestProjectFiles:
     async def test_listing_a_missing_folder_is_an_error(self, client, project):
         response = await client.get(f"/api/projects/{project['id']}/files", params={"path": "nope"})
         assert response.status_code == 400
+
+
+class TestProjectNotebook:
+    """The notebook is the agent's memory of the project, and it is readable.
+
+    It is written by `remember` and injected into every later conversation, which
+    made it the one durable thing a turn produces that the user could not check:
+    the only route to it was finding `.surtitle/notes.md` on disk.
+    """
+
+    @pytest.fixture
+    async def project(self, client, tmp_path):
+        root = tmp_path / "nb"
+        root.mkdir()
+        return (await client.post("/api/projects", json={"name": "N", "root": str(root)})).json()
+
+    async def test_an_empty_notebook_says_so(self, client, project):
+        body = (await client.get(f"/api/projects/{project['id']}/notes")).json()
+
+        assert body["notes"] == ""
+        assert body["chars"] == 0
+        assert body["updated_at"] is None
+
+    async def test_it_returns_what_the_agent_wrote(self, client, project):
+        from surtitle.tools import environment
+
+        environment.write_notes(
+            Path(project["root"]), "The 122 feeder only tips once the cutter is empty."
+        )
+
+        body = (await client.get(f"/api/projects/{project['id']}/notes")).json()
+
+        assert "only tips once the cutter is empty" in body["notes"]
+        assert body["chars"] == len(body["notes"])
+        assert body["path"].endswith("notes.md")
+        assert body["updated_at"], "the panel says when it was last written"
+
+    async def test_a_long_notebook_says_the_model_sees_only_part(self, client, project):
+        """The panel shows everything; the model is given the newest part."""
+        from surtitle.tools import environment
+
+        environment.write_notes(Path(project["root"]), "x" * (environment.NOTES_MAX_CHARS + 500))
+
+        body = (await client.get(f"/api/projects/{project['id']}/notes")).json()
+
+        assert body["chars"] > environment.NOTES_MAX_CHARS
+        assert body["elided"] is True
 
 
 class TestSessions:

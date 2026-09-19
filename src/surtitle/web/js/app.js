@@ -64,6 +64,9 @@ const state = {
   // Files this turn has read or written, so the Files panel can lead with what
   // the agent actually touched instead of an undifferentiated project tree.
   touched: new Map(),
+  // The project notebook, fetched when its tab is first opened. Null means "not
+  // read yet" rather than "empty", so an empty notebook can say so properly.
+  notes: null,
   // The last completion's usage, and the window it is measured against. Both are
   // about the conversation on screen, so both are cleared when it changes — a
   // budget meter showing another conversation's numbers is a lie.
@@ -1169,14 +1172,16 @@ function scheduleActivityRender() {
 }
 
 function renderRightbar() {
-  // Plan, Thinking, Files — in the order they answer a question. The plan is
-  // what the agent intends, thinking is what it is doing, files is what it has
-  // done to the project. Plan leads because it is the only one that says how
-  // far the work has got, and it no longer appears and disappears: a primary
-  // tab that is absent until the agent writes a plan is one nobody looks for.
+  // Plan, Thinking, Notes, Files — in the order they answer a question. The plan
+  // is what the agent intends, thinking is what it is doing, notes are what it
+  // has decided to keep, files are what it has done to the project. Plan leads
+  // because it is the only one that says how far the work has got, and it no
+  // longer appears and disappears: a primary tab that is absent until the agent
+  // writes a plan is one nobody looks for.
   for (const [tab, id] of [
     ["todo", "tabTodo"],
     ["thinking", "tabThinking"],
+    ["notes", "tabNotes"],
     ["files", "tabFiles"],
   ]) {
     document.getElementById(id).setAttribute("aria-selected", String(state.rightTab === tab));
@@ -1187,11 +1192,83 @@ function renderRightbar() {
     renderThinking();
     return;
   }
+  if (state.rightTab === "notes") {
+    renderNotes();
+    return;
+  }
   if (state.rightTab === "files") {
     renderFiles();
     return;
   }
   renderTodo();
+}
+
+/**
+ * The project notebook: what the agent has chosen to remember.
+ *
+ * It is read back at the start of every later conversation, which makes it the
+ * app's actual memory of the project — and it was completely invisible, so the
+ * one durable thing a turn produces was the one thing the user could not check.
+ * It is a panel rather than a file in the tree because it belongs to the project
+ * rather than to the working copy, and because "what does it know about this"
+ * is a question worth one click.
+ */
+function renderNotes() {
+  if (!state.project) {
+    el.rightbarBody.append(node("p", "empty", "No project open."));
+    return;
+  }
+  const notes = state.notes;
+  if (!notes) {
+    el.rightbarBody.append(node("p", "empty", "Loading the notebook…"));
+    loadNotes();
+    return;
+  }
+  if (!notes.text) {
+    el.rightbarBody.append(
+      node(
+        "p",
+        "empty",
+        "Nothing recorded yet. The agent writes here with its remember tool — which " +
+          "machine is down, where a file or command lives, decisions already made — and " +
+          "reads it back at the start of every conversation.",
+      ),
+    );
+    return;
+  }
+
+  const head = node("div", "notes__head");
+  head.append(node("span", "notes__path", notes.path || "notebook"));
+  head.append(node("span", "notes__count", `${notes.chars} characters`));
+  el.rightbarBody.append(head);
+
+  if (notes.elided) {
+    // The model is given a capped version; the panel shows everything, so the
+    // difference has to be said rather than silently implied.
+    el.rightbarBody.append(
+      node("p", "notice", "Long. The model is shown only the newest part of this."),
+    );
+  }
+
+  const body = node("div", "notes__body");
+  body.textContent = notes.text;
+  el.rightbarBody.append(body);
+}
+
+let notesLoading = false;
+
+async function loadNotes() {
+  if (!state.project || notesLoading) return;
+  notesLoading = true;
+  try {
+    state.notes = await api(`/api/projects/${state.project.id}/notes`);
+  } catch (error) {
+    state.notes = { text: "", path: "", chars: 0 };
+    toast(error.message, "error");
+  } finally {
+    notesLoading = false;
+  }
+  if (state.rightTab === "notes") renderRightbar();
 }
 
 /** The tools whose `path` argument names a file the turn touched, and how. */
@@ -1809,6 +1886,9 @@ function handleEvent(event) {
           assistantTurn(),
           (record && record.arguments && record.arguments.note) || data.display,
         );
+        // The notebook just changed under the panel that shows it.
+        state.notes = null;
+        if (state.rightTab === "notes") loadNotes();
       }
       const step = stepFor(assistantTurn(), data.step);
       if (step) {
@@ -2697,6 +2777,9 @@ async function selectSession(sessionId) {
   // The panel this conversation was last left on, if it has been open before.
   state.rightTab = state.sessionTabs.get(sessionId) || "todo";
   state.touched.clear();
+  // The notebook belongs to the project rather than the conversation, but the
+  // project can change, so it is re-read rather than trusted.
+  state.notes = null;
   // The window is a fact about this conversation; another one's usage is not a
   // smaller version of it, it is a different number entirely.
   state.usage = null;
@@ -3100,6 +3183,7 @@ function showRightTab(tab) {
 }
 
 document.getElementById("tabFiles").addEventListener("click", () => showRightTab("files"));
+document.getElementById("tabNotes").addEventListener("click", () => showRightTab("notes"));
 document.getElementById("tabThinking").addEventListener("click", () => showRightTab("thinking"));
 document.getElementById("tabTodo").addEventListener("click", () => showRightTab("todo"));
 el.stopContinue.addEventListener("click", () => continueLastTurn());

@@ -574,8 +574,31 @@ class TestTheRightPanel:
 
     def test_the_plan_leads_and_is_what_opens(self, html, script):
         assert html.index('id="tabTodo"') < html.index('id="tabThinking"')
-        assert html.index('id="tabThinking"') < html.index('id="tabFiles"')
+        assert html.index('id="tabThinking"') < html.index('id="tabNotes"')
+        assert html.index('id="tabNotes"') < html.index('id="tabFiles"')
         assert 'rightTab: "todo"' in script, "the panel must open on the plan"
+
+    def test_the_notebook_has_a_panel_of_its_own(self, script):
+        """It is the agent's memory of the project, and it was invisible.
+
+        `remember` writes it, every later conversation is given it, and the only
+        way to read it was to find `.surtitle/notes.md` on disk.
+        """
+        assert "function renderNotes(" in script
+        block = script[script.index("async function loadNotes(") :]
+        block = block[: block.index("\n}\n")]
+        assert "/notes`" in block, "it reads the notebook from the project route"
+
+    def test_an_empty_notebook_says_what_it_is_for(self, script):
+        assert "Nothing recorded yet" in script, (
+            "an empty panel that does not explain itself reads as broken"
+        )
+
+    def test_a_notebook_write_refreshes_the_panel(self, script):
+        """The agent just changed the thing being displayed."""
+        block = script[script.index('case "tool_result": {') :]
+        block = block[: block.index("break;")]
+        assert "state.notes = null" in block
 
     def test_the_plan_tab_is_never_hidden(self, html, script):
         """A primary tab that appears only once a plan exists is one nobody finds."""

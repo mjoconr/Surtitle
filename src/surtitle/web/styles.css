@@ -1422,6 +1422,9 @@ button, input, textarea, select {
   gap: 4px;
   padding: 8px;
   border-bottom: 0.5px solid var(--dsw-alias-border-l3);
+  /* Four tabs in a panel this narrow: wrapping onto a second row is better than
+     squeezing the labels until they are unreadable. */
+  flex-wrap: wrap;
 }
 
 .tab {
@@ -1441,6 +1444,37 @@ button, input, textarea, select {
 }
 
 .rightbar__body { flex: 1; overflow: auto; padding: 10px 12px; min-height: 0; }
+
+/* The project notebook.
+ *
+ * Rendered as prose rather than as a file: it is what the agent decided was
+ * worth keeping, and reading it should not feel like opening a source file. */
+.notes__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+  font: var(--dsw-font-xxs-12);
+  color: var(--dsw-alias-label-caption);
+}
+
+.notes__path {
+  font-family: var(--ds-font-family-code);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.notes__count { flex: none; }
+
+.notes__body {
+  font-size: var(--dsh-content-font-size-secondary);
+  line-height: 20px;
+  color: var(--dsw-alias-label-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
 
 /* How full the model's context window is.
  *

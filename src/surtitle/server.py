@@ -937,6 +937,40 @@ def build_api(state: AppState) -> APIRouter:
             return _error(400, result.error or "Cannot list that folder.")
         return result.data
 
+    @api.get("/projects/{project_id}/notes")
+    async def project_notebook(project_id: str) -> Any:
+        """The project notebook, as the agent has written it.
+
+        Read-only, and separate from the file route on purpose: the notebook is
+        the one file the agent maintains as its own memory of the project, it
+        lives in the project's `.surtitle/` directory rather than in the working
+        tree, and the UI shows it as a panel rather than as a file to open. These
+        are the notes the model is given at the start of every conversation, so
+        this is what "what does it know about this project" means in practice —
+        and until now the only way to read them was to find the file.
+        """
+        project = _project_or_404(state, project_id)
+        root = Path(project.root)
+        path = environment.notes_path(root)
+        text = environment.read_notes(root)
+        try:
+            updated_at: float | None = path.stat().st_mtime
+        except OSError:
+            updated_at = None
+        try:
+            shown_path = str(path.relative_to(root))
+        except ValueError:  # pragma: no cover - only if the layout is unusual
+            shown_path = str(path)
+        return {
+            "notes": text,
+            "path": shown_path,
+            "chars": len(text),
+            # The model reads a capped version; the panel shows all of it, so say
+            # when the two differ rather than letting the cap be invisible.
+            "elided": len(text) > environment.NOTES_MAX_CHARS,
+            "updated_at": updated_at,
+        }
+
     @api.get("/projects/{project_id}/file")
     async def project_file(project_id: str, path: str) -> Any:
         """Serve one project file for preview or download."""
