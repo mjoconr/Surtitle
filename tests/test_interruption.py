@@ -253,7 +253,11 @@ class TestApprovalSurvivesTheReplyFinishing:
 
         await session._on_speaking_finished()
 
-        states = [e["data"].get("state") for e in _queued(session) if e["kind"] == "state"]
+        states = [
+            e["data"]["state"]
+            for e in _queued(session)
+            if e["kind"] == "state" and "state" in e["data"]
+        ]
         assert states == [], (
             f"finishing the reply broadcast {states}, which is what dismissed the prompt"
         )
@@ -270,7 +274,11 @@ class TestApprovalSurvivesTheReplyFinishing:
 
         await session._on_speaking_finished()
 
-        states = [e["data"].get("state") for e in _queued(session) if e["kind"] == "state"]
+        states = [
+            e["data"]["state"]
+            for e in _queued(session)
+            if e["kind"] == "state" and "state" in e["data"]
+        ]
         assert states == [SessionState.IDLE.value]
 
 

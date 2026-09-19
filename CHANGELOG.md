@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Your words are no longer thrown away while the agent is speaking.** Echo
+  suppression exists to stop the agent transcribing its own voice, and it is
+  released when the synthesiser reports that it has finished. When that release
+  did not come, every transcript was silently discarded for the rest of the
+  session: in the session this was found in, a complete sentence — "The question
+  is, uh, is the slower speed losing more than we…" — was transcribed and then
+  dropped, forty seconds after playback had stopped, with the microphone
+  apparently open and loud audio arriving. Suppression is now bounded by the audio
+  actually sent: a silence longer than that audio could still account for lifts it
+  and writes a warning naming how many transcripts were lost. The UI also shows
+  when speech is being suppressed ("Listening (agent speaking)"), so the one voice
+  failure that used to leave no trace on screen is visible while it is happening.
+- **A sentence is no longer cut in half and answered a piece at a time.** A
+  recogniser's end of turn is not always the end of what you were saying: "So we
+  could work out a simulation" and "of this." were reported 1.5 seconds apart as
+  two turns, so the agent began answering half a sentence and the fragments that
+  followed cancelled the turn before it. An utterance is now held briefly
+  (`SURTITLE_STT_MERGE_HOLD_MS`, default 1200 ms) and anything that continues it
+  is merged into one message before the agent sees it, bounded by
+  `SURTITLE_STT_MERGE_MAX_MS` so a speaker who never pauses still gets an answer.
+
 ## [0.7.0] - 2026-09-19
 
 ### Fixed

@@ -144,6 +144,21 @@ class Session:
     # a transcript can, and only a transcript may interrupt a turn.
     _speaking: bool = False
     _speech_since_playback: bool = False
+    # When audio for the agent's voice last went to the browser, and how much of
+    # it there was. Together they answer "should we still be able to hear
+    # ourselves speaking?" without depending on the synthesiser reporting that it
+    # has finished.
+    _last_audio_out_at: float = 0.0
+    _last_audio_out_seconds: float = 0.0
+    _suppression_released: bool = False
+    _suppression_watchdog: asyncio.Task[None] | None = None
+    # An utterance being held for continuation: the text so far, whether a hold
+    # is already scheduled, how long it may last, and the task that will deliver
+    # it. Deliberately not a lock around the handler — see `_on_transcript`.
+    _utterance_buffer: str = ""
+    _utterance_pending: bool = False
+    _utterance_deadline: float = 0.0
+    _commit_task: asyncio.Task[None] | None = None
     # Set when an interrupted turn was already written to the transcript.
     _rolled_back: bool = False
     registry: Any = None
@@ -213,6 +228,9 @@ class Session:
         self.registry = await self._build_registry()
 
         self._drainer = asyncio.create_task(self._drain_outbox(), name="session-outbox")
+        self._suppression_watchdog = asyncio.create_task(
+            self._watch_echo_suppression(), name="echo-suppression-watchdog"
+        )
 
         trusted = self.store.get_project(self.project_id)
         if trusted is not None and trusted.auto_approved:
@@ -304,6 +322,16 @@ class Session:
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await self._drainer
             self._drainer = None
+        if self._commit_task is not None:
+            self._commit_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await self._commit_task
+            self._commit_task = None
+        if self._suppression_watchdog is not None:
+            self._suppression_watchdog.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await self._suppression_watchdog
+            self._suppression_watchdog = None
         # Bounded teardown: a stalled socket must not hold the disconnect path
         # open, and an un-awaited task is what produces "Task was destroyed but it
         # is pending" on shutdown.
@@ -412,6 +440,7 @@ class Session:
         if self.stt is None:
             return
         self.stt.set_suppression(open_ and self._is_speaking())
+        self._announce_suppression(open_ and self._is_speaking())
         if not open_ and self._state.interim:
             self._state.interim = ""
             await self.emit(EventKind.INTERIM, text="")
@@ -431,13 +460,18 @@ class Session:
         self._turn = asyncio.create_task(self._run_turn(cleaned), name="agent-turn")
 
     async def _on_transcript(self, event: TranscriptEvent) -> None:
-        """Handle a transcription update from Deepgram.
+        """Handle one transcription update, without blocking the recogniser.
 
         Updates are accumulated rather than replaced. The two backends report
         differently — Flux sends the transcript for the turn so far, a word-level
         stream sends successive fragments — and overwriting would hand the model
         only the final fragment of a sentence. :meth:`_accumulate` handles
         cumulative and fragment-shaped updates with the same logic.
+
+        An end-of-turn **schedules** delivery rather than performing it, because
+        the delivery waits to see whether the sentence continues. Awaiting that
+        wait here would stall the recogniser's pump, so the rest of the sentence
+        could not arrive — which is exactly the text the wait exists to collect.
         """
         if event.text.strip() and self._speaking:
             # Someone is talking over the agent. This is the only reliable signal
@@ -451,29 +485,87 @@ class Session:
             end_of_turn=event.is_end_of_turn,
         )
 
-        if event.is_end_of_turn:
-            utterance = self._state.interim.strip()
-            self._state.interim = ""
-            if not utterance:
-                # A turn boundary with nothing transcribable: the user may simply
-                # have paused. Starting a turn on silence would answer nothing.
-                return
+        if not event.is_end_of_turn:
+            return
 
-            # A new spoken turn: barge in on anything still playing first.
-            if self._is_speaking():
-                await self.barge_in()
-            if self._turn is not None and not self._turn.done():
-                self._turn.cancel()
-                with contextlib.suppress(asyncio.CancelledError, Exception):
-                    await self._turn
-            log.info(
-                "utterance from audio (%d frame(s), %.2fs): %r",
-                self._frames_in,
-                self._audio_seconds,
-                utterance[:120],
+        utterance = self._state.interim.strip()
+        self._state.interim = ""
+        if not utterance:
+            # A turn boundary with nothing transcribable: the user may simply
+            # have paused. Starting a turn on silence would answer nothing.
+            return
+
+        now = asyncio.get_running_loop().time()
+        if not self._utterance_pending:
+            # The first boundary of this thought: how long we may wait for the
+            # rest of it before answering what we have.
+            self._utterance_pending = True
+            self._utterance_deadline = (
+                now + max(self.settings.stt_merge_hold_ms, self.settings.stt_merge_max_ms) / 1000.0
             )
-            await self.emit(EventKind.USER_TEXT, text=utterance, source="voice")
-            self._turn = asyncio.create_task(self._run_turn(utterance), name="agent-turn")
+        # Extra text that arrived while a commit was already scheduled does not
+        # need a second wait — the scheduled commit will collect it.
+        if self._commit_task is not None and not self._commit_task.done():
+            self._utterance_buffer = f"{self._utterance_buffer} {utterance}".strip()
+            return
+
+        self._utterance_buffer = utterance
+        self._commit_task = asyncio.create_task(self._commit_speech(), name="speech-commit")
+
+    async def _commit_speech(self) -> None:
+        """Deliver what was said, once speech has actually stopped.
+
+        A recogniser's end of turn is not always the end of a sentence. On a real
+        session "So we could work out a simulation" and "of this." were reported
+        1.5 seconds apart as two turns, so the agent answered half a sentence and
+        the fragments after it cancelled the turn before it existed.
+
+        The wait is per arrival of *new* text, not a flat delay: once a full
+        window passes with nothing further transcribed, the sentence is over and
+        waiting longer only delays the answer. That is what keeps two separate
+        questions from being run together, which a fixed hold on every utterance
+        would do to anyone who pauses between sentences.
+        """
+        hold = max(0.05, self.settings.stt_merge_hold_ms / 1000.0)
+        if self.settings.stt_merge_hold_ms <= 0:
+            hold = 0.0
+        cap = max(hold, self.settings.stt_merge_max_ms / 1000.0)
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        seen = self._utterance_buffer
+
+        while hold:
+            await asyncio.sleep(hold)
+            if self._utterance_buffer == seen:
+                break
+            seen = self._utterance_buffer
+            if loop.time() - started >= cap:
+                log.info("held utterance reached its ceiling; delivering it")
+                break
+
+        utterance = self._utterance_buffer.strip()
+        self._utterance_buffer = ""
+        self._utterance_pending = False
+        if utterance:
+            await self._start_spoken_turn(utterance)
+
+    async def _start_spoken_turn(self, utterance: str) -> None:
+        """Begin a turn from what was said aloud."""
+        # A new spoken turn: barge in on anything still playing first.
+        if self._is_speaking():
+            await self.barge_in()
+        if self._turn is not None and not self._turn.done():
+            self._turn.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await self._turn
+        log.info(
+            "utterance from audio (%d frame(s), %.2fs): %r",
+            self._frames_in,
+            self._audio_seconds,
+            utterance[:120],
+        )
+        await self.emit(EventKind.USER_TEXT, text=utterance, source="voice")
+        self._turn = asyncio.create_task(self._run_turn(utterance), name="agent-turn")
 
     @staticmethod
     def _accumulate(existing: str, incoming: str) -> str:
@@ -1050,8 +1142,64 @@ class Session:
         return bool(self.tts and self.tts.is_speaking)
 
     async def _on_audio_out(self, audio: bytes, sequence: int) -> None:
-        """Relay synthesised audio to the browser as a binary frame."""
+        """Relay synthesised audio to the browser as a binary frame.
+
+        The clock is stamped as the audio leaves, which is what the suppression
+        watchdog measures against: while the agent's voice is still going out,
+        suppression is doing its job, and when it has stopped going out for
+        longer than this audio could still be playing, suppression is stale.
+        """
+        self._last_audio_out_at = asyncio.get_running_loop().time()
+        self._last_audio_out_seconds = len(audio) / 2 / max(1, self.settings.tts_sample_rate)
+        self._suppression_released = False
         await self.send_audio(audio)
+
+    async def _watch_echo_suppression(self) -> None:
+        """Lift echo suppression when it outlives the agent's own audio.
+
+        Suppression stops the recogniser transcribing the agent's own voice. It
+        is armed when speech starts and released when the synthesiser says it has
+        finished — and if that release never comes, every transcript is silently
+        discarded for the rest of the session. That is not hypothetical: in a real
+        session the counter reported 25 discarded Flux transcripts in one burst,
+        including a complete sentence, tens of seconds after playback had stopped.
+        From the user's side the microphone simply stops working.
+
+        The bound is measured against the audio actually sent, so an ordinary
+        pause between sentences does not release it: only a silence longer than
+        the audio that is already in flight could account for.
+        """
+        margin = max(0, self.settings.echo_suppression_max_ms) / 1000.0
+        while not self._closed:
+            await asyncio.sleep(0.5)
+            if self.stt is None or not self._speaking or self._suppression_released:
+                continue
+            now = asyncio.get_running_loop().time()
+            silent_for = now - self._last_audio_out_at
+            if silent_for <= self._last_audio_out_seconds + margin:
+                continue
+            self._suppression_released = True
+            log.warning(
+                "echo suppression had outlived the agent's audio by %.1fs "
+                "(%d transcript(s) were discarded while it was on); releasing it",
+                silent_for - self._last_audio_out_seconds,
+                getattr(self.stt, "_suppressed_transcripts", 0),
+            )
+            self.stt.set_suppression(False)
+            self._announce_suppression(False)
+
+    def _announce_suppression(self, suppressed: bool) -> None:
+        """Tell the UI whether what the user says can currently reach the agent.
+
+        Discarded transcripts are the one voice failure that leaves no trace on
+        screen: the microphone looks open, audio is arriving, and the words
+        simply do not appear. In the session this was found in, a complete
+        sentence was transcribed and thrown away and nothing said so. The UI shows
+        this state so that failure is visible while it is happening.
+        """
+        self._outbox.put_nowait(
+            Event(kind=EventKind.STATE, seq=0, data={"echo_suppressed": bool(suppressed)})
+        )
 
     async def _on_speaking_started(self) -> None:
         """Mark the session as speaking and suppress echo-contaminated finals.
@@ -1077,6 +1225,7 @@ class Session:
 
         if self.stt is not None:
             self.stt.set_suppression(True)
+            self._announce_suppression(True)
         log.info("speaking started; echo suppression on")
 
     def _turn_in_flight(self) -> bool:
@@ -1088,6 +1237,7 @@ class Session:
         self._speaking = False
         if self.stt is not None:
             self.stt.set_suppression(False)
+            self._announce_suppression(False)
         # Worth a line: while this never ran, echo suppression stayed on for the
         # rest of the session and every later transcript was discarded — which is
         # indistinguishable from a dead microphone, and produced no log output.
@@ -1103,6 +1253,7 @@ class Session:
                 await self.tts.barge_in()
         if self.stt is not None:
             self.stt.set_suppression(False)
+            self._announce_suppression(False)
         self._set_state(SessionState.LISTENING if self._state.mic_open else SessionState.IDLE)
 
     async def cancel_turn(self, *, require_speech: bool = False) -> None:

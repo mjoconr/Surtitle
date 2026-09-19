@@ -88,6 +88,62 @@ leans toward waiting, and it still cannot tell "and then…" from "and that is a
 If that matters, use the hosted engine for recognition and the local one only for
 speech.
 
+## A turn boundary is not a sentence boundary
+
+Neither engine knows where your sentence ends — Flux infers it, the local
+heuristic guesses it — and both get it wrong in the same direction. Measured on a
+real session:
+
+```
+11:03:59  utterance (64.03s): 'So we could work out a simulation'
+11:04:00  utterance (65.60s): 'of this.'
+```
+
+Two turns, 1.5 seconds apart, half a sentence each. The agent started answering
+the first and the second cancelled it, so the user got a reply to a fragment and
+none to the question.
+
+`SURTITLE_STT_MERGE_HOLD_MS` (default 1200 ms) fixes this from the session side,
+where it applies to both engines: when a turn ends the text is held, and anything
+arriving during the hold is merged into one utterance before the model sees it. The
+recogniser keeps running throughout — the hold defers the *commit* rather than
+blocking the stream, without which the continuation it is waiting for could never
+arrive. `SURTITLE_STT_MERGE_MAX_MS` (default 20 s) bounds the wait so a speaker who
+never pauses still gets an answer. Set the hold to 0 to commit the instant the
+engine declares the turn over.
+
+The cost is up to 1.2 s of extra latency on every spoken turn. That is the trade
+the merging makes, and it is the reason the value is a setting rather than a
+constant.
+
+## Echo suppression, and how it fails
+
+While the agent's voice is playing, transcripts are discarded as echo. Browser
+echo cancellation does most of this; suppression is the safety net for devices
+where it is unavailable or imperfect. It is armed when speech starts and released
+when the synthesiser reports that it has finished.
+
+Both halves of that have failed in production, and the failure mode is the worst
+one available: **every transcript is discarded, so the microphone appears dead**
+while the log stays quiet. In the session that produced this section the counter
+reported 25 discarded Flux transcripts in one burst — including the complete
+sentence "The question is, uh, is the slower speed losing more than we…" — tens of
+seconds after playback had stopped.
+
+Two things now bound it:
+
+- `_watch_echo_suppression` releases it once no audio has been sent for longer
+  than the audio last sent could still be playing, plus
+  `SURTITLE_ECHO_SUPPRESSION_MAX_MS` (default 1500 ms). The bound is measured
+  against the audio rather than a flat clock, so an ordinary pause between
+  sentences does not release it and let the agent hear itself.
+- The UI is told whenever suppression changes, so the microphone reads
+  "Listening (agent speaking)" rather than a bare "Listening" that claims to be
+  hearing you when it is not.
+
+Lifting it this way logs a warning naming how many transcripts were lost, because
+the alternative — silence — is what made this take so long to find.
+
 sherpa-onnx ships its own endpoint rules (`rule1`/`rule2`/`rule3`). They are
 deliberately **disabled** (`enable_endpoint_detection=False`) because they fire
 inside the recogniser, before this module can apply the extension — using both

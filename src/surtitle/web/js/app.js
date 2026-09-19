@@ -40,9 +40,13 @@ const state = {
   // plan that forgets itself on refresh is worse than none.
   todos: [],
   micOpen: false,
+  // True while the server is discarding transcripts as the agent's own voice.
+  echoSuppressed: false,
   // Set from the server's ready event; false disables the mic button.
   voiceAvailable: true,
   pendingApproval: null,
+  // A stop notice held back until the live conversation has been heard from.
+  pendingStopNote: null,
   // The last thing the user asked for, so a step-limited turn can be resumed
   // without retyping it.
   lastUserText: "",
@@ -1193,6 +1197,39 @@ function setAgentState(name) {
   el.agentStateLabel.textContent = label;
 }
 
+/**
+ * Say whether what you say can currently reach the agent.
+ *
+ * Echo suppression silently discards transcripts while the agent's own voice is
+ * playing. When it fails to lift, everything the user says vanishes with the
+ * microphone looking open and audio arriving — the one voice failure that leaves
+ * no trace on screen. Showing the state is what makes it diagnosable while it is
+ * happening rather than afterwards from the log.
+ */
+function setEchoSuppressed(suppressed) {
+  state.echoSuppressed = Boolean(suppressed);
+  el.micButton.dataset.suppressed = String(Boolean(suppressed));
+  renderMicLabel();
+}
+
+/**
+ * The microphone label, in one place.
+ *
+ * "Listening" is a claim about whether what you say reaches the agent, and it
+ * was written by three different call sites — so a turn ending, or capture
+ * starting, could overwrite the suppressed state with a plain "Listening" while
+ * transcripts were still being discarded.
+ */
+function renderMicLabel() {
+  if (!state.micOpen) {
+    el.micLabel.textContent = "Mic off";
+    return;
+  }
+  el.micLabel.textContent = state.echoSuppressed
+    ? "Listening (agent speaking)"
+    : "Listening";
+}
+
 function setConnection(name, label) {
   el.connection.dataset.state = name === ConnectionState.OPEN ? "idle" : "error";
   el.connectionLabel.textContent = label;
@@ -1255,6 +1292,20 @@ function handleEvent(event) {
       // A resumed session restates its state, so a reconnect mid-turn does not
       // leave the status indicator stuck on whatever it showed before.
       if (data.resumed && data.state) setAgentState(data.state);
+      if (typeof data.echo_suppressed === "boolean") setEchoSuppressed(data.echo_suppressed);
+      // A conversation whose stored transcript ends mid-process only *looks*
+      // stopped: the answer is written when the turn finishes. If the live
+      // session says it is still working, it has not stopped, and offering to
+      // continue would start a second turn on top of the one already running.
+      if (state.pendingStopNote) {
+        const live = ["thinking", "tool", "awaiting_approval", "speaking"].includes(data.state);
+        if (live) {
+          state.pendingStopNote = null;
+        } else {
+          showStopNote(state.pendingStopNote, null);
+          state.pendingStopNote = null;
+        }
+      }
       renderRightbar();
       break;
     }
@@ -1275,6 +1326,7 @@ function handleEvent(event) {
           clearApproval();
           if (state.currentTurn) finishTimers(state.currentTurn);
         }
+        if (typeof data.echo_suppressed === "boolean") setEchoSuppressed(data.echo_suppressed);
         // A turn that is working needs its clock running from the moment it says
         // so, not from the first thing it happens to think or run. "Thinking" with
         // no counter is the state that reads as a hang.
@@ -1314,6 +1366,7 @@ function handleEvent(event) {
       // stored conversation, and this is only what the composer re-offers.
       state.lastUserText = data.text || "";
       state.currentTurn = null;
+      state.pendingStopNote = null;
       el.captions.replaceChildren();
       hideStopNote();
       break;
@@ -1804,7 +1857,7 @@ async function toggleMic() {
       state.micOpen = false;
       el.micButton.dataset.active = "false";
       el.micButton.setAttribute("aria-pressed", "false");
-      el.micLabel.textContent = "Mic off";
+      renderMicLabel();
       connection.sendCommand("mic", { open: false });
       setAgentState("idle");
       el.captions.replaceChildren();
@@ -1833,7 +1886,7 @@ async function toggleMic() {
     state.micOpen = true;
     el.micButton.dataset.active = "true";
     el.micButton.setAttribute("aria-pressed", "true");
-    el.micLabel.textContent = "Listening";
+    renderMicLabel();
     connection.sendCommand("mic", { open: true });
     setAgentState("listening");
     el.captions.replaceChildren();
@@ -2141,6 +2194,7 @@ async function selectSession(sessionId) {
   state.activity = [];
   state.todos = Array.isArray(session.todos) ? session.todos : [];
   state.lastUserText = "";
+  state.pendingStopNote = null;
   hideStopNote();
 
   // Replay the stored transcript so reopening a conversation shows its history,
@@ -2235,14 +2289,18 @@ async function selectSession(sessionId) {
       }
     }
 
-    // Work with no answer after it: the store ends mid-process. Show it rather
-    // than dropping what the user watched happen, and say that it stopped —
-    // otherwise a reopened conversation looks like an answer that trailed off.
+    // Work with no answer after it: the stored conversation ends mid-process.
+    // Show the work rather than dropping what the user watched happen, but do not
+    // announce a stop yet — a turn that is still running looks exactly like this
+    // from the store, because its answer is not written until it finishes. The
+    // live conversation is asked first (`ready`), and only a quiet one is told it
+    // stopped. Showing it here made a refresh during a long turn claim the agent
+    // had stopped and offer to continue work that was still in progress.
     if (thinking.size || looseThinking.length || tookStep.size) {
       const turn = beginTurn("assistant");
       for (const [index, text] of thinking) addThinking(turn, text, index);
       attachLoose(turn);
-      showStopNote({ reason: "step_limit", detail: STOPPED_WITHOUT_ANSWER }, turn);
+      state.pendingStopNote = { reason: "step_limit", detail: STOPPED_WITHOUT_ANSWER };
     }
     state.currentTurn = null;
   });

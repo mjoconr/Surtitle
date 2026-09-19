@@ -169,6 +169,33 @@ class Settings(BaseSettings):
     # Capture rate is fixed by Deepgram's linear16 expectation.
     stt_sample_rate: int = Field(default=16000, alias="SURTITLE_STT_SAMPLE_RATE")
     voice_enabled: bool = Field(default=True, alias="SURTITLE_VOICE")
+    # How long to keep listening after the recogniser declares the end of a turn.
+    #
+    # The end of a *turn* as the recogniser sees it is not always the end of a
+    # sentence: on a real session "So we could work out a simulation" and "of
+    # this." arrived 1.5 s apart as two turns, and the agent answered the first
+    # before the second existed. Holding the text briefly and merging anything
+    # that follows costs a fraction of a second of latency and is the difference
+    # between answering the sentence and answering half of it.
+    #
+    # Raise it if speech is still being split; set it to 0 to commit the moment
+    # the recogniser says the turn ended.
+    stt_merge_hold_ms: int = Field(default=1200, alias="SURTITLE_STT_MERGE_HOLD_MS")
+    # Ceiling on how long one held utterance may keep growing. A speaker who
+    # never pauses must still reach the model, so the hold applies after a turn
+    # boundary rather than indefinitely.
+    stt_merge_max_ms: int = Field(default=20000, alias="SURTITLE_STT_MERGE_MAX_MS")
+    # How long echo suppression may outlive the agent's own audio before it is
+    # lifted regardless.
+    #
+    # Suppression exists to stop the agent transcribing its own voice. Left on by
+    # a synthesiser that never reports itself idle, it silently discards
+    # everything the user says — which looks exactly like a dead microphone. In
+    # the session this was found in, a complete sentence was transcribed and then
+    # thrown away because suppression was still on forty seconds after playback
+    # stopped. This bounds that: measured against the audio last sent, so a real
+    # pause between sentences does not release it.
+    echo_suppression_max_ms: int = Field(default=1500, alias="SURTITLE_ECHO_SUPPRESSION_MAX_MS")
 
     # --- local (sherpa-onnx) voice ---------------------------------------
     # Model names are registry keys in :mod:`surtitle.voice.models`, not
