@@ -8,6 +8,9 @@ the happy path is the easy part.
 
 from __future__ import annotations
 
+from pathlib import Path
+from urllib.parse import quote
+
 import httpx
 import pytest
 
@@ -15,8 +18,10 @@ from surtitle.tools import web_tools
 from surtitle.tools.fs_tools import ToolContext
 from surtitle.tools.registry import (
     WEB_FETCH_TOOL,
+    WEB_SEARCH_TOOL,
     ToolRegistry,
     _web_fetch_handler,
+    _web_search_handler,
     default_tool_list,
 )
 
@@ -263,3 +268,196 @@ class TestThroughTheTool:
         child = ToolRegistry(default_tool_list()).read_only()
 
         assert WEB_FETCH_TOOL not in child.names()
+
+
+def _results_html(*rows: tuple[str, str, str]) -> bytes:
+    """A result list shaped like the endpoint's, for the parser to read.
+
+    Written from a real response, because the parser keys on the endpoint's class
+    names — which is the fragile part of a scrape, and the reason a page that does
+    not look like this has to be reported as unreadable rather than as empty.
+    """
+    parts = []
+    for title, url, snippet in rows:
+        wrapped = f"//duckduckgo.com/l/?uddg={quote(url, safe='')}&rut=abc123"
+        parts.append(
+            f'<div class="result"><h2 class="result__title">'
+            f'<a rel="nofollow" class="result__a" href="{wrapped}">{title}</a></h2>'
+            f'<a class="result__snippet" href="{wrapped}">{snippet}</a></div>'
+        )
+    return ("<html><body>" + "".join(parts) + "</body></html>").encode()
+
+
+class TestSearching:
+    def test_results_come_back_with_their_real_addresses(self, resolves_public):
+        """The href in the markup is DuckDuckGo's own redirect. The model must be
+        given where the result actually goes."""
+        transport = httpx.MockTransport(
+            lambda request: _page(
+                _results_html(
+                    ("Release notes", "https://example.test/notes", "Version 2 fixed it."),
+                    ("Changelog", "https://example.test/log", "What changed, and when."),
+                )
+            )
+        )
+
+        found = web_tools.search("release notes", transport=transport)
+
+        assert [hit.url for hit in found.hits] == [
+            "https://example.test/notes",
+            "https://example.test/log",
+        ]
+        assert found.hits[0].title == "Release notes"
+        assert found.hits[0].snippet == "Version 2 fixed it."
+        assert found.unreadable is False
+
+    def test_the_query_is_sent_as_the_endpoint_expects(self, resolves_public):
+        seen: dict[str, str] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["url"] = str(request.url)
+            return _page(_results_html(("A", "https://example.test/a", "s")))
+
+        web_tools.search("  two   words  ", transport=httpx.MockTransport(handler))
+
+        assert "html.duckduckgo.com" in seen["url"]
+        assert "q=two+words" in seen["url"], "whitespace collapsed, not sent as typed"
+
+    def test_the_bot_challenge_is_reported_as_blocked(self, resolves_public):
+        """Measured against the real endpoint: the first query returned results and
+        every query after it got this page — as `202 Accepted`, not as an error
+        status. It is the commonest outcome of a keyless scrape, so it has to be
+        distinguishable from both 'nothing matched' and 'the markup moved'."""
+        body = (
+            b"<html><body>Unfortunately, bots use DuckDuckGo too. Please complete the "
+            b"following challenge to confirm this search was made by a human.</body></html>"
+        )
+        transport = httpx.MockTransport(lambda request: _page(body, status=202))
+
+        found = web_tools.search("anything", transport=transport)
+
+        assert found.blocked is True
+        assert found.hits == []
+        assert found.unreadable is False, "blocked and unreadable are different answers"
+
+    def test_the_challenge_is_recognised_even_if_the_status_changes(self, resolves_public):
+        """The marker is checked as well as the 202, so a change on their side does
+        not turn 'you are rate-limited' into 'the markup moved'."""
+        body = b"<html><body>Please complete the following challenge.</body></html>"
+        transport = httpx.MockTransport(lambda request: _page(body, status=200))
+
+        found = web_tools.search("anything", transport=transport)
+
+        assert found.blocked is True
+
+    def test_a_page_this_cannot_read_is_not_an_empty_search(self, resolves_public):
+        """The distinction the whole tool turns on: 'the markup moved' and 'nothing
+        matched' are different things to tell somebody."""
+        transport = httpx.MockTransport(
+            lambda request: _page(b"<html><body><p>A new layout.</p></body></html>")
+        )
+
+        found = web_tools.search("anything", transport=transport)
+
+        assert found.hits == []
+        assert found.unreadable is True
+
+    def test_a_page_of_results_with_nothing_usable_is_not_unreadable(self, resolves_public):
+        """The endpoint did not once produce an empty result page in testing — even a
+        nonsense query came back with fuzzy matches — so 'readable but empty' is the
+        state for a page whose results this tool cannot use, not for a real 'nothing
+        matched'. Saying which is which is the point."""
+        body = b'<html><body><a class="result__a" href="javascript:alert(1)">nope</a></body></html>'
+        transport = httpx.MockTransport(lambda request: _page(body))
+
+        found = web_tools.search("anything", transport=transport)
+
+        assert found.hits == []
+        assert found.unreadable is False
+        assert found.blocked is False
+
+    def test_only_the_requested_number_comes_back(self, resolves_public):
+        rows = tuple((f"R{n}", f"https://example.test/{n}", "s") for n in range(10))
+        transport = httpx.MockTransport(lambda request: _page(_results_html(*rows)))
+
+        found = web_tools.search("many", limit=3, transport=transport)
+
+        assert len(found.hits) == 3
+
+    def test_a_result_that_is_not_a_web_address_is_dropped(self, resolves_public):
+        """Offering the model something `web_fetch` would refuse is a dead end."""
+        body = (
+            b'<html><body><a class="result__a" href="javascript:alert(1)">nope</a>'
+            b'<a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fok.test%2F">yes</a>'
+            b"</body></html>"
+        )
+        transport = httpx.MockTransport(lambda request: _page(body))
+
+        found = web_tools.search("mixed", transport=transport)
+
+        assert [hit.url for hit in found.hits] == ["https://ok.test/"]
+
+    def test_an_empty_query_is_refused(self, resolves_public):
+        with pytest.raises(web_tools.FetchError, match="search for"):
+            web_tools.search("   ", transport=httpx.MockTransport(lambda r: _page(b"")))
+
+    def test_an_overlong_query_is_refused_rather_than_sent(self, resolves_public):
+        with pytest.raises(web_tools.FetchError, match="limit"):
+            web_tools.search("x" * 5000, transport=httpx.MockTransport(lambda r: _page(b"")))
+
+
+class TestSearchingThroughTheTool:
+    def test_the_results_are_given_to_the_model(self, monkeypatch):
+        monkeypatch.setattr(
+            web_tools,
+            "search",
+            lambda query: web_tools.SearchResults(
+                query=query,
+                hits=[web_tools.SearchHit("T", "https://example.test/", "S")],
+            ),
+        )
+
+        result = _web_search_handler(ToolContext(root=Path(".")), query="anything")
+
+        assert result.ok is True
+        assert (result.data or {})["results"][0]["url"] == "https://example.test/"
+        assert "snippet is not the page" in (result.data or {})["note"]
+
+    def test_an_unreadable_page_says_so_rather_than_nothing_found(self, monkeypatch):
+        monkeypatch.setattr(
+            web_tools, "search", lambda query: web_tools.SearchResults(query=query, unreadable=True)
+        )
+
+        result = _web_search_handler(ToolContext(root=Path(".")), query="anything")
+
+        assert result.ok is False
+        assert "could not read" in (result.error or "")
+        assert "nothing exists" in (result.error or ""), "and warns against that conclusion"
+
+    def test_a_broken_endpoint_is_a_result_not_an_exception(self, monkeypatch):
+        def explodes(query):
+            raise RuntimeError("connection reset")
+
+        monkeypatch.setattr(web_tools, "search", explodes)
+
+        result = _web_search_handler(ToolContext(root=Path(".")), query="anything")
+
+        assert result.ok is False
+        assert "Could not search" in (result.error or "")
+
+    def test_no_query_is_a_tool_error(self):
+        result = _web_search_handler(ToolContext(root=Path(".")), query="  ")
+
+        assert result.ok is False
+
+    def test_the_query_is_what_the_user_is_asked_to_approve(self):
+        """The query is the part of a search that leaves the machine."""
+        tool = next(t for t in default_tool_list() if t.name == WEB_SEARCH_TOOL)
+
+        assert tool.approval == "ask"
+        assert tool.mutating is False
+
+    def test_a_sub_agent_cannot_be_given_it(self):
+        child = ToolRegistry(default_tool_list()).read_only()
+
+        assert WEB_SEARCH_TOOL not in child.names()

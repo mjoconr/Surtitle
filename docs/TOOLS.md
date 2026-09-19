@@ -24,7 +24,7 @@ asks about packages the project has not already approved.
 | `goal_write` | never | no |
 | `subagent` | never | no |
 | `skill` | never | no |
-| `web_fetch` | ask | no |
+| `web_fetch`, `web_search` | ask | no |
 | `write_file`, `edit_file` | ask | yes |
 | `run_python`, `run_shell` | ask | yes |
 | `run_background` | ask | yes |
@@ -123,8 +123,37 @@ so a name server that answers differently in between could still land on a priva
 address. Pinning the validated address would close that and break virtual hosting
 and TLS verification. This is a single-user tool on the user's own machine.
 
-There is no search. The agent needs a URL, or one it can build from something it has
-read.
+**`web_search`** finds candidates when there is no URL to fetch: it returns a handful
+of results, each a title, a URL and a snippet. The snippet is not the page and a
+result is not evidence — the agent is told to read the promising ones with
+`web_fetch` before relying on them, and to search only after the project's own files
+and skills have been tried.
+
+It is a **scrape, and it says so.** There is no key-free search API, so the query goes
+to DuckDuckGo's no-JavaScript HTML endpoint and the results are read out of the
+markup. DuckDuckGo rate-limits that: measured from one machine, the first query
+returned ten results, the next four came back as `202 Accepted` with a *"complete the
+following challenge"* CAPTCHA, and a query several minutes later worked again. So the
+tool has three distinct outcomes, and keeping them apart is most of the design:
+
+| Outcome | What the agent is told |
+|---|---|
+| results | the list, with the note that a snippet is not the page |
+| **blocked** | a bot challenge, not results — do not conclude that nothing exists |
+| **unreadable** | the page was not a result list — the markup changed, not an empty search |
+
+The last two are refusals on purpose. "Nothing matched" is a claim about the world,
+and neither of these is evidence for it. The endpoint also wraps every link in a
+redirect of its own (`//duckduckgo.com/l/?uddg=…`), which is unwrapped here so the
+model is given the address it will actually fetch; a result that is not an `http(s)`
+address is dropped rather than offered as a dead end.
+
+The request itself goes through the same validated path as `web_fetch` — the address
+checks, the manual redirects, the size and content-type limits live in one place —
+and it asks for approval for the same reason: the query is what leaves the machine,
+and the query is what the prompt shows. A sub-agent cannot call either tool: a child
+has a fresh approval broker and nobody watching it, so an `ask` tool inside one would
+wait forever.
 
 ## Execution
 

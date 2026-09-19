@@ -35,6 +35,7 @@ __all__ = [
     "SUBAGENT_TOOL",
     "TODO_TOOL",
     "WEB_FETCH_TOOL",
+    "WEB_SEARCH_TOOL",
     "Tool",
     "ToolRegistry",
     "build_registry_for_project",
@@ -620,6 +621,7 @@ GOAL_TOOL = "goal_write"
 SUBAGENT_TOOL = "subagent"
 SKILL_TOOL = "skill"
 WEB_FETCH_TOOL = "web_fetch"
+WEB_SEARCH_TOOL = "web_search"
 
 # How much of a fetched page the model is given. A page is mostly navigation, and
 # the answer to a question about one is usually near the top; the rest is said to
@@ -823,8 +825,8 @@ _WEB_FETCH = Tool(
         "and this project does not contain it; do not use it for anything the "
         "project's own files answer, because reading them is free and this is not. "
         "It reads http and https, follows redirects, refuses addresses on the local "
-        "network, and returns the beginning of a long page. It cannot search: you "
-        "need the URL, or one you can construct from something you have read."
+        "network, and returns the beginning of a long page. When you do not have a "
+        "URL, web_search finds candidates first."
     ),
     parameters={
         "type": "object",
@@ -838,6 +840,93 @@ _WEB_FETCH = Tool(
     # always have done this — and a project that trusts this tool stops being asked.
     approval="ask",
     summary="Fetch a page from the internet",
+)
+
+
+def _web_search_handler(ctx: ToolContext, query: str = "", **_ignored: Any) -> ToolResult:
+    """Search the web and return the results, as results rather than as a page."""
+    if not str(query or "").strip():
+        return ToolResult(ok=False, error="Give the search something to look for.")
+    try:
+        found = web_tools.search(str(query))
+    except web_tools.FetchError as exc:
+        return ToolResult(ok=False, error=str(exc))
+    except Exception as exc:  # a broken endpoint must not break the turn
+        return ToolResult(ok=False, error=f"Could not search: {type(exc).__name__}: {exc}")
+
+    if found.blocked:
+        # The commonest outcome of a keyless scrape, and not a failure of this tool:
+        # the search did not happen. Saying so is what stops the agent concluding
+        # that the web has nothing on the subject.
+        return ToolResult(
+            ok=False,
+            error=(
+                "DuckDuckGo answered with a bot challenge instead of results, so this "
+                "search did not happen. Searching without an API key is rate-limited — "
+                "a few queries and it asks for a CAPTCHA — so it may work later or may "
+                "not. Do not conclude from it that nothing exists: use web_fetch on a "
+                "URL you know or can construct, or ask the user to look it up."
+            ),
+        )
+
+    if found.unreadable:
+        # Not the same as "nothing matched", and the difference matters: one means
+        # the search worked and there is nothing, the other means nobody knows.
+        return ToolResult(
+            ok=False,
+            error=(
+                "The search endpoint answered with a page this could not read, so there "
+                "are no results to give. That is its markup changing, not an empty "
+                "search — say so rather than concluding nothing exists. web_fetch on a "
+                "known URL still works."
+            ),
+        )
+
+    return ToolResult(
+        ok=True,
+        data={
+            "query": found.query,
+            "count": len(found.hits),
+            "results": [
+                {"title": hit.title or hit.url, "url": hit.url, "snippet": hit.snippet}
+                for hit in found.hits
+            ],
+            "note": (
+                "Titles, URLs and snippets only — a snippet is not the page. Fetch a "
+                "result with web_fetch before relying on what it says."
+            )
+            if found.hits
+            else (
+                "The endpoint answered with a result list and none of its entries was a "
+                "web address this tool could use. That is not evidence the subject does "
+                "not exist; try different words."
+            ),
+        },
+        display=f"{len(found.hits)} result(s) for {found.query[:40]!r}",
+    )
+
+
+_WEB_SEARCH = Tool(
+    name=WEB_SEARCH_TOOL,
+    description=(
+        "Search the web and get back a few results — a title, a URL and a snippet "
+        "each. Use it to find where something is published when you do not already "
+        "have the URL, then read the promising ones with web_fetch, because a snippet "
+        "is not the page and a result is not evidence. Searching is a last resort "
+        "after this project's own files and the skills it teaches."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "query": _string("What to search for, in the words a page about it would use.")
+        },
+        "required": ["query"],
+    },
+    handler=_web_search_handler,
+    # Gated for the same reason web_fetch is: the query is what leaves the machine,
+    # and the query is what the approval prompt shows.
+    approval="ask",
+    summary="Search the web",
 )
 
 
@@ -1026,6 +1115,7 @@ def default_tool_list() -> list[Tool]:
         _READ_FILE,
         _SEARCH_FILES,
         _WEB_FETCH,
+        _WEB_SEARCH,
         _WRITE_FILE,
         _EDIT_FILE,
         _RUN_PYTHON,

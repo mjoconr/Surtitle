@@ -16,10 +16,19 @@ sentence:
   unless they have trusted the tool for the project, and the approval prompt shows
   the URL — which is the part that would carry anything out. That is also why it is
   `approval="ask"` rather than `never`: reading a page is harmless, *sending a
-  request* is not, and the same request through `run_shell` is already gated.
+  request* is not, and the same request through `run_shell` is already gated. A
+  search is gated for the same reason: the query is what leaves.
 * **It cannot be made to return a gigabyte.** The body is read up to a limit, only
   text-ish content types are accepted, and what comes back says how much was left
   out.
+
+Search is a **scrape**, and says so rather than pretending otherwise: it posts the
+query to DuckDuckGo's no-JavaScript HTML endpoint and reads the results out of the
+markup, because there is no key-free search API and the alternative was a key the
+user has to go and get. Nothing here is a contract — the endpoint can change its
+markup, rate-limit, or stop answering — so a search that cannot be read is reported
+as a failure with that explanation rather than as "no results", which is the one
+outcome that would be worse than an error.
 
 Not covered, and worth knowing: the address is validated and then the connection is
 made by hostname, so a name server that answers differently between the two lookups
@@ -31,16 +40,26 @@ fetching on behalf of strangers.
 
 from __future__ import annotations
 
+import html as html_module
 import ipaddress
 import socket
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from typing import ClassVar
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 import httpx
 
-__all__ = ["FetchError", "FetchedPage", "assert_public_url", "fetch_page", "html_to_text"]
+__all__ = [
+    "FetchError",
+    "FetchedPage",
+    "SearchHit",
+    "SearchResults",
+    "assert_public_url",
+    "fetch_page",
+    "html_to_text",
+    "search",
+]
 
 # Redirects are followed one at a time so each hop can be validated. Five is more
 # than any documentation site needs and few enough that a loop cannot run long.
@@ -50,6 +69,19 @@ _MAX_REDIRECTS = 5
 _TIMEOUT = httpx.Timeout(10.0, read=15.0)
 _MAX_BYTES = 2 * 1024 * 1024
 _USER_AGENT = "Surtitle/1.0 (+https://github.com/mjoconr/Surtitle)"
+
+# DuckDuckGo's no-JavaScript endpoint. The ordinary site needs a browser to render
+# anything, so this is the one that answers with results in the markup.
+_SEARCH_URL = "https://html.duckduckgo.com/html/"
+# Enough to choose from, few enough to read. The agent can search again.
+_MAX_RESULTS = 6
+_MAX_QUERY_CHARS = 400
+# A snippet is a sentence or two; the result list is not the page.
+_MAX_SNIPPET_CHARS = 400
+# What the bot challenge says, lowercased. Checked as well as the status, because
+# relying on `202` alone would break the day they change it and take the real reason
+# with it.
+_CHALLENGE_MARKER = "complete the following challenge"
 
 # Content types worth turning into text. A PDF or an image is not fetched and
 # guessed at: the tool says what it found and the agent asks for something else.
@@ -76,6 +108,38 @@ class FetchedPage:
     content_type: str
     text: str
     truncated: bool = False
+
+
+@dataclass(slots=True)
+class SearchHit:
+    """One result: what it is called, where it goes, and what it says."""
+
+    title: str
+    url: str
+    snippet: str = ""
+
+
+@dataclass(slots=True)
+class SearchResults:
+    """What a search found, and enough about the search to judge it."""
+
+    query: str
+    hits: list[SearchHit] = field(default_factory=list)
+    # The endpoint answered with a page carrying no result links at all. Carried
+    # rather than raised so the tool can say "the markup moved" instead of "nothing
+    # matched", which are very different things to be told. Testing never produced a
+    # genuine empty-result page from this endpoint — a nonsense query still came back
+    # with fuzzy matches — so this is deliberately not being guessed at as "no
+    # results", which is the one claim that would be worse than an error.
+    unreadable: bool = False
+    # The endpoint answered with its bot challenge rather than results. A third
+    # outcome again, and the one that is most often the truth: this is a keyless
+    # scrape, so DuckDuckGo rate-limits it. Measured from one machine: the first
+    # query returned ten results, the next four got the challenge — as `202`, not an
+    # error status — and a query several minutes later worked again. The agent is
+    # told which it was, because "search is blocked" and "the web has nothing" lead
+    # to opposite next moves.
+    blocked: bool = False
 
 
 def assert_public_url(url: str) -> str:
@@ -200,15 +264,46 @@ def fetch_page(url: str, *, transport: httpx.BaseTransport | None = None) -> Fet
     below runs the same either way, which is the point of putting them here rather
     than in the tool.
     """
+    response = _get(url, transport=transport, accept="text/html,text/plain,*/*;q=0.5")
+    text = response.body
+    if "html" in response.content_type or text.lstrip()[:1] == "<":
+        text = html_to_text(text)
+    return FetchedPage(
+        url=response.url,
+        status=response.status,
+        content_type=response.content_type or "unknown",
+        text=text.strip(),
+        truncated=response.truncated,
+    )
+
+
+@dataclass(slots=True)
+class _Response:
+    """One response, before the caller decides whether it wants text or markup."""
+
+    url: str
+    status: int
+    content_type: str
+    body: str
+    truncated: bool = False
+
+
+def _get(url: str, *, transport: httpx.BaseTransport | None, accept: str, params=None) -> _Response:
+    """GET one URL and return its decoded body, checking every hop on the way.
+
+    The single place the redirect loop lives. Search needs the markup where a fetch
+    wants the text, and neither should get its own copy of the address checks —
+    a guard that exists twice is a guard that is wrong once.
+    """
     current = assert_public_url(url)
     with httpx.Client(
         timeout=_TIMEOUT,
         follow_redirects=False,
-        headers={"User-Agent": _USER_AGENT, "Accept": "text/html,text/plain,*/*;q=0.5"},
+        headers={"User-Agent": _USER_AGENT, "Accept": accept},
         transport=transport,
     ) as client:
         for _ in range(_MAX_REDIRECTS + 1):
-            response = client.get(current)
+            response = client.get(current, params=params)
             if response.is_redirect:
                 location = response.headers.get("location")
                 if not location:
@@ -228,14 +323,164 @@ def fetch_page(url: str, *, transport: httpx.BaseTransport | None = None) -> Fet
 
             body = response.content[:_MAX_BYTES]
             truncated = len(response.content) > _MAX_BYTES
-            text = body.decode(response.encoding or "utf-8", errors="replace")
-            if "html" in content_type or text.lstrip()[:1] == "<":
-                text = html_to_text(text)
-            return FetchedPage(
+            return _Response(
                 url=str(response.url),
                 status=response.status_code,
-                content_type=content_type or "unknown",
-                text=text.strip(),
+                content_type=content_type,
+                body=body.decode(response.encoding or "utf-8", errors="replace"),
                 truncated=truncated,
             )
     raise FetchError(f"{url} redirected more than {_MAX_REDIRECTS} times")
+
+
+@dataclass(slots=True)
+class _Response:
+    """One response, before the caller decides whether it wants text or markup."""
+
+    url: str
+    status: int
+    content_type: str
+    body: str
+    truncated: bool = False
+
+
+@dataclass(slots=True)
+class _Response:
+    """One response, before the caller decides whether it wants text or markup."""
+
+    url: str
+    status: int
+    content_type: str
+    body: str
+    truncated: bool = False
+
+
+class _ResultParser(HTMLParser):
+    """DuckDuckGo's result list, read out of the markup.
+
+    Keyed on the classes the endpoint uses — ``result__a`` for a result's link and
+    ``result__snippet`` for its text. That is the fragile part of a scrape and it is
+    why ``SearchResults.unreadable`` exists: markup this parser does not recognise
+    must not be reported as "no results".
+    """
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.hits: list[SearchHit] = []
+        self._in_title = False
+        self._in_snippet = False
+        self._saw_any_result = False
+
+    def handle_starttag(self, tag: str, attrs: list) -> None:
+        if tag != "a":
+            return
+        attributes = dict(attrs)
+        classes = (attributes.get("class") or "").split()
+        href = attributes.get("href") or ""
+        if "result__a" in classes:
+            self._saw_any_result = True
+            url = _unwrap_result_url(href)
+            self.hits.append(SearchHit(title="", url=url))
+            self._in_title = True
+        elif "result__snippet" in classes:
+            self._saw_any_result = True
+            if self.hits:
+                self._in_snippet = True
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "a":
+            self._in_title = False
+            self._in_snippet = False
+
+    def handle_data(self, data: str) -> None:
+        if not self.hits:
+            return
+        text = " ".join(data.split())
+        if not text:
+            return
+        if self._in_title:
+            hit = self.hits[-1]
+            hit.title = (hit.title + " " + text).strip() if hit.title else text
+        elif self._in_snippet:
+            hit = self.hits[-1]
+            hit.snippet = (hit.snippet + " " + text).strip() if hit.snippet else text
+
+    @property
+    def saw_any_result(self) -> bool:
+        """Whether the page was a result list at all, readable or not."""
+        return self._saw_any_result
+
+
+def _unwrap_result_url(href: str) -> str:
+    """The address a result actually points at.
+
+    DuckDuckGo wraps every link in a redirect of its own —
+    ``//duckduckgo.com/l/?uddg=<urlencoded>`` — so the href in the markup is not
+    where the result goes. Unwrapping it here means the model is given the address
+    it will actually fetch, and a redirect parameter cannot carry it somewhere the
+    fetch tool would refuse without that being visible.
+    """
+    candidate = html_module.unescape(href.strip())
+    if candidate.startswith("//"):
+        candidate = "https:" + candidate
+    if "uddg=" not in candidate:
+        return candidate
+    try:
+        query = parse_qs(urlsplit(candidate).query)
+    except ValueError:  # pragma: no cover - a URL urlsplit refuses
+        return candidate
+    unwrapped = query.get("uddg", [])
+    return unwrapped[0] if unwrapped else candidate
+
+
+def search(
+    query: str,
+    *,
+    limit: int = _MAX_RESULTS,
+    transport: httpx.BaseTransport | None = None,
+) -> SearchResults:
+    """Search the web, through DuckDuckGo's no-JavaScript endpoint.
+
+    A scrape, deliberately and openly: there is no key-free search API, and the
+    alternative was another key for the user to go and get. What that buys is a tool
+    that can break without anything changing here — so a page this cannot read is an
+    error naming that possibility, never an empty result list.
+    """
+    cleaned = " ".join((query or "").split())
+    if not cleaned:
+        raise FetchError("a search needs something to search for")
+    if len(cleaned) > _MAX_QUERY_CHARS:
+        raise FetchError(
+            f"that search is {len(cleaned)} characters; the limit is {_MAX_QUERY_CHARS}"
+        )
+
+    response = _get(
+        _SEARCH_URL,
+        transport=transport,
+        accept="text/html,*/*;q=0.5",
+        params={"q": cleaned},
+    )
+    # The challenge comes back as 202 Accepted with a CAPTCHA, not as an error
+    # status, so a status check alone would read it as a page of results.
+    if response.status == 202 or _CHALLENGE_MARKER in response.body.lower():
+        return SearchResults(query=cleaned, blocked=True)
+
+    parser = _ResultParser()
+    parser.feed(response.body)
+    parser.close()
+
+    hits: list[SearchHit] = []
+    for hit in parser.hits:
+        # Anything that is not http(s) is not something the fetch tool could reach,
+        # so offering it as a result would be offering a dead end.
+        if not hit.url.lower().startswith(("http://", "https://")):
+            continue
+        hit.snippet = hit.snippet[:_MAX_SNIPPET_CHARS]
+        hits.append(hit)
+
+    return SearchResults(
+        query=cleaned,
+        hits=hits[:limit],
+        unreadable=not hits and not parser.saw_any_result,
+    )
+

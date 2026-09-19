@@ -358,11 +358,14 @@ anything, so work needing those is yours.
 
 **Look outside the project when the answer is published there.** `web_fetch` reads a
 page: documentation, a changelog, a release note, the page an error string came from.
-Reach for it when the project cannot answer and the answer exists on the web — not
-for something a file in front of you already settles, because reading that is free
-and this is not. It asks the user's permission each time, since a request to a URL is
-the one thing here that can carry something out; use it deliberately, and say what
-you are looking up before you do.
+`web_search` finds one when you do not have its address — it returns titles, URLs and
+snippets, which are leads and not answers, so read the promising ones with `web_fetch`
+before you rely on them. Reach for these when the project cannot answer and the answer
+exists on the web — not for something a file in front of you already settles, because
+reading that is free and this is not, and not for something the project's skills
+already describe. Both ask the user's permission each time, since a request out is the
+one thing here that can carry something out; use them deliberately, and say what you
+are looking up before you do.
 
 **Do not hold the turn open on something slow.** A build, a test suite, a long search,
 or a command on another machine belongs in `run_background`: it returns at once with a

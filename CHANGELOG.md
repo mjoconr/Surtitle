@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **The agent can search the web, keylessly, and is told the truth when it cannot.**
+  `web_search` returns a handful of results — a title, a URL and a snippet each — for
+  when there is no URL to fetch and the project's own files do not answer. There is no
+  key-free search API, so the query goes to DuckDuckGo's no-JavaScript HTML endpoint
+  and the results are read out of the markup, and DuckDuckGo rate-limits that: from
+  one machine, the first query returned ten results, the next four got a CAPTCHA, and
+  a query several minutes later worked again. So "blocked by a bot challenge" and "the
+  markup changed" are reported as themselves, and never as "nothing matched" — that is
+  a claim about the world, and neither of them is evidence for it. Every result link is
+  unwrapped from DuckDuckGo's own redirect so what you are given is the address the
+  agent will actually fetch, and the request goes through the same address checks,
+  manual redirects and size limits as `web_fetch`. It asks your approval for the same
+  reason: the query is what leaves the machine. If you want search that does not get
+  rate-limited, the reliable route is a provider key, and the provider is one function
+  wide.
+
 ## [0.12.0] - 2026-09-19
 
 ### Added
