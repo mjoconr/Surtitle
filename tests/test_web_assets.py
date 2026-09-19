@@ -524,6 +524,35 @@ class TestActivityPanelNoise:
         assert "activityRenderTimer" in script
         assert "scheduleActivityRender" in script
 
+    def test_a_think_row_that_already_exists_still_repaints(self, script):
+        """Reported as "the activity does not seem to update".
+
+        The row is created by the step's first delta and then updated in place
+        for every delta after it. Only the *create* path scheduled a repaint, so
+        the panel kept showing the step's first line and then looked frozen for
+        the rest of the step — a step that thought for a minute was
+        indistinguishable from one that had died.
+        """
+        block = script[script.index('case "thinking": {') :]
+        block = block[: block.index("break;")]
+        assert "existing.detail = live;" in block
+        assert "scheduleActivityRender();" in block, (
+            "an in-place update must schedule its own repaint, or the panel freezes"
+        )
+
+    def test_the_live_line_follows_the_newest_text(self, script):
+        """A finished step reads as its first line; a running one as its last.
+
+        The first line stops changing within a second, so gisting the live row
+        from it reproduced the freeze the repaint was added to fix.
+        """
+        block = script[script.index("function latestLineOf(") :]
+        block = block[: block.index("\n}\n")]
+        assert "lines[lines.length - 1]" in block
+        assert "…${line.slice(-120)}" in block, (
+            "the newest words are at the end, so the ellipsis belongs in front"
+        )
+
     def test_the_stored_reasoning_is_capped(self):
         """The cap moved to the server, where the durable copy is written."""
         from surtitle.core.agent import _REASONING_STORED_CHARS

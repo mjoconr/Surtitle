@@ -523,6 +523,26 @@ function gistOf(text) {
   return line.length > 120 ? `${line.slice(0, 120)}…` : line;
 }
 
+/**
+ * The most recent line of some still-streaming reasoning.
+ *
+ * `gistOf` takes the *first* line, which is right for a step that has finished:
+ * it says what the step set out to do. It is the wrong line while the step is
+ * still running — the first line stops changing within a second, so a panel
+ * built from it looks frozen even though the model is still thinking. The newest
+ * line is the one that moves, and the newest words are at the end, so the
+ * ellipsis goes in front.
+ */
+function latestLineOf(text) {
+  const lines = String(text || "")
+    .split("\n")
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0);
+  const line = lines.length ? lines[lines.length - 1] : "";
+  if (!line) return "";
+  return line.length > 120 ? `…${line.slice(-120)}` : line;
+}
+
 function assistantTurn() {
   if (state.currentTurn && state.currentTurn.kind === "assistant") {
     return state.currentTurn;
@@ -1613,10 +1633,19 @@ function handleEvent(event) {
       startTimers();
       const step = stepFor(turn, data.step);
       if (step) {
+        // After the first delta the row already exists, so every later one
+        // updates it in place — and an in-place update has to schedule its own
+        // repaint. Only `pushActivity` did that, so the panel showed the step's
+        // first line and then sat still for the rest of the step, which reads as
+        // a stalled agent. Reported as "the activity does not seem to update".
         const existing = state.activity.find((item) => item.kind === "think" && item.step === step.index);
-        const gist = gistOf(step.think ? step.think.text : "");
-        if (existing) existing.detail = gist;
-        else pushActivity({ kind: "think", step: step.index, label: "Think", detail: gist });
+        const live = latestLineOf(step.think ? step.think.text : "");
+        if (existing) {
+          existing.detail = live;
+          scheduleActivityRender();
+        } else {
+          pushActivity({ kind: "think", step: step.index, label: "Think", detail: live });
+        }
       }
       break;
     }
