@@ -483,4 +483,3 @@ def search(
         hits=hits[:limit],
         unreadable=not hits and not parser.saw_any_result,
     )
-
