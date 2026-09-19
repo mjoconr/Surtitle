@@ -88,6 +88,12 @@ gh run list --limit 3
 gh run watch <id>            # lint, both OS test jobs, wheels, both archive builds
 ```
 
+Check that the id belongs to **this** commit before reading the result: `gh run
+watch` attaches to whatever run you hand it, and watching the previous commit's
+green run instead of this one is how a tag gets pushed onto a failing build. The
+release workflow tests each platform itself, so that mistake no longer publishes
+anything — but it still costs a cancelled run and a moved tag.
+
 ## 4. Tag
 
 ```bash
@@ -100,22 +106,37 @@ git push origin vX.Y.Z
 `release.yml` then runs in three stages:
 
 1. **Verify** — lint, format check, the full suite on ubuntu, and that the tag
-   matches `pyproject.toml`.
+   matches `pyproject.toml`. Cheap, and it fails before any build minutes are
+   spent — but it is **one platform**, so it is a fast fail and not the gate.
 2. **Build** — `windows-latest`, `macos-latest` (Apple silicon) and
-   `macos-15-intel`, each running `scripts/build_release.py`, which smoke-tests the
-   archive it just made. One job per architecture because the archive bundles a
-   Python runtime and compiled wheels, so neither Mac build can be cross-built
-   from the other. `macos-13` was retired by GitHub; `macos-15-intel` is the Intel
-   image that replaced it, and without it an Intel Mac has no archive that runs.
-   A release that loses one of the three is not obviously broken — the run is
-   green and the artifacts look complete — so check the asset list in step 5
-   against the platforms you mean to support.
-3. **Publish** — generates `SHA256SUMS.txt` over the artifacts and creates the
-   GitHub release with them attached.
+   `macos-15-intel`, each running the full suite *on that platform* and then
+   `scripts/build_release.py`, which smoke-tests the archive it just made. One job
+   per architecture because the archive bundles a Python runtime and compiled
+   wheels, so neither Mac build can be cross-built from the other. `macos-13` was
+   retired by GitHub; `macos-15-intel` is the Intel image that replaced it, and
+   without it an Intel Mac has no archive that runs.
+
+   The suite runs here, on the runner that is going to build the archive anyway,
+   because a break that only shows on Windows or Intel macOS passes stage 1 and
+   publishes. That is not hypothetical: 0.11.0 was tagged on a green ubuntu verify
+   with a bug that left every Windows install with no update at all. This stage is
+   the gate; stage 1 is only the early exit.
+
+3. **Publish** — refuses a release that is missing a platform
+   (`build_release.py --check-archives`), generates `SHA256SUMS.txt` over the
+   artifacts, and creates the GitHub release with them attached. The check exists
+   because losing an architecture is silent: the run is green, the assets look
+   plausible, and the platform that was dropped is simply told there is no build
+   for it. The supported set is `RELEASE_ARCHITECTURES` in
+   `scripts/build_release.py`, which is also what the check compares against.
 
 For a look before announcing, run the workflow by hand
-(`gh workflow run release.yml -f draft=true`); the default for a manual dispatch is
-a draft release.
+(`gh workflow run release.yml -f dry_run=true`): it runs every check and builds
+every archive on the runner that will ship it, and **creates nothing** — no tag, no
+release, not even a draft. That is the way to find out whether the release path
+still works, and it is what to reach for after changing anything in this workflow.
+`-f draft=true` is the older option and still writes a tag, which is the part that
+is hard to take back.
 
 ## 5. Verify what was published, not the run
 

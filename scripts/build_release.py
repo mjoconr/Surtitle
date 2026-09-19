@@ -499,6 +499,48 @@ def archive(destination: Path, version: str) -> Path:
     return path
 
 
+# Every architecture a release ships, as it appears in the archive's name. One
+# build job per entry in the release workflow, and this tuple is what says a
+# release is complete.
+#
+# It exists because losing one is silent: a matrix entry that stops building — a
+# renamed runner label, a typo in a path — leaves a release whose run is green and
+# whose assets look plausible, and the platform it dropped is told there is no
+# build for it. Keeping the list here rather than in the workflow means the rule
+# can be tested, which is the same reason the layout rules live here.
+RELEASE_ARCHITECTURES = (
+    ("win32", "AMD64", ".zip"),
+    ("darwin", "arm64", ".tar.gz"),
+    ("darwin", "x86_64", ".tar.gz"),
+)
+
+
+def expected_archives(version: str) -> list[str]:
+    """The archive filename each supported architecture must produce."""
+    return [
+        f"{archive_stem(version, platform_name=name, machine=machine)}{suffix}"
+        for name, machine, suffix in RELEASE_ARCHITECTURES
+    ]
+
+
+def assert_all_archives_present(directory: Path | None = None, version: str = "") -> None:
+    """Refuse a release that is missing a platform, naming what is missing.
+
+    Called by the publish job before it publishes and by nothing else: the build
+    job makes one archive and cannot know about the others.
+    """
+    where = directory if directory is not None else DIST_DIR
+    wanted = expected_archives(version or project_version())
+    missing = [name for name in wanted if not (where / name).is_file()]
+    if missing:
+        raise SystemExit(
+            "this release is missing a build for: "
+            + ", ".join(missing)
+            + f" — check that every job in RELEASE_ARCHITECTURES ran and produced a file in {where}"
+        )
+    print(f"· all {len(wanted)} architectures present")
+
+
 def archive_platform(root: Path, *, fallback: str | None = None) -> str:
     """Which platform an extracted archive targets.
 
@@ -746,7 +788,29 @@ def main() -> int:
         help="Bundle the speech models too (~90 MB), for a fully offline archive. "
         "Implies --with-voice-local.",
     )
+    parser.add_argument(
+        "--check-archives",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="VERSION",
+        help="Assert that every supported architecture has an archive, and exit. "
+        "Defaults to the packaged version. This is the last gate before a release "
+        "is published: a missing platform is invisible otherwise.",
+    )
+    parser.add_argument(
+        "--archives-dir",
+        default=None,
+        metavar="DIR",
+        help="Where the archives are, for --check-archives (default: dist/). The "
+        "release workflow downloads them into another directory first.",
+    )
     args = parser.parse_args()
+
+    if args.check_archives is not None:
+        where = Path(args.archives_dir) if args.archives_dir else None
+        assert_all_archives_present(where, version=args.check_archives)
+        return 0
 
     if args.verify_only is not None:
         # Runs before any build work, and before uv is looked for, so an

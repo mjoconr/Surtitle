@@ -248,6 +248,58 @@ class TestWorkflowsUseTheSharedVerifier:
                 "discovery belongs in scripts/build_release.py"
             )
 
+    def test_the_release_tests_the_platforms_it_ships(self):
+        """A tag's own run has to be the gate, not somebody reading a CI badge.
+
+        0.11.0 was tagged on a green CI for the previous commit and a green ubuntu
+        `verify` job, with a bug that left every Windows install with no update at
+        all: the release workflow's verify stage is one platform, and the platform
+        it does not run is the one that breaks. The suite now runs in each build job
+        — on the runner that is going to build that archive anyway, so it costs no
+        extra runner — and the publish stage refuses an incomplete set.
+        """
+        release = self.WORKFLOWS[0].read_text(encoding="utf-8")
+
+        assert "uv run --frozen pytest" in release, (
+            "the release workflow must run the suite, not only lint it"
+        )
+        assert "--check-archives" in release, (
+            "the publish stage must refuse a release that is missing a platform"
+        )
+
+
+class TestEveryArchitectureShips:
+    """A release that quietly loses a platform looks complete from the outside."""
+
+    def test_the_expected_set_names_every_supported_architecture(self):
+        assert build_release.expected_archives("1.2.3") == [
+            "surtitle-1.2.3-win32-AMD64.zip",
+            "surtitle-1.2.3-darwin-arm64.tar.gz",
+            "surtitle-1.2.3-darwin-x86_64.tar.gz",
+        ]
+
+    def test_a_missing_platform_is_named_rather_than_shipped_without(self, tmp_path):
+        for name in build_release.expected_archives("1.2.3"):
+            if "win32" not in name:
+                _touch(tmp_path / name)
+
+        with pytest.raises(SystemExit, match="win32-AMD64"):
+            build_release.assert_all_archives_present(tmp_path, version="1.2.3")
+
+    def test_a_complete_set_passes(self, tmp_path):
+        for name in build_release.expected_archives("1.2.3"):
+            _touch(tmp_path / name)
+
+        build_release.assert_all_archives_present(tmp_path, version="1.2.3")
+
+    def test_the_newest_version_is_what_is_checked_by_default(self, tmp_path, monkeypatch):
+        """The workflow passes no version, so the packaged one has to be found."""
+        monkeypatch.setattr(build_release, "DIST_DIR", tmp_path)
+        for name in build_release.expected_archives(build_release.project_version()):
+            _touch(tmp_path / name)
+
+        build_release.assert_all_archives_present()
+
 
 class TestVersionConsistency:
     """pyproject, the package and the changelog must name the same version.

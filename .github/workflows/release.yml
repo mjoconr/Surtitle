@@ -6,6 +6,10 @@ on:
       - "v*"
   workflow_dispatch:
     inputs:
+      dry_run:
+        description: Build and verify everything, publish nothing
+        type: boolean
+        default: false
       draft:
         description: Publish as a draft release
         type: boolean
@@ -70,6 +74,14 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
+      # On the platform, before the build, which is the point. The `verify` job
+      # above runs the suite once, on ubuntu, and that is not enough: a break that
+      # only shows on Windows or Intel macOS passes it and publishes. That is not
+      # hypothetical — 0.11.0 was tagged on a green ubuntu verify with a bug that
+      # left every Windows install with no update, and this step is why the next
+      # one cannot. It costs no extra runner: this one is here to build anyway.
+      - name: Run the test suite for the platform this archive ships to
+        run: uv run --frozen pytest -q
       # Must run on the target OS: compiled wheels are platform-specific, so a
       # cross-built archive would ship the wrong binaries.
       - name: Build the self-contained archive
@@ -93,13 +105,26 @@ jobs:
   publish:
     name: Publish the release
     needs: [build]
+    # A dry run is the honest way to check the release path: it runs every test and
+    # builds every archive on the runner that will ship it, and creates nothing.
+    # `gh workflow run release.yml -f dry_run=true` — the alternative, a draft
+    # release, still writes a tag, which is the thing that is hard to take back.
+    if: ${{ !inputs.dry_run }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
           merge-multiple: true
+      # Before anything is hashed or published: a green run with a platform
+      # missing is exactly how a release ships with nothing for one machine to
+      # install, and it looks complete from the outside.
+      - name: Every supported architecture must be here
+        run: uv run --frozen python scripts/build_release.py --check-archives --archives-dir artifacts
       - name: Generate checksums
         run: |
           cd artifacts
