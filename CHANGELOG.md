@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **There is a macOS build for Intel Macs, and the updater will no longer install
+  an archive built for a different architecture.** The macOS release was arm64
+  only, and the updater chose an asset by *preferring* a matching architecture
+  rather than requiring one — so on an Intel Mac nothing matched, and it fell back
+  to the arm64 archive. That does not run slowly or badly: the archive carries its
+  own interpreter, so it fails to start at all, after replacing a working install.
+  Intel Macs now get `surtitle-<version>-darwin-x86_64.tar.gz`, built on the Intel
+  runner (`macos-13` was retired; `macos-15-intel` is what replaced it), and an
+  architecture the release does not cover is told so instead of being handed
+  something that cannot run. Apple silicon may still fall back to the Intel build
+  through Rosetta, because that direction works.
+
 ## [0.10.0] - 2026-09-19
 
 ### Added

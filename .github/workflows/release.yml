@@ -54,8 +54,17 @@ jobs:
         include:
           - os: windows-latest
             artifact: windows-x64
+          # Apple silicon. `macos-latest` is arm64 now, so it is not the Intel
+          # image it used to be.
           - os: macos-latest
-            artifact: macos
+            artifact: macos-arm64
+          # Intel, which is a different image and a different archive: the build
+          # bundles a Python runtime and compiled wheels, so neither can be
+          # cross-built from the other. `macos-13` was retired by GitHub and this
+          # is the Intel image that replaced it — without it an Intel Mac has no
+          # archive that runs at all.
+          - os: macos-15-intel
+            artifact: macos-intel
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -118,7 +127,15 @@ jobs:
             **`run.bat`**. No installer, no administrator rights, and no system
             Python required — the runtime is bundled.
 
-            ### macOS / Linux
+            ### macOS
+
+            Download the archive for your Mac — `arm64` for Apple silicon,
+            `x86_64` for Intel — extract it, and run **`./run.sh`**. The two are
+            not interchangeable: each carries its own Python runtime, so the wrong
+            one will not start. The updater refuses to install an archive built for
+            another architecture rather than hand you one that cannot run.
+
+            ### Linux
 
             Download the archive matching your platform, extract it, and run
             **`./run.sh`**.

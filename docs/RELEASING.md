@@ -101,8 +101,15 @@ git push origin vX.Y.Z
 
 1. **Verify** — lint, format check, the full suite on ubuntu, and that the tag
    matches `pyproject.toml`.
-2. **Build** — `macos-latest` and `windows-latest`, each running
-   `scripts/build_release.py`, which smoke-tests the archive it just made.
+2. **Build** — `windows-latest`, `macos-latest` (Apple silicon) and
+   `macos-15-intel`, each running `scripts/build_release.py`, which smoke-tests the
+   archive it just made. One job per architecture because the archive bundles a
+   Python runtime and compiled wheels, so neither Mac build can be cross-built
+   from the other. `macos-13` was retired by GitHub; `macos-15-intel` is the Intel
+   image that replaced it, and without it an Intel Mac has no archive that runs.
+   A release that loses one of the three is not obviously broken — the run is
+   green and the artifacts look complete — so check the asset list in step 5
+   against the platforms you mean to support.
 3. **Publish** — generates `SHA256SUMS.txt` over the artifacts and creates the
    GitHub release with them attached.
 
@@ -169,6 +176,14 @@ and someone should try them:
 
 The in-app folder browser, the CLI, the doctor, and the HTTP API are all testable
 from anywhere and are covered by the suite.
+
+**A Mac archive can only be checked on a Mac of its own architecture.**
+`--verify-only` runs the interpreter inside the archive, so a `darwin-x86_64`
+build fails to verify on Apple silicon and a `darwin-arm64` build fails on Intel —
+`Bad CPU type in executable`, which is a fact about the machine, not the archive.
+Build the archive locally (`uv run python scripts/build_release.py`) on the Mac you
+have and verify that one; the other architecture is covered by CI's build job,
+which smoke-tests each archive on the runner that made it.
 
 ## How users actually get a release
 

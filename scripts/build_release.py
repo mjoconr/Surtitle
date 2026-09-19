@@ -466,10 +466,24 @@ def write_manifest(destination: Path, version: str) -> dict[str, object]:
     return manifest
 
 
+def archive_stem(
+    version: str, *, platform_name: str | None = None, machine: str | None = None
+) -> str:
+    """The archive's name without its suffix.
+
+    The *machine* is in the name because the archive carries its own interpreter:
+    an arm64 build does not run on an Intel Mac, and `surtitle.selfupdate` reads
+    this name to refuse one. Both ends have to agree on the spelling, so it lives
+    in one function rather than in the caller's memory — and the updater's test
+    suite asserts it can still parse what this produces.
+    """
+    return f"surtitle-{version}-{platform_name or sys.platform}-{machine or platform.machine()}"
+
+
 def archive(destination: Path, version: str) -> Path:
     """Package the tree, preserving the executable bit on Unix."""
     DIST_DIR.mkdir(parents=True, exist_ok=True)
-    stem = f"surtitle-{version}-{sys.platform}-{platform.machine()}"
+    stem = archive_stem(version)
     if os.name == "nt":
         path = DIST_DIR / f"{stem}.zip"
         print(f"· writing {path.name}")

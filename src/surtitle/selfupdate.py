@@ -59,6 +59,29 @@ SUMS_ASSET = "SHA256SUMS.txt"
 _CHUNK = 1 << 20
 _TIMEOUT = 60.0
 
+# Architecture tokens as they appear in an asset name, and how a machine's own
+# name maps onto them. `platform.machine()` says `AMD64` on Windows, `arm64` or
+# `x86_64` on macOS — all three are spelled into the archive name by
+# `scripts/build_release.py`, and none of them is a substring of another.
+_INTEL_TOKENS = ("x86_64", "amd64", "x64", "intel")
+_ARM_TOKENS = ("arm64", "aarch64")
+_ARCH_TOKENS = {
+    "x86_64": _INTEL_TOKENS,
+    "amd64": _INTEL_TOKENS,
+    "i386": _INTEL_TOKENS,
+    "arm64": _ARM_TOKENS,
+    "aarch64": _ARM_TOKENS,
+}
+
+
+def _asset_architecture(name: str) -> str | None:
+    """Which architecture an asset names, or ``None`` if it names none."""
+    lowered = name.lower()
+    for token in (*_INTEL_TOKENS, *_ARM_TOKENS):
+        if token in lowered:
+            return token
+    return None
+
 
 @dataclass(frozen=True, slots=True)
 class ReleaseAsset:
@@ -157,11 +180,15 @@ def asset_for(
     """
     tag = str(payload.get("tag_name") or "").strip()
     here = platform or sys.platform
-    arch = (machine or os.uname().machine) if hasattr(os, "uname") else ""
+    machine_arch = ((machine or os.uname().machine) if hasattr(os, "uname") else "").lower()
     wanted_suffix = ".zip" if here == "win32" else ".tar.gz"
     wanted_platform = "win32" if here == "win32" else ("darwin" if here == "darwin" else "linux")
+    wanted_arch = _ARCH_TOKENS.get(machine_arch, ())
+    # Apple silicon runs an Intel build under Rosetta; an Intel Mac cannot run an
+    # arm64 one at all, so the concession is one-directional.
+    rosetta_ready = machine_arch in ("arm64", "aarch64")
 
-    best: ReleaseAsset | None = None
+    fallback: ReleaseAsset | None = None
     for item in payload.get("assets") or []:
         if not isinstance(item, dict):
             continue
@@ -170,10 +197,17 @@ def asset_for(
         if not name.endswith(wanted_suffix) or wanted_platform not in name or not url:
             continue
         candidate = ReleaseAsset(tag=tag, name=name, url=url, size=int(item.get("size") or 0))
-        if arch and arch.lower() in name.lower():
-            return candidate
-        best = best or candidate
-    return best
+        built_for = _asset_architecture(name)
+        if built_for is not None:
+            if built_for in wanted_arch:
+                return candidate
+            if rosetta_ready and built_for in _INTEL_TOKENS:
+                fallback = fallback or candidate
+            continue
+        # An asset naming no architecture is the publisher saying it runs anywhere,
+        # which makes it the last resort rather than a wrong answer.
+        fallback = fallback or candidate
+    return fallback
 
 
 def expected_sums(
@@ -287,7 +321,11 @@ def stage(
 
     asset = asset_for(payload, platform=platform, machine=machine)
     if asset is None:
-        return None, "that release has no build for this platform"
+        # Names the architecture as well as the platform, because "no build for
+        # this platform" is exactly what an Intel Mac was told while the arm64
+        # build sat right there — and what it must still be told rather than be
+        # given an archive that cannot start.
+        return None, "that release has no build for this machine's platform and architecture"
 
     sums = expected_sums(payload, fetch_text=fetch_text)
     if not sums:

@@ -66,6 +66,89 @@ class TestAssetSelection:
         }
         assert selfupdate.asset_for(payload, platform="darwin", machine="arm64") is None
 
+    def test_an_intel_mac_is_not_handed_the_arm_build(self):
+        """Reported as the release not running at all on an Intel Mac.
+
+        The archive carries its own interpreter, so an arm64 build there is not
+        slow or degraded — it fails to start. Before this, the architecture only
+        decided which asset to *prefer*: an Intel Mac matched nothing and was given
+        the first macOS asset in the list, which was the arm64 one.
+        """
+        payload = {
+            "tag_name": "v1",
+            "assets": [
+                {"name": "surtitle-1-darwin-arm64.tar.gz", "browser_download_url": "arm"},
+            ],
+        }
+        assert selfupdate.asset_for(payload, platform="darwin", machine="x86_64") is None, (
+            "no update is better than one that cannot run"
+        )
+
+    def test_an_intel_mac_takes_the_intel_build_when_both_are_published(self):
+        payload = {
+            "tag_name": "v1",
+            "assets": [
+                {"name": "surtitle-1-darwin-arm64.tar.gz", "browser_download_url": "arm"},
+                {"name": "surtitle-1-darwin-x86_64.tar.gz", "browser_download_url": "intel"},
+            ],
+        }
+        assert selfupdate.asset_for(payload, platform="darwin", machine="x86_64").url == "intel"
+        assert selfupdate.asset_for(payload, platform="darwin", machine="arm64").url == "arm"
+
+    def test_apple_silicon_may_fall_back_to_intel_under_rosetta(self):
+        """The one direction that works, and only as a fallback."""
+        payload = {
+            "tag_name": "v1",
+            "assets": [
+                {"name": "surtitle-1-darwin-x86_64.tar.gz", "browser_download_url": "intel"},
+            ],
+        }
+        assert selfupdate.asset_for(payload, platform="darwin", machine="arm64").url == "intel"
+
+    def test_an_asset_that_names_no_architecture_is_still_usable(self):
+        payload = {
+            "tag_name": "v1",
+            "assets": [{"name": "surtitle-1-darwin.tar.gz", "browser_download_url": "any"}],
+        }
+        assert selfupdate.asset_for(payload, platform="darwin", machine="x86_64").url == "any"
+
+    def test_the_names_the_builder_makes_are_the_names_the_updater_reads(self):
+        """The two live in different files, and nothing else connects them.
+
+        A rename on either side would leave every Mac of one architecture with no
+        usable asset — quietly, because the release still looks complete. That is
+        how an Intel Mac came to be offered the arm64 build in the first place.
+        """
+        from scripts import build_release
+
+        published = {
+            build_release.archive_stem("1.0.0", platform_name=name, machine=machine): url
+            for name, machine, url in (
+                ("win32", "AMD64", "win"),
+                ("darwin", "arm64", "arm"),
+                ("darwin", "x86_64", "intel"),
+            )
+        }
+        assert sorted(published) == [
+            "surtitle-1.0.0-darwin-arm64",
+            "surtitle-1.0.0-darwin-x86_64",
+            "surtitle-1.0.0-win32-AMD64",
+        ]
+
+        payload = {
+            "tag_name": "v1",
+            "assets": [
+                {
+                    "name": f"{stem}.zip" if "win32" in stem else f"{stem}.tar.gz",
+                    "browser_download_url": url,
+                }
+                for stem, url in published.items()
+            ],
+        }
+        assert selfupdate.asset_for(payload, platform="darwin", machine="x86_64").url == "intel"
+        assert selfupdate.asset_for(payload, platform="darwin", machine="arm64").url == "arm"
+        assert selfupdate.asset_for(payload, platform="win32", machine="AMD64").url == "win"
+
 
 class TestChecksums:
     def test_the_published_sums_are_parsed(self):
