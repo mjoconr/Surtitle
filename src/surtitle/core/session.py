@@ -1807,8 +1807,19 @@ class Session:
             log.debug("approval for %s arrived before or after its request", call_id)
 
     # --- voice problems --------------------------------------------------
-    async def _on_voice_problem(self, message: str) -> None:
-        """Surface a voice-layer problem without ending the session."""
+    async def _on_voice_problem(self, message: str | None) -> None:
+        """Surface a voice-layer problem without ending the session.
+
+        ``None`` means the problem is over — a recognition socket that dropped and
+        came back — and it is sent so the notice can be taken down. Nothing used to
+        retract it, so a page could say speech recognition was unavailable, with the
+        fix text for a wrong key, while it was transcribing normally.
+        """
+        if message is None:
+            self.voice_problem = None
+            self.voice_fix = None
+            await self.emit(EventKind.VOICE, problem=None)
+            return
         await self.emit(EventKind.ERROR, message=message, kind_detail="voice", recoverable=True)
 
     async def _on_speed_fallback(self, speed: float) -> None:

@@ -168,7 +168,7 @@ class SpeechToText:
         settings: Settings,
         *,
         on_transcript: TranscriptHandler,
-        on_error: Callable[[str], Awaitable[None]] | None = None,
+        on_error: Callable[[str | None], Awaitable[None]] | None = None,
     ) -> None:
         self.settings = settings
         self._on_transcript = on_transcript
@@ -181,6 +181,10 @@ class SpeechToText:
         # Set while TTS is playing so echo-contaminated finals can be dropped.
         self._suppress_finals = False
         self._dropped_frames = 0
+        # Whether a socket has ever come up. It is the difference between a provider
+        # blip and a configuration that cannot work, and the two need different
+        # sentences: one is "reconnecting", the other is "check your key".
+        self._ever_connected = False
         # How many transcripts have been discarded as the agent's own voice. A
         # large or ever-growing number means suppression never lifted, which is
         # indistinguishable from a dead microphone unless it is reported.
@@ -276,11 +280,9 @@ class SpeechToText:
     async def _run(self) -> None:
         """Keep a transcription socket open for the life of the session."""
         attempt = 0
-        connected_once = False
         while not self._stopped.is_set():
             try:
                 await self._connect_and_pump()
-                connected_once = True
                 attempt = 0
             except asyncio.CancelledError:
                 raise
@@ -293,7 +295,14 @@ class SpeechToText:
                     "Deepgram STT disconnected (%s); retrying in %.1fs", _explain(exc), delay
                 )
                 if self._on_error:
-                    if connected_once:
+                    # `_ever_connected`, not "did this attempt connect": the flag used
+                    # to be set after `_connect_and_pump` returned, which is when the
+                    # socket has already *ended*, so the first drop after a working
+                    # connection was reported as "unavailable — check your key and
+                    # network". Deepgram closing a healthy socket with an internal
+                    # error is a blip, and telling the user their key is wrong sends
+                    # them to fix something that is not broken.
+                    if self._ever_connected:
                         notice = "Speech recognition dropped; reconnecting."
                     else:
                         notice = (
@@ -324,6 +333,13 @@ class SpeechToText:
                 self.settings.stt_model,
             )
             self._dropped_frames = 0
+            if self._ever_connected and self._on_error:
+                # The socket is back, so the notice about it being gone is no longer
+                # true. Nothing used to retract it: the page said recognition was
+                # unavailable — with the fix text for a wrong key — while transcripts
+                # were arriving normally, which is worse than saying nothing.
+                await self._on_error(None)
+            self._ever_connected = True
             sender = asyncio.create_task(self._send_loop(socket))
             receiver = asyncio.create_task(self._receive_loop(socket))
             try:

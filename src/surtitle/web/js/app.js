@@ -864,9 +864,28 @@ function appendWorkLog(turn, log) {
   turn.steps.append(details);
 }
 
-function appendError(turn, message) {
+function appendError(turn, message, kind) {
   const block = node("p", "error", message);
+  // Where it came from, so a notice that stops being true can be taken down. A
+  // voice problem is the one error here that reports a state rather than an event:
+  // it stays true until something retracts it.
+  if (kind) block.dataset.kind = kind;
   turn.root.append(block);
+  return block;
+}
+
+/**
+ * Retract the voice problem notices.
+ *
+ * A dropped recognition socket is reported and then reconnected, and the notice
+ * used to stay on screen afterwards — "speech recognition is unavailable, check
+ * your Deepgram key" — while transcripts were arriving normally. Only the ones this
+ * event is about are removed: a turn that failed is still a turn that failed.
+ */
+function clearVoiceProblems() {
+  for (const block of document.querySelectorAll('.error[data-kind="voice"]')) {
+    block.remove();
+  }
 }
 
 function addToolRow(step, callId, name) {
@@ -2271,6 +2290,16 @@ function handleEvent(event) {
       }
       break;
     }
+    case "voice": {
+      // The voice layer's health, not its output. A problem that has ended is taken
+      // off the screen; the activity panel keeps the record either way.
+      if (!data.problem) {
+        clearVoiceProblems();
+        pushActivity({ label: "Speech recognition recovered", detail: "" });
+        setAgentState(state.micOpen ? "listening" : "idle");
+      }
+      break;
+    }
     case "goal": {
       // Same contract as the plan below: the store is the source of truth, so this
       // replaces rather than merges and cannot drift from the record.
@@ -2295,7 +2324,7 @@ function handleEvent(event) {
       settlePendingApproval("not run — the turn failed");
       clearApproval();
       const turn = state.currentTurn || beginTurn("assistant");
-      appendError(turn, data.message || "Something went wrong.");
+      appendError(turn, data.message || "Something went wrong.", data.kind_detail);
       setAgentState("error");
       if (data.recoverable) toast(data.message, "error");
       break;

@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A dropped speech-recognition socket no longer claims your key is wrong, and the
+  notice is taken down when it comes back.** Deepgram closes healthy sockets with
+  *"An internal server error occurred; please try again later"*, and the engine
+  reconnects within a second — but the flag for "have we ever connected" was set after
+  the connection pump *returned*, which is when the socket has already ended. So the
+  first drop after a working connection was reported as *"Speech recognition is
+  unavailable (RuntimeError). Check your Deepgram key and network."*, sending you to
+  check a key that was fine. It now says **dropped; reconnecting**, and a successful
+  reconnect sends an event that removes the notice — it used to stay on screen, with
+  the fix text for a wrong key, while transcripts were arriving normally. From a real
+  session: `Deepgram STT disconnected (RuntimeError: Deepgram error: An internal server
+  error occurred); retrying in 0.5s`, connected again two seconds later, and the page
+  still said recognition was unavailable.
+
 ## [0.13.0] - 2026-09-20
 
 ### Added

@@ -50,6 +50,10 @@ class EventKind(StrEnum):
     TODOS = "todos"
     GOAL = "goal"
     USAGE = "usage"
+    # A change in the voice layer's health: a problem, or the end of one. Sent
+    # separately from ERROR because "recognised again" is not an error and must not
+    # be rendered as one.
+    VOICE = "voice"
     ERROR = "error"
     DONE = "done"
 

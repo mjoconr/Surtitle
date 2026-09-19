@@ -33,6 +33,8 @@ import pytest
 from surtitle.config import Settings
 from surtitle.llm.deepseek import StreamEvent, ToolCallDelta, Usage
 from surtitle.tools.registry import ToolRegistry, default_tool_list
+from surtitle.voice import stt as stt_module
+from surtitle.voice.stt import SpeechToText
 from surtitle.voice.tts import TextToSpeech
 
 
@@ -1148,3 +1150,119 @@ class TestAudioForAClosedMicrophone:
         assert len(stt.audio) == 1
         assert session._frames_in == 1
         assert session._frames_closed == 0
+
+
+class FakeSttSocket:
+    """A recognition socket that fails on demand, twice over.
+
+    `fail` is consumed one connect attempt at a time: a string raises that error
+    from the receive loop, `None` keeps the socket up until it is stopped.
+    """
+
+    def __init__(self, fail: list[str | None]) -> None:
+        self.fail = fail
+        self.attempts = 0
+        self.sent: list[object] = []
+
+    async def send(self, payload: object) -> None:
+        self.sent.append(payload)
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        index = min(self.attempts - 1, len(self.fail) - 1)
+        failure = self.fail[index] if self.fail else None
+        if failure:
+            raise RuntimeError(failure)
+        # Connected and quiet: hold here until the test stops the engine.
+        await asyncio.sleep(3600)
+        raise StopAsyncIteration
+
+
+class TestWhatADroppedRecognitionSocketSays:
+    """A provider blip is not a configuration error.
+
+    Deepgram closes healthy sockets with "An internal server error occurred; please
+    try again later", and the engine reconnects within a second. The notice for that
+    used to be the one for a key that does not work — "Speech recognition is
+    unavailable (RuntimeError). Check your Deepgram key and network." — because the
+    "have we ever connected" flag was set after the pump *returned*, which is when
+    the socket has already ended. So the first drop after a working connection sent
+    the user to check a key that was fine.
+    """
+
+    async def test_a_blip_says_reconnecting_and_then_says_it_recovered(self, monkeypatch):
+        sockets = FakeSttSocket(["Deepgram error: An internal server error occurred", None])
+        notices: list[str | None] = []
+
+        async def on_error(message):
+            notices.append(message)
+
+        engine = SpeechToText(
+            make_settings(stt_api="v2"), on_transcript=lambda event: None, on_error=on_error
+        )
+        engine._stopped = asyncio.Event()
+
+        class Context:
+            async def __aenter__(self):
+                sockets.attempts += 1
+                return sockets
+
+            async def __aexit__(self, *_exc):
+                return False
+
+        def fake_connect(*_args, **_kwargs):
+            return Context()
+
+        monkeypatch.setattr(stt_module.websockets, "connect", fake_connect)
+
+        task = asyncio.create_task(engine._run())
+        # Long enough for the first attempt to fail and the second to come up.
+        for _ in range(50):
+            if len(notices) >= 2:
+                break
+            await asyncio.sleep(0.05)
+        engine._stopped.set()
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+        assert notices[0] == "Speech recognition dropped; reconnecting."
+        assert "key" not in (notices[0] or ""), "a blip is not a key problem"
+        assert notices[1] is None, "coming back is reported, so the notice can be retracted"
+
+    async def test_a_socket_that_never_comes_up_is_a_key_problem(self, monkeypatch):
+        """The other direction has to keep working: a key that cannot connect at all
+        is exactly what the fix text is for."""
+        notices: list[str | None] = []
+
+        async def on_error(message):
+            notices.append(message)
+
+        engine = SpeechToText(
+            make_settings(stt_api="v2"), on_transcript=lambda event: None, on_error=on_error
+        )
+        engine._stopped = asyncio.Event()
+
+        class Failing:
+            async def __aenter__(self):
+                raise ConnectionRefusedError("no route to host")
+
+            async def __aexit__(self, *_exc):
+                return False
+
+        monkeypatch.setattr(stt_module.websockets, "connect", lambda *a, **k: Failing())
+
+        task = asyncio.create_task(engine._run())
+        for _ in range(50):
+            if notices:
+                break
+            await asyncio.sleep(0.05)
+        engine._stopped.set()
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+        assert notices and "Check your Deepgram key and network." in (notices[0] or "")
+        assert engine._ever_connected is False

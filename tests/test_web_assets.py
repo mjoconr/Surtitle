@@ -1801,3 +1801,27 @@ class TestTheRendererCannotHang:
         count, _, final = output.partition("|")
         assert int(count) == len(table) + 1
         assert "<table" in final and "<td>Lagana</td>" in final, "the finished table renders"
+
+
+class TestAVoiceProblemThatEndsIsTakenOffTheScreen:
+    """The notice is a state, not an event, so something has to retract it.
+
+    A recognition socket that dropped and reconnected left "speech recognition is
+    unavailable — check your Deepgram key and network" on the page while transcripts
+    were arriving normally, which is worse than saying nothing: it sends the user to
+    fix a key that works.
+    """
+
+    def test_the_client_handles_the_recovery_event(self, script):
+        assert 'case "voice"' in script
+        assert "clearVoiceProblems()" in script
+
+    def test_only_voice_notices_are_removed(self, script):
+        assert '.error[data-kind="voice"]' in script.replace(" ", ""), (
+            "a turn that failed is still a turn that failed"
+        )
+
+    def test_an_error_says_where_it_came_from(self, script):
+        assert (
+            'appendError(turn, data.message || "Something went wrong.", data.kind_detail)' in script
+        )
