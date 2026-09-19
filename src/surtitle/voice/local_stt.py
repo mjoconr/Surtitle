@@ -138,7 +138,7 @@ def extension_ms(settings: Settings, text: str) -> int:
     """How long to be silent before ending a turn, given what was heard.
 
     Turn-taking on a local model is a guess, because the recogniser emits no
-    punctuation: "the feeding conveyor is" and "the feeding conveyor is loud" are
+    punctuation: "the ingest worker is" and "the ingest worker is loud" are
     the same kind of thing to it. So the guess is graded, and it leans the way the
     cheaper mistake lies — a moment of extra patience costs nothing, cutting an
     explanation off mid-thought costs the whole answer.

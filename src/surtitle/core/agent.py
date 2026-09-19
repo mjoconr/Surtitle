@@ -115,7 +115,7 @@ _NO_REPLY_FALLBACK = (
 # has open items.
 #
 # This is the other half of "it stopped": the model pauses mid-work — "let me now
-# check the feeder gate", "say go and I'll start at change 1" — with no tool call in
+# check the parser", "say go and I'll start at change 1" — with no tool call in
 # the round, and the loop reads that as the answer. The turn is recorded `complete`,
 # the client shows no banner and offers no Continue, and the Plan tab keeps saying
 # there is work outstanding. On 2026-09-19 that happened eight times in one session,

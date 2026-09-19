@@ -210,7 +210,7 @@ class TestTurnPolicy:
             f"an unfinished thought waited {unfinished}ms, which is not between the "
             f"plain silence ({base}) and the full extension ({extended})"
         )
-        assert extension_ms(settings, "the feeding conveyor is") == extended
+        assert extension_ms(settings, "the ingest worker is") == extended
 
     # ---------------------------------------------------------------------------
     # Local STT
@@ -329,7 +329,7 @@ class TestLocalStt:
         backstop against someone who never pauses, so it must never fire while audio
         is still arriving.
         """
-        FakeRecognizer.script = ["i want to investigate the feeding conveyor and"] * 400
+        FakeRecognizer.script = ["i want to investigate the ingest worker and"] * 400
         engine, events = self._engine(tmp_path, monkeypatch)
         engine.settings.local_max_utterance_ms = 1000
         await engine.start()

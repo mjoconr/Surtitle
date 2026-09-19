@@ -626,7 +626,7 @@ class TestTheRightPanel:
     def test_the_files_panel_leads_with_what_the_turn_touched(self, script):
         """It said what exists, which the user already knew.
 
-        The tree is a fact about the disk; "wrote sim/balegate.lpc" is a fact
+        The tree is a fact about the disk; "wrote out/report.csv" is a fact
         about the conversation, and it is the one worth a tab.
         """
         assert "function renderTouchedFiles()" in script

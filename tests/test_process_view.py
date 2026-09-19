@@ -196,12 +196,10 @@ class TestReasoningIsStored:
         store = FreshStore(tmp_path / "db.sqlite")
         project = store.create_project("P", tmp_path)
         record = store.create_session(project.id)
-        store.add_message(
-            record.id, REASONING_ROLE, "maybe the bale gate signal is I_GrabBalePresent"
-        )
-        store.add_message(record.id, "assistant", "The signal is I_GrabConveyorBalePresent.")
+        store.add_message(record.id, REASONING_ROLE, "maybe the batch job signal is I_IngestFlag")
+        store.add_message(record.id, "assistant", "The signal is I_IngestReadyFlag.")
 
-        hits = store.search_conversations("I_GrabBalePresent")
+        hits = store.search_conversations("I_IngestFlag")
         assert not hits, "stored reasoning must never come back as retrieved history"
 
     async def test_thinking_is_capped_and_keeps_its_conclusion(self, settings, tmp_path, stored):
@@ -626,7 +624,7 @@ class TestATurnThatStopsWithThePlanOpen:
 
     Reported from the real 2026-09-19 session, eight times in one day: the agent
     worked, then ended a round with prose and no tool call — "let me now check the
-    feeder gate", "the sim is not written yet", "say go and I'll start at change 1"
+    parser", "the parser is not written yet", "say go and I'll start at change 1"
     — and the loop read that as the answer. The turn was `complete`, the client
     showed no banner and offered no Continue, and the Plan tab went on claiming
     work was outstanding. Every one of those was answered by the user typing
@@ -647,15 +645,15 @@ class TestATurnThatStopsWithThePlanOpen:
         store.set_todos(
             session_id,
             [
-                {"content": "Read the conveyor machine", "status": "completed"},
-                {"content": "Model the feeder gate", "status": "in_progress"},
+                {"content": "Read the ingest module", "status": "completed"},
+                {"content": "Write the parser", "status": "in_progress"},
             ],
         )
         client = FakeClient(
             [
                 thinking_script("Listing.", call=("list_dir", {"path": "."})),
                 # The pause: prose, and no call to carry it out.
-                thinking_script("Next I will model the feeder gate."),
+                thinking_script("Next I will write the parser."),
                 thinking_script("Modelled it."),
             ]
         )
@@ -673,10 +671,10 @@ class TestATurnThatStopsWithThePlanOpen:
         assert len(client.calls) == 3, "a pause with the plan open must be asked to carry on"
         nudge = client.calls[2]["messages"][-1]
         assert nudge["role"] == "user"
-        assert "Model the feeder gate" in nudge["content"], (
+        assert "Write the parser" in nudge["content"], (
             "the ask must name the item the user can see, not just say 'continue'"
         )
-        assert "Read the conveyor machine" not in nudge["content"], (
+        assert "Read the ingest module" not in nudge["content"], (
             "a ticked item is not outstanding and must not be named as one"
         )
         done = next(e for e in events if e.kind is EventKind.DONE)
@@ -687,7 +685,7 @@ class TestATurnThatStopsWithThePlanOpen:
     ):
         """A model that answers twice without a call is answering, not stalling."""
         store, session_id = stored
-        store.set_todos(session_id, [{"content": "Model the feeder gate"}])
+        store.set_todos(session_id, [{"content": "Write the parser"}])
         client = FakeClient(
             [
                 thinking_script("Listing.", call=("list_dir", {"path": "."})),
@@ -717,7 +715,7 @@ class TestATurnThatStopsWithThePlanOpen:
         store, session_id = stored
         store.set_todos(
             session_id,
-            [{"content": "Read the conveyor machine", "status": "completed"}],
+            [{"content": "Read the ingest module", "status": "completed"}],
         )
         client = FakeClient(
             [
@@ -743,7 +741,7 @@ class TestATurnThatStopsWithThePlanOpen:
     ):
         """A plan open does not make every answer a pause in the work."""
         store, session_id = stored
-        store.set_todos(session_id, [{"content": "Model the feeder gate"}])
+        store.set_todos(session_id, [{"content": "Write the parser"}])
         client = FakeClient([thinking_script("The gate item is still open.")])
         loop = make_loop(settings, tmp_path, client, store=store, session_id=session_id)
 

@@ -1348,7 +1348,7 @@ function noteTouched(name, args) {
 /**
  * What this turn has touched, ahead of the tree below it.
  *
- * "Wrote sim/balegate.lpc" is a fact about the conversation; a directory listing
+ * "Wrote out/report.csv" is a fact about the conversation; a directory listing
  * is a fact about the disk. The panel is worth a tab because of the first.
  */
 function renderTouchedFiles() {

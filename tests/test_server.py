@@ -298,12 +298,12 @@ class TestProjectNotebook:
         from surtitle.tools import environment
 
         environment.write_notes(
-            Path(project["root"]), "The 122 feeder only tips once the cutter is empty."
+            Path(project["root"]), "The intake line only runs once the hopper is empty."
         )
 
         body = (await client.get(f"/api/projects/{project['id']}/notes")).json()
 
-        assert "only tips once the cutter is empty" in body["notes"]
+        assert "only runs once the hopper is empty" in body["notes"]
         assert body["chars"] == len(body["notes"])
         assert body["path"].endswith("notes.md")
         assert body["updated_at"], "the panel says when it was last written"
