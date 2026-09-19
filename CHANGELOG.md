@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-09-19
+
+### Fixed
+
+- **A turn whose model round came back empty is no longer stored as a success with
+  nothing in it.** The wrap-up added in 0.9.0 was asked only of a turn that had
+  already done work, so a model that answered the *first* round with nothing at all
+  fell through and was stored as `complete` with a zero-character assistant
+  message: silence, no work log, no stop banner and no Continue button — the one
+  shape of "it stopped" with nothing on screen to act on. Two real turns on
+  2026-09-19 were stored that way. The wrap-up is asked whenever the closing round
+  is empty, and a turn that is still empty after being asked is reported as having
+  no answer, spoken and banner'd, in the form that matches whether it had a work
+  log.
+- **A spoken utterance no longer runs a second turn beside the one it replaced.**
+  Speaking over the agent cancels the running turn, and a cancelled turn's exit
+  drains the queue — so a request already waiting behind it was started, and then
+  the utterance was started on top of that. Two turns ran at once, one of them
+  untracked and unreachable by Stop, with both replies and both reasoning streams
+  interleaved into one conversation. The real 2026-09-19 session shows the shape:
+  two `turn ended` lines seven seconds apart and two assistant messages written into
+  one turn. The drain is now held for exactly the replacement, and a request that
+  arrives as a turn starts is no longer able to race the turn already starting.
+
 ## [0.9.0] - 2026-09-19
 
 ### Added
@@ -782,7 +806,8 @@ Then:
 - Speech models are **not** carried over by the `.env` change alone. If you skip
   the data-directory move, run `surtitle models download` to fetch them again.
 
-[Unreleased]: https://github.com/mjoconr/Surtitle/compare/v0.9.0...HEAD
+[0.9.1]: https://github.com/mjoconr/Surtitle/compare/v0.9.0...v0.9.1
+[Unreleased]: https://github.com/mjoconr/Surtitle/compare/v0.9.1...HEAD
 [0.9.0]: https://github.com/mjoconr/Surtitle/releases/tag/v0.9.0
 [0.8.1]: https://github.com/mjoconr/Surtitle/releases/tag/v0.8.1
 [0.8.0]: https://github.com/mjoconr/Surtitle/releases/tag/v0.8.0
