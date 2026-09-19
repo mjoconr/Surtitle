@@ -7,6 +7,97 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-09-19
+
+### Added
+
+- **The agent can see its own plan, and knows what is on your screen.** The plan
+  was write-only: `todo_write` recorded it and nothing ever replayed it, so an
+  agent whose context had moved on could not say which item was still unticked —
+  and when asked exactly that, it could not. The plan now reaches the agent at the
+  start of every turn, with the state of each item and a plain statement of what
+  is unfinished, so "which item is left?" is a lookup rather than a guess. The
+  prompt also describes the interface it is speaking into: the conversation
+  column, the Files / Activity / Plan tabs, the fact that the Plan tab appears
+  when a plan is written and then stays — after the turn ends and across a reload
+  — and that speaking over it or stopping it ends the turn where it stands.
+- **The agent no longer announces that it is about to check something.** Checking
+  is the standing expectation, so "I'm not sure, I'll need to look at the details"
+  is the same sentence every turn and tells the user nothing they did not already
+  know. It looks, and reports what it found. Offering to check something
+  checkable is out too: an assumption worth stating is one that looking cannot
+  settle.
+- `search_history` now searches the conversation in progress as well as earlier
+  ones, and labels each hit with where it came from. Excluding the current session
+  removed the only way to recover work that had aged out of the replayed context,
+  which is precisely when an agent concludes that somebody else must have done it.
+
+### Fixed
+
+- **A finished conversation is no longer labelled "Stopped" when you reopen it.**
+  The reload path raised the banner whenever the replayed transcript contained any
+  thinking or tool call — which is every turn that ever did anything — and blamed
+  the step limit, a cause the browser has no way to know. Reopening a conversation
+  that had completed normally put "Stopped — the step limit was reached" above a
+  complete answer. A stopped turn is now one that was *never answered*, and the
+  banner says only what is known: the turn was interrupted, whether by a restart,
+  a cancellation, or a crash.
+- **"Deep diving…" no longer sits on screen after the turn has ended.** Clearing
+  the working line and writing the frozen step durations happen in the same pass,
+  and the line was removed before that pass rather than after — so any row left
+  un-ended put it straight back, and the timer was stopped immediately afterwards.
+  The result was a frozen "Deep diving… 1m 11s" beside a finished answer, which
+  reads as the agent still working. A turn that has ended is now never shown as
+  working, whatever a leftover row says.
+- **A turn no longer ends with its answer only on screen.** The "must not be
+  silent" guarantee was checked across the whole turn, so a turn that opened with
+  a spoken "Let me find the push route before I write anything" and then finished
+  with the entire result — the note, the revision, the question about committing —
+  in the display channel passed it. A listening user heard the intention and then
+  silence. The round that ends the turn is now checked on its own: if it produces
+  nothing to say, its conclusion is spoken. The prompt also asks for a closing
+  line carrying the outcome, and says plainly that `<display>` is for the
+  evidence behind the answer rather than a diary of the search.
+- **The microphone works again.** Letting several conversations run at once
+  replaced the single socket with one per conversation, and rebound every call
+  site but one: the capture callback still sent its audio frames to the old
+  single-socket name. A bare `connection` does not fail loudly in a browser — it
+  resolves to the element with `id="connection"` — so every captured frame threw
+  `sendAudio is not a function` and was dropped. Capture reported success and the
+  level meter moved while the server received nothing at all, logging "no audio
+  arrived for this listening session -- the problem is in the browser's capture",
+  which points at the wrong end of the wire. Frames now go to the conversation on
+  screen, which is the one the microphone follows.
+- **A long conversation no longer erases what the agent has just done.** The
+  context replayed to the model was taken from the *beginning* of the transcript
+  rather than the end (`ORDER BY id ASC LIMIT 40`), and reasoning is stored as one
+  row per step — so a session consumed its 40 rows within the first turn or two
+  and the model saw only its opening exchange for the rest of it. In the session
+  this was found in, the replayed window held three messages from the first ninety
+  seconds while 190 tool calls, two commits and an entire feature were built
+  outside it. The agent then re-proposed work it had already finished and reported
+  that "somebody" had already done it, and could not tell that the somebody was
+  itself. The window is now the **newest** messages, counted over the conversation
+  rather than the audit trail beside it.
+- **An ordinary finished turn is no longer labelled "Stopped".** The stop
+  banner's reason lookup ended in a default of `{ title: "Stopped", detail: "" }`,
+  so `reason: "complete"` — every turn that goes well — put a bare "Stopped" on
+  screen with nothing underneath it. Only the endings that need explaining now get
+  a banner: the step limit, a turn that did work but produced no answer, and a
+  failure.
+- **Echo suppression is no longer lifted about 0.2 seconds into every reply.** The
+  watchdog measures silence against the last audio frame actually sent, and during
+  a think — or simply between turns — that timestamp is minutes old, so its next
+  tick judged live suppression stale and released it, leaving the microphone open
+  for the whole answer. The silence clock now starts when speech does. The log said
+  it plainly: `echo suppression had outlived the agent's audio by 115.6s (0
+  transcript(s) were discarded while it was on)` — the counter was zero because
+  suppression had not been doing anything.
+- **The transcript and its command list keep their most recent entries when they
+  are capped.** `list_messages` and `list_tool_calls` took the first N rows as
+  well, so a long conversation showed its opening rather than what had just
+  happened — in the model's case with the consequences described above.
+
 ## [0.8.0] - 2026-09-19
 
 ### Added
