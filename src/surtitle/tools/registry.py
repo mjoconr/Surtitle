@@ -21,6 +21,7 @@ from surtitle.tools.fs_tools import ToolContext, ToolResult
 from surtitle.vcs.guide import DETAIL_LEVELS, detail_menu
 
 __all__ = [
+    "TODO_TOOL",
     "Tool",
     "ToolRegistry",
     "build_registry_for_project",
@@ -573,6 +574,96 @@ class ToolRegistry:
         return outcome
 
 
+TODO_TOOL = "todo_write"
+
+
+def _todo_write_handler(ctx: ToolContext, todos: list[dict[str, Any]] | None = None) -> ToolResult:
+    """Record the agent's plan for the conversation.
+
+    The plan is not a file and nothing about it is destructive: it is state the
+    user watches to see what the agent believes it is doing and how far it has
+    got. That is why it needs no approval — and why it is worth the model
+    updating as it goes rather than only when asked.
+    """
+    if ctx.store is None or not ctx.session_id:
+        return ToolResult(
+            ok=False,
+            error="There is nowhere to record a plan in this session.",
+        )
+    if not isinstance(todos, list) or not todos:
+        return ToolResult(
+            ok=False,
+            error=(
+                "Provide the full plan as a non-empty 'todos' array. To clear the plan, "
+                "send every item with status 'completed'."
+            ),
+        )
+    stored = ctx.store.set_todos(ctx.session_id, todos)
+    if not stored:
+        return ToolResult(
+            ok=False,
+            error="Every item needs non-empty 'content'. Nothing was recorded.",
+        )
+    done = sum(1 for item in stored if item["status"] == "completed")
+    active = next((item for item in stored if item["status"] == "in_progress"), None)
+    lines = [
+        f"[{item['status']}] {item['content']}"
+        + (f" — {item['activeForm']}" if item["activeForm"] else "")
+        for item in stored
+    ]
+    head = f"Plan recorded: {done}/{len(stored)} complete"
+    if active:
+        head += f", now on: {active['content']}"
+    return ToolResult(
+        ok=True,
+        data={"todos": stored, "completed": done, "total": len(stored)},
+        display=head + "\n" + "\n".join(lines),
+    )
+
+
+_TODO_WRITE = Tool(
+    name=TODO_TOOL,
+    description=(
+        "Record and update your plan for the current piece of work, so the user can "
+        "see what you are doing and how far you have got. Call it once at the start "
+        "of anything that takes more than a couple of steps, and again whenever an "
+        "item starts, finishes or turns out to be unnecessary. Send the *whole* "
+        "list every time, not just the item that changed: it replaces the previous "
+        "plan. Exactly one item may be in_progress at a time. Keep items short and "
+        "concrete ('Index the sampler logs', not 'Investigate the problem'). This "
+        "tool only records the plan; it does not do the work."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "todos": {
+                "type": "array",
+                "description": "The complete plan, in order.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "content": _string("Imperative form: what is to be done."),
+                        "activeForm": _string(
+                            "Present continuous form, shown while it is in progress."
+                        ),
+                        "status": {
+                            "type": "string",
+                            "enum": ["pending", "in_progress", "completed"],
+                            "description": "Where this item stands.",
+                        },
+                    },
+                    "required": ["content", "status"],
+                },
+            }
+        },
+        "required": ["todos"],
+    },
+    handler=_todo_write_handler,
+    approval="never",
+    summary="Record a plan",
+)
+
+
 def default_tool_list() -> list[Tool]:
     """Every tool the agent may use."""
     return [
@@ -587,6 +678,7 @@ def default_tool_list() -> list[Tool]:
         _MAKE_SPREADSHEET,
         _MAKE_CHART,
         _CONVERT_DOCUMENT,
+        _TODO_WRITE,
     ]
 
 

@@ -47,6 +47,7 @@ class EventKind(StrEnum):
     APPROVAL_REQUEST = "approval_request"
     TOOL_RESULT = "tool_result"
     ARTIFACT = "artifact"
+    TODOS = "todos"
     USAGE = "usage"
     ERROR = "error"
     DONE = "done"

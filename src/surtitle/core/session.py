@@ -24,7 +24,13 @@ from pathlib import Path
 from typing import Any
 
 from surtitle.config import Settings
-from surtitle.core.agent import AgentLoop, ApprovalBroker, RepeatCallGuard
+from surtitle.core.agent import (
+    NEAR_BUDGET_FRACTION,
+    PROGRESS_STEPS,
+    AgentLoop,
+    ApprovalBroker,
+    RepeatCallGuard,
+)
 from surtitle.core.events import Event, EventKind, SessionState
 from surtitle.core.speak import Chunk, ChunkKind
 from surtitle.llm.deepseek import ChatMessage, DeepSeekClient
@@ -46,8 +52,9 @@ __all__ = ["Session", "SessionManager"]
 log = logging.getLogger(__name__)
 
 # Step counts at which a long, silent turn says it is still working. Escalating,
-# so the first is early enough to reassure and the rest are rare.
-_PROGRESS_STEPS = (8, 20, 45, 90, 180)
+# so the first is early enough to reassure and the rest are rare. The schedule
+# lives beside the step budget it describes, so the two cannot drift apart.
+_PROGRESS_STEPS = PROGRESS_STEPS
 
 # How many transcript messages to replay into the model as context.
 _HISTORY_LIMIT = 40
@@ -503,24 +510,34 @@ class Session:
 
     # --- the turn --------------------------------------------------------
     async def _speak_problem(self, data: dict[str, Any]) -> None:
-        """Say aloud that the turn ended badly.
+        """Say aloud that the turn ended badly, or stopped short of finishing.
 
         A voice-first user is listening, not reading. The error is displayed, but
         silence is indistinguishable from the agent having quietly stopped — which
         is exactly how a turn that exhausted its step budget was reported. The
         screen keeps the detail; the spoken channel gets one short sentence saying
         what happened and what to do.
+
+        The step-budget case is deliberately not phrased as a failure: nothing went
+        wrong, the turn simply reached its limit with work still to do, and the
+        user can continue it from where it got to.
         """
         if self.tts is None:
             return
+        kind = str(data.get("reason") or data.get("kind_detail") or "")
         spoken = {
             "step_limit": (
-                "I ran out of steps before finishing that. Ask me to carry on, "
-                "or give me a smaller piece of it."
+                "I reached the step limit for one turn, so I've stopped part-way. "
+                "Say continue and I'll carry on from here."
             ),
+            "no_answer": (
+                "I finished that turn without saying anything, which is no use to you. "
+                "The work is on screen — ask me again and I'll answer properly."
+            ),
+            "failed": "That turn ended with an error, so I stopped. The detail is on screen.",
             "llm": "I lost the connection to the model, so that turn stopped.",
             "internal": "Something went wrong part-way through that turn.",
-        }.get(str(data.get("kind_detail") or ""), "That turn ended before it finished.")
+        }.get(kind, "That turn ended before it finished.")
         with contextlib.suppress(Exception):
             await self._speak_chunk(Chunk(ChunkKind.SAY, spoken, final=True))
 
@@ -546,6 +563,34 @@ class Session:
                 Chunk(ChunkKind.SAY, f"Still working on this, about {step} steps in.", final=False)
             )
 
+    async def _speak_budget(self, step: int, budget: int) -> None:
+        """Warn, once, that the step budget for this turn is nearly spent.
+
+        A turn that reaches its limit simply stops, and until this existed the
+        stop arrived with no warning at all: the agent went quiet mid-task and the
+        user had to guess whether it had finished. Saying so in advance turns a
+        surprise into an expected hand-over — and names the way to continue.
+
+        Not final, for the same reason as the progress line: the turn is still
+        running and will speak again when it stops.
+        """
+        if self.tts is None:
+            return
+        # How many steps are left, counted from the model's own budget rather than
+        # a fixed threshold, so a configured SURTITLE_MAX_STEPS is described
+        # correctly at any value.
+        remaining = max(0, budget - step)
+        left = "a few steps" if remaining <= 5 else f"about {remaining} steps"
+        with contextlib.suppress(Exception):
+            await self._speak_chunk(
+                Chunk(
+                    ChunkKind.SAY,
+                    f"I'm {left} from my limit for one turn. If I stop before "
+                    "finishing, say continue and I'll pick up where I left off.",
+                    final=False,
+                )
+            )
+
     async def _run_turn(self, user_text: str) -> None:
         """Run one agent turn, streaming speech and events as they are produced."""
         loop = AgentLoop(
@@ -569,6 +614,9 @@ class Session:
         # only while the agent has not said anything of its own.
         announced: set[int] = set()
         spoke = False
+        # Set once the near-budget warning has been spoken, so it is said once per
+        # turn rather than at every step past the threshold.
+        warned_budget = False
 
         async def on_chunk(chunk: Chunk) -> None:
             nonlocal spoke
@@ -582,15 +630,37 @@ class Session:
                     await self._on_approval_requested(event.data)
                 elif event.kind is EventKind.ERROR:
                     await self._speak_problem(event.data)
+                elif event.kind is EventKind.DONE and event.data.get("reason") not in (
+                    None,
+                    "complete",
+                ):
+                    # A turn that ends for any reason other than finishing says so
+                    # aloud, in the same sentence the transcript shows. A turn cut
+                    # short used to go quiet: the indicator slid back to "Idle" and
+                    # nothing distinguished "done" from "gave up", so the only way
+                    # to find out was to ask again.
+                    await self._speak_problem(event.data)
                 elif event.kind is EventKind.STATE and not spoke:
-                    step = event.data.get("step")
+                    current = int(event.data.get("step") or 0)
                     due = next(
-                        (n for n in _PROGRESS_STEPS if n <= int(step or 0) and n not in announced),
+                        (n for n in _PROGRESS_STEPS if n <= current and n not in announced),
                         None,
                     )
                     if due is not None:
                         announced.add(due)
-                        await self._speak_progress(int(step))
+                        await self._speak_progress(current)
+                    # Approaching the budget is the one moment where going quiet is
+                    # worst: the turn is about to stop with work outstanding, and
+                    # the user has no way to know whether to wait or to speak. Say
+                    # it once, so the stop that follows is expected.
+                    budget = int(getattr(self.settings, "max_steps", 0) or 0)
+                    if (
+                        not warned_budget
+                        and budget > 0
+                        and current >= budget * NEAR_BUDGET_FRACTION
+                    ):
+                        warned_budget = True
+                        await self._speak_budget(current, budget)
                 await self._emit_or_queue(event)
         except asyncio.CancelledError:
             if self.tts is not None:

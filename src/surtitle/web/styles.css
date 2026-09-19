@@ -577,6 +577,371 @@ button, input, textarea, select {
   position: relative;
 }
 
+/* --------------------------------------------------------------- steps */
+/*
+ * A step is one model round: it thinks, then runs what it decided to run. The
+ * group is what makes a long turn readable — a rail and a numbered header say
+ * where one round of work ends and the next begins, which a flat list of tool
+ * rows cannot.
+ */
+.step {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-left: 2px solid var(--dsw-alias-border-l2);
+  padding-left: 10px;
+  margin: 2px 0 6px 2px;
+}
+
+.step[data-state="ok"] { border-left-color: var(--dsw-alias-state-success-primary); }
+.step[data-state="error"] { border-left-color: var(--dsw-alias-state-error-primary); }
+.step[data-state="running"] { border-left-color: var(--dsw-alias-state-business-primary); }
+
+.step[data-flash="true"] {
+  animation: step-flash 1.2s ease-out;
+  border-radius: 6px;
+}
+
+@keyframes step-flash {
+  0% { background: var(--dsw-alias-interactive-bg-hover); }
+  100% { background: transparent; }
+}
+
+.step__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  font: var(--dsw-font-xxs-12);
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.step__index {
+  flex: none;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--dsw-alias-bg-module-platform);
+  color: var(--dsw-alias-label-secondary);
+  font-variant-numeric: tabular-nums;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.step__summary {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Tabular figures, so a ticking clock does not make the row jitter. */
+.step__timer,
+.toolrow__timer,
+.actrow__time {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+  color: var(--dsw-alias-label-caption);
+  font-size: 11px;
+}
+
+.step__body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.step__thinking,
+.step__tools {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.step__thinking:empty,
+.step__tools:empty { display: none; }
+
+/* --------------------------------------------------------------- think */
+/*
+ * Thinking is quoted rather than boxed: it is not the answer and must not read
+ * as one, but it is worth being able to open when the commands alone do not
+ * explain what the agent was attempting.
+ */
+.think {
+  border-left: 2px solid var(--dsw-alias-border-l3);
+  padding-left: 8px;
+}
+
+.think__head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  color: var(--dsw-alias-label-tertiary);
+  font: var(--dsw-font-xxs-12);
+}
+
+.think__chevron {
+  flex: none;
+  transition: transform 0.12s ease-in-out;
+  font-size: 9px;
+}
+
+.think__head[aria-expanded="false"] .think__chevron { transform: rotate(-90deg); }
+
+.think__title { font-weight: 600; flex: none; }
+
+.think__peek {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dsw-alias-label-caption);
+}
+
+.think__head[aria-expanded="true"] .think__peek { display: none; }
+
+.think__body {
+  margin-top: 4px;
+  padding-left: 2px;
+  color: var(--dsw-alias-label-secondary);
+  font-size: var(--dsh-content-font-size-secondary);
+  line-height: 20px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 320px;
+  overflow: auto;
+}
+
+/* ----------------------------------------------------- working / timer */
+/*
+ * The trailing "Deep diving… 14m 38s" line. The state pill says "Thinking"
+ * whether that has been true for one second or twenty minutes; this is the
+ * thing that distinguishes working from hung.
+ */
+.working {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  color: var(--dsw-alias-label-tertiary);
+  font: var(--dsw-font-xxs-12);
+}
+
+.working__dots::after {
+  content: "…";
+  animation: working-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes working-pulse {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 1; }
+}
+
+.working__time { font-variant-numeric: tabular-nums; }
+
+/* --------------------------------------------------------- stop notice */
+/*
+ * Why the last turn ended, when it did not simply finish. Anchored above the
+ * composer rather than inside the transcript so it is seen even when the
+ * transcript has been scrolled back to read something earlier.
+ */
+.stopnote {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 0 auto 8px;
+  max-width: var(--dsh-chat-content-width);
+  width: 100%;
+  padding: 10px 12px;
+  border: 0.5px solid var(--dsw-alias-border-l2);
+  border-left: 3px solid var(--dsw-alias-state-warn-primary);
+  border-radius: 12px;
+  background: var(--dsw-alias-bg-module-platform);
+}
+
+.stopnote[data-reason="failed"] { border-left-color: var(--dsw-alias-state-error-primary); }
+
+.stopnote__icon {
+  flex: none;
+  color: var(--dsw-alias-state-warn-primary);
+  font-size: 10px;
+  line-height: 18px;
+}
+
+.stopnote[data-reason="failed"] .stopnote__icon { color: var(--dsw-alias-state-error-primary); }
+
+.stopnote__main { flex: 1; min-width: 0; }
+
+.stopnote__title {
+  font: var(--dsw-font-xs-strong-13);
+  color: var(--dsw-alias-label-primary);
+}
+
+.stopnote__detail {
+  margin-top: 2px;
+  color: var(--dsw-alias-label-secondary);
+  font: var(--dsw-font-xs-13);
+}
+
+/* ----------------------------------------------------- activity panel */
+.actcard {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin-bottom: 10px;
+  border: 0.5px solid var(--dsw-alias-border-l1);
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--dsw-alias-markdown-code-block);
+}
+
+.actcard__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--dsw-alias-bg-module-platform);
+  color: var(--dsw-alias-label-secondary);
+  font: var(--dsw-font-xxs-12);
+}
+
+.actcard__index { font-weight: 600; }
+
+.actcard__time {
+  font-variant-numeric: tabular-nums;
+  color: var(--dsw-alias-label-caption);
+}
+
+.actcard__think {
+  display: flex;
+  gap: 6px;
+  padding: 6px 10px;
+  border-left: 2px solid var(--dsw-alias-border-l3);
+}
+
+.actcard__thinkTitle {
+  flex: none;
+  color: var(--dsw-alias-label-tertiary);
+  font: var(--dsw-font-xxs-12);
+  font-weight: 600;
+}
+
+.actcard__thinkText {
+  min-width: 0;
+  color: var(--dsw-alias-label-secondary);
+  font: var(--dsw-font-xxs-12);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.actrow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
+  cursor: pointer;
+}
+
+.actrow:hover { background: var(--dsw-alias-interactive-bg-hover); }
+
+.actrow__dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--dsw-alias-state-business-primary);
+}
+
+.actrow[data-state="ok"] .actrow__dot { background: var(--dsw-alias-state-success-primary); }
+.actrow[data-state="error"] .actrow__dot { background: var(--dsw-alias-state-error-primary); }
+
+.actrow__main { flex: 1; min-width: 0; }
+
+.actrow__title {
+  color: var(--dsw-alias-label-primary);
+  font: var(--dsw-font-xxs-12);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.actrow__detail {
+  color: var(--dsw-alias-label-caption);
+  font: 11px/16px var(--ds-font-family-code);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ----------------------------------------------------------------- plan */
+.todohead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 2px 2px 8px;
+  color: var(--dsw-alias-label-secondary);
+  font: var(--dsw-font-xs-strong-13);
+}
+
+.todohead__count {
+  font-variant-numeric: tabular-nums;
+  color: var(--dsw-alias-label-caption);
+}
+
+.todolist { display: flex; flex-direction: column; gap: 4px; }
+
+.todo {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 0.5px solid var(--dsw-alias-border-l1);
+  border-radius: 8px;
+  background: var(--dsw-alias-markdown-code-block);
+}
+
+.todo__box { flex: none; color: var(--dsw-alias-label-caption); }
+.todo__main { min-width: 0; }
+
+.todo__text {
+  color: var(--dsw-alias-label-primary);
+  font: var(--dsw-font-xs-13);
+}
+
+.todo__active {
+  color: var(--dsw-alias-label-caption);
+  font: var(--dsw-font-xxs-12);
+}
+
+/* Completed work is struck through and dimmed: the plan is read to find what is
+   still outstanding, and the finished items must not compete with those. */
+.todo[data-status="completed"] .todo__box { color: var(--dsw-alias-state-success-primary); }
+.todo[data-status="completed"] .todo__text {
+  color: var(--dsw-alias-label-tertiary);
+  text-decoration: line-through;
+}
+
+.todo[data-status="in_progress"] {
+  border-color: var(--dsw-alias-state-business-primary);
+}
+
+.todo[data-status="in_progress"] .todo__box { color: var(--dsw-alias-state-business-primary); }
+
 .toolrow__head {
   display: flex;
   align-items: center;

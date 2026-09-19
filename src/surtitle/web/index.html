@@ -81,6 +81,26 @@
       <div class="transcript__column" id="turns"></div>
     </div>
 
+    <!-- Why the last turn ended, when it did not simply finish.
+         A stopped turn used to be silent: the working indicator went back to
+         "Idle" and nothing said whether the work was done or abandoned, so the
+         only way to find out was to ask again — and the answer might have been
+         sitting in the transcript the whole time. This says what happened, in
+         the same words the agent speaks, and offers the one action that resumes
+         it. -->
+    <div class="stopnote" id="stopNote" hidden>
+      <span class="stopnote__icon" aria-hidden="true">■</span>
+      <div class="stopnote__main">
+        <div class="stopnote__title" id="stopTitle">Stopped</div>
+        <div class="stopnote__detail" id="stopDetail"></div>
+      </div>
+      <button class="button button--primary button--tiny" id="stopContinue" type="button" hidden>
+        Continue
+      </button>
+      <button class="button button--icon button--ghost" id="stopDismiss" type="button"
+              aria-label="Dismiss">✕</button>
+    </div>
+
     <div class="captions" id="captions"></div>
 
     <div class="composer">
@@ -132,6 +152,9 @@
     <div class="rightbar__tabs" role="tablist">
       <button class="tab" id="tabFiles" role="tab" aria-selected="true" type="button">Files</button>
       <button class="tab" id="tabActivity" role="tab" aria-selected="false" type="button">Activity</button>
+      <!-- Hidden until the agent writes a plan, so the panel is not offering an
+           empty tab on every conversation. -->
+      <button class="tab" id="tabTodo" role="tab" aria-selected="false" type="button" hidden>Plan</button>
     </div>
     <div class="rightbar__body" id="rightbarBody"></div>
   </aside>

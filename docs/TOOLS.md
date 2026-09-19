@@ -20,12 +20,16 @@ asks about packages the project has not already approved.
 |---|---|---|
 | `list_dir`, `read_file`, `search_files` | never | no |
 | `environment_info`, `search_packages` | never | no |
+| `todo_write` | never | no |
 | `write_file`, `edit_file` | ask | yes |
 | `run_python`, `run_shell` | ask | yes |
 | `make_pdf`, `make_spreadsheet`, `make_chart` | ask | yes |
 | `convert_document` | ask | yes |
 | `install_packages` | ask (per new package) | yes |
 | `<server>__<tool>` (MCP) | ask, unless `trusted_tools` | yes |
+
+`todo_write` writes no file, so it never asks: it records the plan the user watches
+while the agent works. See [The plan](#the-plan).
 
 ## Confinement
 
@@ -243,6 +247,29 @@ Implemented over stdio JSON-RPC (`initialize`, `notifications/initialized`, `too
 `tools/call`) rather than the official SDK, whose dependency chain requires a Rust build
 and would defeat the no-toolchain Windows release. Timeouts, process-group kills and
 shutdown follow the same patterns as the rest of the app.
+
+## The plan
+
+`todo_write` records what the agent intends to do and how far it has got, so a long
+piece of work can be watched rather than waited on. It is the one tool that changes
+nothing outside Surtitle's own database: no file, no command, so no approval.
+
+The whole list is sent on every call and replaces the previous plan — a merge would
+leave items the agent deliberately dropped still showing as outstanding work. Exactly
+one item may be `in_progress`. Statuses outside `pending` / `in_progress` /
+`completed` are stored as `pending` rather than rejected: a plan that failed to save
+because the model invented a fourth value would be worse than one that reads as
+not-started.
+
+The plan belongs to the **conversation**, not the turn, which is the point of it: an
+agent that stops with three items pending has not finished, and this is what says so
+after a reload. It is rendered in the Plan tab of the right-hand panel, and returned
+with `GET /api/sessions/{id}` as `todos`.
+
+Stored reasoning is the other half of the same picture, and is deliberately *not*
+searchable: it is a private brainstorm full of self-corrections and of guesses the
+model declined to act on, and returning one later as "what you did before" would put
+a discarded idea back in front of the model as though it were a finding.
 
 ## Adding a tool
 

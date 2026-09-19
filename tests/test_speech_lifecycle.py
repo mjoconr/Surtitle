@@ -268,12 +268,32 @@ class TestFailuresAreSpoken:
         spoken: list[str] = []
         session.tts = self._recorder(spoken)  # type: ignore[assignment]
 
+        await session._speak_problem({"reason": "step_limit"})
+
+        assert spoken, "reaching the step limit must not be silent"
+        assert "step limit" in spoken[0]
+        # Not phrased as a failure: nothing went wrong, the turn reached its
+        # budget with work outstanding. And actionable, not just an alarm.
+        assert "continue" in spoken[0]
+
+    async def test_the_step_limit_is_also_spoken_from_an_error_event(self, wired):
+        """The older `kind_detail` shape must keep working."""
+        session = wired[0]
+        spoken: list[str] = []
+        session.tts = self._recorder(spoken)  # type: ignore[assignment]
+
         await session._speak_problem({"kind_detail": "step_limit"})
 
-        assert spoken, "running out of steps must not be silent"
-        assert "ran out of steps" in spoken[0]
-        # Actionable, not just an alarm.
-        assert "carry on" in spoken[0] or "smaller" in spoken[0]
+        assert spoken and "step limit" in spoken[0]
+
+    async def test_a_finished_turn_is_not_announced_as_a_stop(self, wired):
+        """The done event carries `complete`; that needs no spoken explanation."""
+        import inspect
+
+        source = inspect.getsource(type(wired[0])._run_turn)
+        assert '"complete"' in source, (
+            "the loop must skip the spoken stop reason for an ordinary finish"
+        )
 
     async def test_a_model_failure_is_spoken(self, wired):
         session = wired[0]

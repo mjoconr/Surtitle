@@ -34,10 +34,10 @@ from surtitle.config import Settings
 from surtitle.core.events import Event, EventKind, SessionState
 from surtitle.core.speak import Chunk, ChunkKind, SpeakParser, repair_fallback
 from surtitle.llm.deepseek import ChatMessage, DeepSeekClient, DeepSeekError, ToolCallDelta
-from surtitle.store.db import Store
+from surtitle.store.db import REASONING_ROLE, Store
 from surtitle.tools import environment
 from surtitle.tools.fs_tools import ToolContext, ToolResult
-from surtitle.tools.registry import ToolRegistry, default_registry
+from surtitle.tools.registry import TODO_TOOL, ToolRegistry, default_registry
 
 __all__ = ["AgentLoop", "ApprovalBroker", "RepeatCallGuard", "build_system_prompt"]
 
@@ -63,6 +63,46 @@ _DISPLAY_SUMMARY_CHARS = 160
 _ACTION_OUTPUT_CHARS = 320
 # The durable record is not replayed every turn, so it can keep more.
 _STORED_OUTPUT_CHARS = 4000
+
+# How much of one step's thinking is stored for the transcript.
+#
+# Thinking is verbose — a long turn is easily tens of thousands of characters —
+# and it is kept only so a reopened conversation can show *how* the work was
+# approached, alongside the tool calls that step made. The cap is per step rather
+# than per turn so one runaway step cannot crowd out the rest of the record, and
+# the tail is kept on truncation because that is where the conclusion is: the
+# model's reasoning ends with what it decided to do next.
+_REASONING_STORED_CHARS = 20000
+
+# The step counts at which a long turn says it is still going, and the fraction
+# of the budget at which it warns that the budget is nearly spent.
+#
+# Announced at increasing thresholds rather than every step so the narration does
+# not become the noise it exists to prevent. The near-budget warning is the one
+# that matters most: a user who hears "I am nearly out of steps" knows to expect
+# either a finish or a prompt to continue, instead of watching it go quiet.
+PROGRESS_STEPS = (5, 15, 40, 90)
+NEAR_BUDGET_FRACTION = 0.9
+
+# Asked for when a turn's model round produced no text at all, after the turn has
+# already done work. Phrased as a last round rather than a summary so a model that
+# was still mid-investigation is not cut off — it can finish what it was doing and
+# then say so.
+_WRAP_UP_INSTRUCTION = (
+    "Your last response had no spoken or displayed text in it. The user has heard "
+    "nothing from this turn.\n\n"
+    "Stop calling tools and reply now, using the <say> and <display> tags: say what "
+    "you found and what you concluded, plainly. If the work is unfinished, say what "
+    "is done and what is outstanding — that is a perfectly good answer, and it is "
+    "far better than silence."
+)
+
+# Stored, and shown, when even the wrap-up round says nothing.
+_NO_ANSWER_FALLBACK = (
+    "That turn finished without producing an answer — the model returned no text "
+    "after doing the work. The commands it ran are recorded in the transcript under "
+    "'work this turn'. Ask again, or ask for a smaller piece of it."
+)
 
 
 def build_system_prompt(root_name: str) -> str:
@@ -189,6 +229,24 @@ answered yourself wastes their time.
 
 Do not narrate this as a plan and then skip it. Two or three tool calls that
 establish the facts beat ten that circle around them.
+
+**Write the plan down when the work is bigger than a couple of steps.** The user
+can see your plan while you work, which is the difference between watching
+something happen and waiting to find out what happened. Use `todo_write` with the
+whole list when you start anything with several stages, and again as each item
+starts and finishes — one item in progress at a time, short and concrete. The
+plan is not a report to the user and not a promise about the distant future; it
+is the list of things you are actually doing now, so keep it honest and keep it
+current. A plan left showing three unfinished items while you answer something
+else tells the user you stopped when you did not.
+
+**Finish the job you were asked for.** A turn ends when the request has been met,
+not when you have made a start on it. If you find there is more to do than fits in
+one turn, say plainly what is done and what is left, and keep the plan current so
+the user can see it too. Never stop mid-task and present the partial work as
+though it were the answer; equally, never pad a turn with activity that does not
+move the task forward. The step budget is generous — it exists to stop a runaway
+loop, not to ration ordinary work.
 
 **Read the result of every command, including how it exited.** A command that
 failed and one that printed nothing look alike if you only skim the output.
@@ -504,6 +562,32 @@ class _TurnState:
     # that it already read a file or ran a command, and re-does everything on every
     # turn — which is exactly what happened in practice.
     actions: list[str] = field(default_factory=list)
+    # The current step's thinking, accumulated from token-sized deltas. Stored as
+    # one block per step so a reopened conversation can show the reasoning next to
+    # the tool calls it produced, and reset at each step boundary — a single running
+    # blob would have no way to say which step a thought belonged to.
+    reasoning: list[str] = field(default_factory=list)
+    # Set once a turn whose model round produced no text at all has been asked to
+    # wrap up. Without it a model that keeps returning nothing would be asked
+    # forever; with it, the turn ends in a reported failure instead.
+    wrapped_up: bool = False
+
+    def reasoning_text(self, *, limit: int | None = None) -> str:
+        """The step's thinking as one string, or ``""`` when it thought nothing.
+
+        On truncation the *tail* survives: reasoning ends with the decision the
+        step acted on, so the beginning is what can be spared.
+        """
+        text = "".join(self.reasoning).strip()
+        if limit is not None and len(text) > limit:
+            return "…" + text[-limit:]
+        return text
+
+    def take_reasoning(self) -> str:
+        """Consume the accumulated thinking, resetting it for the next step."""
+        text = self.reasoning_text(limit=_REASONING_STORED_CHARS)
+        self.reasoning = []
+        return text
 
 
 class AgentLoop:
@@ -631,6 +715,10 @@ class AgentLoop:
 
                 if tool_calls:
                     state.messages.append(assistant_message)
+                    # The step is over: store its thinking beside the calls about
+                    # to run, so the record keeps the reasoning-then-actions order
+                    # that the process view renders.
+                    self._store_reasoning(state)
                     async for event in self._run_tools(tool_calls, state, on_chunk=on_chunk):
                         yield event
                     if self._cancelled.is_set():
@@ -641,6 +729,55 @@ class AgentLoop:
                     continue
 
                 # No tool calls: the turn is finished.
+                #
+                # Unless it is not. A model round can come back with nothing at
+                # all — no text and no calls — and treating that as an answer ends
+                # the turn with a stored message that holds only the work log and
+                # nothing the user can read or hear. That is what happened to a
+                # real investigation: twenty-eight steps, thirty-eight tool calls,
+                # eleven minutes, and an empty reply, which from the user's side is
+                # indistinguishable from the agent having stopped.
+                #
+                # So a turn that did work must produce something. One wrap-up round
+                # is asked for, and if that also comes back empty, the failure is
+                # reported rather than stored as a silent success.
+                if not state.assistant_text and not state.spoken_text:
+                    if state.actions and not state.wrapped_up:
+                        state.wrapped_up = True
+                        state.messages.append(
+                            {
+                                "role": "user",
+                                "content": _WRAP_UP_INSTRUCTION,
+                            }
+                        )
+                        continue
+                    if state.actions:
+                        self._store_reasoning(state)
+                        if self.store and self.session_id:
+                            self.store.add_message(
+                                self.session_id,
+                                "assistant",
+                                _with_actions(_NO_ANSWER_FALLBACK, state.actions),
+                            )
+                        log.warning(
+                            "turn ended with no answer after %d step(s); storing the work log",
+                            state.step,
+                        )
+                        yield self._event(
+                            EventKind.ERROR,
+                            message=_NO_ANSWER_FALLBACK,
+                            kind_detail="no_answer",
+                        )
+                        yield self._event(
+                            EventKind.DONE,
+                            steps=state.step,
+                            failed=True,
+                            reason="no_answer",
+                            detail=_NO_ANSWER_FALLBACK,
+                        )
+                        return
+
+                self._store_reasoning(state)
                 if self.store and self.session_id:
                     self.store.add_message(
                         self.session_id,
@@ -648,7 +785,7 @@ class AgentLoop:
                         _with_actions("".join(state.assistant_text), state.actions),
                         spoken=" ".join(state.spoken_text) or None,
                     )
-                yield self._event(EventKind.DONE, steps=state.step)
+                yield self._event(EventKind.DONE, steps=state.step, reason="complete")
                 return
 
             # Step cap reached.
@@ -668,11 +805,21 @@ class AgentLoop:
                 ),
                 kind_detail="step_limit",
             )
-            yield self._event(EventKind.DONE, steps=state.step, truncated=True)
+            # `reason` is what the client renders and the session speaks; there was
+            # no way to tell a finished turn from a stopped one without it.
+            yield self._event(
+                EventKind.DONE,
+                steps=state.step,
+                truncated=True,
+                reason="step_limit",
+                detail=(f"Stopped after {self.settings.max_steps} steps with work still to do."),
+            )
 
         except DeepSeekError as exc:
             yield self._event(EventKind.ERROR, message=str(exc), kind_detail="llm")
-            yield self._event(EventKind.DONE, steps=state.step, failed=True)
+            yield self._event(
+                EventKind.DONE, steps=state.step, failed=True, reason="failed", detail=str(exc)
+            )
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # a turn failure is reported, not raised
@@ -682,7 +829,13 @@ class AgentLoop:
                 message=f"Something went wrong during that turn: {type(exc).__name__}: {exc}",
                 kind_detail="internal",
             )
-            yield self._event(EventKind.DONE, steps=state.step, failed=True)
+            yield self._event(
+                EventKind.DONE,
+                steps=state.step,
+                failed=True,
+                reason="failed",
+                detail=f"{type(exc).__name__}: {exc}",
+            )
 
     # --- one completion --------------------------------------------------
     async def _stream_completion(
@@ -710,7 +863,15 @@ class AgentLoop:
             if stream_event.kind == "reasoning" and stream_event.text:
                 # Thinking is streamed for transparency, never spoken and never
                 # mixed into the visible answer.
-                await self._emit(self._event(EventKind.THINKING, text=stream_event.text))
+                #
+                # Accumulated as well as streamed: the deltas are what a watching
+                # user sees live, and the assembled block is what the transcript
+                # stores, so reopening the conversation shows the reasoning beside
+                # the tool calls it produced instead of losing it with the socket.
+                state.reasoning.append(stream_event.text)
+                await self._emit(
+                    self._event(EventKind.THINKING, text=stream_event.text, step=state.step)
+                )
                 continue
 
             if stream_event.kind == "text" and stream_event.text:
@@ -807,6 +968,7 @@ class AgentLoop:
                     call_id=self._call_id(call),
                     name=call.name,
                     ok=False,
+                    step=state.step,
                     display=f"{call.name}: invalid arguments",
                     error=result.error,
                 )
@@ -835,6 +997,7 @@ class AgentLoop:
                         call_id=self._call_id(call),
                         name=call.name,
                         ok=False,
+                        step=state.step,
                         display=f"{call.name} refused: repeated identical call",
                         error=repeated.splitlines()[0],
                     )
@@ -886,6 +1049,7 @@ class AgentLoop:
                         call_id=self._call_id(call),
                         name=call.name,
                         ok=False,
+                        step=state.step,
                         display=f"{call.name} declined by user",
                         declined=True,
                     )
@@ -904,6 +1068,7 @@ class AgentLoop:
                 EventKind.TOOL_CALL,
                 call_id=self._call_id(call),
                 name=call.name,
+                step=state.step,
                 arguments=_redact_arguments(arguments),
             )
             yield self._event(EventKind.STATE, state=SessionState.TOOL.value, tool=call.name)
@@ -944,6 +1109,7 @@ class AgentLoop:
                 call_id=self._call_id(call),
                 name=call.name,
                 ok=result.ok,
+                step=state.step,
                 display=result.display,
                 error=result.error,
                 duration_ms=duration_ms,
@@ -953,6 +1119,35 @@ class AgentLoop:
 
             for artifact in result.artifacts or []:
                 yield self._event(EventKind.ARTIFACT, path=artifact, tool=call.name)
+
+            if call.name == TODO_TOOL and result.ok:
+                # The plan is state the user watches, so it is echoed as its own
+                # event rather than left to be read out of the tool's result. The
+                # store is the source of truth, so what is sent is what was saved —
+                # the UI cannot drift from the record the next turn will read.
+                yield self._event(
+                    EventKind.TODOS,
+                    todos=self.store.list_todos(self.session_id)
+                    if self.store and self.session_id
+                    else arguments.get("todos", []),
+                )
+
+    def _store_reasoning(self, state: _TurnState) -> None:
+        """Persist the step's thinking, then reset it for the next step.
+
+        Written when the step ends — before its tools run, and before the answer
+        is stored — so the stored order interleaves the same way the live one
+        does: a step's reasoning, then the calls it made. That ordering is what
+        lets a reopened conversation be reassembled into the process view rather
+        than only a list of commands.
+
+        A step that thought nothing is not written: an empty row would render as
+        a Think block with no content.
+        """
+        text = state.take_reasoning()
+        if text and self.store and self.session_id:
+            with contextlib.suppress(Exception):
+                self.store.add_message(self.session_id, REASONING_ROLE, text)
 
     def _needs_approval(self, tool_name: str, arguments: dict[str, Any] | None = None) -> bool:
         """Decide whether this call needs the user's approval.

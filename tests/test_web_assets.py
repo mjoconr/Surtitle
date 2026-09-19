@@ -453,29 +453,230 @@ class TestBargeInTiming:
 
 
 class TestActivityPanelNoise:
-    """Reasoning must not flood the panel.
+    """Reasoning must not flood the panel, and must not be lost either.
 
     Reasoning arrives as token-sized deltas. Pushing one row per delta and
     re-rendering the whole panel each time turned the activity log into a wall of
     single words — "Reasoning: .", "Reasoning: briefly" — and rebuilt the DOM
     dozens of times a second during every thinking turn.
+
+    It is now coalesced into the step that produced it, in both panels, so the
+    same deltas that used to be noise are what makes a long turn explain itself.
     """
 
-    def test_reasoning_goes_through_the_coalescing_helper(self, script):
-        assert "pushReasoning(data.text)" in script, (
-            "the thinking case must not push a row per delta"
+    def test_reasoning_goes_into_a_step_block(self, script):
+        assert 'addThinking(turn, data.text || "", data.step)' in script, (
+            "thinking must attach to its step, not push a row per delta"
         )
         assert (
             'state.activity.push({ label: "Reasoning", detail: data.text.slice(0, 240) })'
             not in script
         )
 
-    def test_the_helper_reuses_the_last_reasoning_row(self, script):
-        assert 'last.label === "Reasoning"' in script
+    def test_the_helper_reuses_the_step_block(self, script):
+        """One Think block per step, appended to — never one row per token."""
+        block = script[script.index("function addThinking(") :]
+        block = block[: block.index("\n}\n")]
+        assert "step.think.text += text;" in block, "deltas must accumulate into the existing block"
+        assert "step.thinking.append(wrap);" in block
 
     def test_the_re_render_is_throttled(self, script):
-        assert "reasoningRenderTimer" in script
-        assert "REASONING_MAX_CHARS" in script
+        assert "activityRenderTimer" in script
+        assert "scheduleActivityRender" in script
+
+    def test_the_stored_reasoning_is_capped(self):
+        """The cap moved to the server, where the durable copy is written."""
+        from surtitle.core.agent import _REASONING_STORED_CHARS
+
+        assert 0 < _REASONING_STORED_CHARS <= 100_000, (
+            "a step's stored thinking needs a bound, or the database grows without one"
+        )
+
+
+class TestStepGrouping:
+    """A turn's process must be grouped by the step that produced it.
+
+    The server numbers each model round and puts that number on every thinking
+    delta, tool call and tool result. Flattened, a turn that ran fourteen commands
+    was fourteen identical rows with no indication of what was being attempted —
+    which is how a long release turn read.
+    """
+
+    def test_streamed_events_carry_their_step(self, script):
+        for needle in (
+            "stepFor(turn, data.step)",
+            'addThinking(turn, data.text || "", data.step)',
+        ):
+            assert needle in script, f"missing step routing: {needle}"
+
+    def test_tool_events_carry_their_step(self):
+        """The grouping needs the step on the wire, or nothing can route it."""
+        import inspect
+
+        from surtitle.core.agent import AgentLoop
+
+        source = inspect.getsource(AgentLoop)
+        assert "step=state.step," in source, "tool events must name their step"
+
+    def test_a_step_is_created_lazily(self, script):
+        """Announced steps that produce nothing must not leave empty rows."""
+        block = script[script.index("function stepFor(") :]
+        block = block[: block.index("\n}\n")]
+        assert "if (existing) return existing;" in block
+        assert "turn.steps.append(root);" in block, "the row is built on first content"
+
+    def test_a_collapsed_step_still_says_what_it_did(self, script):
+        assert "planSummary(step)" in script, (
+            "a collapsed step must summarise its calls, or the grouping hides the work"
+        )
+
+    def test_a_running_step_gets_a_timer(self, script):
+        assert "step.timer.textContent = formatDuration(now - step.start)" in script
+
+    def test_overlong_durations_are_not_shown_as_raw_seconds(self, script):
+        block = script[script.index("function formatDuration(") :]
+        block = block[: block.index("\n}\n")]
+        assert "minutes" in block and " s`" in block, (
+            "a build that takes ten minutes must not read as '612.4 s'"
+        )
+
+
+class TestProcessSurvivesReload:
+    """Reopening a conversation must show the process, not just the answer.
+
+    The store has always kept every tool call with its step, its outcome and its
+    duration, and `GET /api/sessions/{id}` has always returned them. The client
+    ignored both, so reopening a conversation showed a bare answer with no sign of
+    the commands behind it, and an Activity panel that was empty.
+    """
+
+    def test_the_stored_calls_are_replayed(self, script):
+        assert "session.tool_calls" in script, (
+            "the transcript endpoint already returns tool_calls; not reading them "
+            "is why a reopened turn showed no work"
+        )
+
+    def test_stored_work_is_attached_to_its_step(self, script):
+        """A step's thinking must land in that step, not in the next turn.
+
+        The stored reasoning row carries no step number, so the step comes from
+        the calls that follow it. Holding it back until the turn's answer instead
+        put a Think block in the wrong turn — and dropped it altogether when the
+        turn had no answer, which is the shape a stopped conversation has, so the
+        case where it matters most was the one that lost it.
+        """
+        block = script[script.index("const thinking = new Map();") :]
+        block = block[: block.index("state.currentTurn = null;")]
+        assert "flushThinking(turn, call.step)" in block, (
+            "thinking must be claimed by the step whose calls follow it"
+        )
+        assert "thinking.set(Number(call.step) || 1" in block
+
+    def test_a_stopped_conversation_keeps_its_thinking(self, script):
+        """No answer follows, so nothing may be conditionally dropped."""
+        block = script[script.index("const thinking = new Map();") :]
+        block = block[: block.index("state.currentTurn = null;")]
+        tail = block[block.index("if (thinking.size") :]
+        assert "addThinking(turn, text, index)" in tail, (
+            "the thinking of a turn with no answer must still be shown"
+        )
+
+    def test_thinking_is_replayed_into_its_step(self, script):
+        assert 'message.role === "reasoning"' in script
+
+    def test_a_settled_row_is_not_left_running(self, script):
+        block = script[script.index("function replayToolCall(") :]
+        block = block[: block.index("\n}\n")]
+        assert "settleToolRow(record" in block, (
+            "a replayed call is over; leaving it 'running' would start a timer"
+        )
+
+    def test_a_conversation_that_stops_mid_process_says_so(self, script):
+        assert "STOPPED_WITHOUT_ANSWER" in script, (
+            "work with no answer after it must not read as an answer that trailed off"
+        )
+
+    def test_the_todo_tool_is_registered(self):
+        from surtitle.tools.registry import default_tool_list
+
+        names = {tool.name for tool in default_tool_list()}
+        assert "todo_write" in names, "the agent needs a way to write its plan down"
+
+    def test_the_todo_tool_is_not_gated_on_approval(self):
+        """Recording a plan changes nothing on disk; it must never prompt."""
+        from surtitle.tools.registry import TODO_TOOL, default_tool_list
+
+        tool = next(item for item in default_tool_list() if item.name == TODO_TOOL)
+        assert tool.approval == "never"
+        assert tool.mutating is False
+
+
+class TestStopReasonIsVisible:
+    """A turn that stops must say why, on screen and aloud.
+
+    "It just stops" was reported repeatedly. The indicator slid back to "Idle"
+    whether the work had finished or the turn had run out of steps, so the only
+    way to find out was to ask again — and a voice-first user, who is listening
+    rather than reading, got no signal at all.
+    """
+
+    def test_the_done_event_carries_a_reason(self):
+        """Each way a turn can end must name itself on the wire."""
+        import inspect
+
+        from surtitle.core.agent import AgentLoop
+
+        source = inspect.getsource(AgentLoop)
+        for reason in ('reason="complete"', 'reason="step_limit"', 'reason="failed"'):
+            assert reason in source, f"the done event never reports {reason}"
+
+    def test_the_agent_speaks_the_reason(self):
+        from surtitle.core.session import Session
+
+        source = __import__("inspect").getsource(Session._speak_problem)
+        assert "step_limit" in source, "the step-budget stop must be spoken"
+        assert "carry on from here" in source or "pick up where" in source, (
+            "the spoken stop must say how to continue"
+        )
+
+    def test_the_budget_is_warned_about_before_it_runs_out(self):
+        """The warning threshold is a fraction of the real budget, not a literal."""
+        import inspect
+
+        from surtitle.core.agent import NEAR_BUDGET_FRACTION
+        from surtitle.core.session import Session
+
+        assert 0 < NEAR_BUDGET_FRACTION < 1
+        source = inspect.getsource(Session)
+        assert "NEAR_BUDGET_FRACTION" in source, (
+            "a turn about to stop must warn first, or the stop is a surprise"
+        )
+        assert "_speak_budget" in source
+
+    def test_the_client_shows_a_stop_note_with_a_continue_action(self, script, html):
+        assert 'id="stopNote"' in html
+        assert 'id="stopContinue"' in html
+        assert "showStopNote(data, finished)" in script, (
+            "the done event's reason must reach the banner"
+        )
+        block = script[script.index("function showStopNote(") :]
+        block = block[: block.index("\n}\n")]
+        assert "step_limit" in block, "a step-limited turn is the case worth offering to resume"
+
+    def test_cancellation_is_not_dressed_up_as_a_problem(self, script):
+        """The user stopped it; telling them why is noise."""
+        block = script[script.index("function showStopNote(") :]
+        block = block[: block.index("\n}\n")]
+        assert '"cancelled"' in block and "hideStopNote" in block
+
+    def test_continue_resumes_rather_than_repeating_the_question(self, script):
+        block = script[script.index("function continueLastTurn(") :]
+        block = block[: block.index("\n}\n")]
+        assert '"Continue from where you stopped."' in block, (
+            "the work in flight is already in the server's history; resending the "
+            "original request would make the model start over"
+        )
+        assert 'sendCommand("text"' in block
 
 
 class TestReadyEventContract:

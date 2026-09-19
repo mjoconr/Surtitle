@@ -994,6 +994,9 @@ def build_api(state: AppState) -> APIRouter:
             **session.to_dict(),
             "messages": [m.to_dict() for m in state.store.list_messages(session_id)],
             "tool_calls": [t.to_dict() for t in state.store.list_tool_calls(session_id)],
+            # The agent's plan outlives the turn that wrote it, so reopening a
+            # conversation shows where the work got to rather than an empty panel.
+            "todos": state.store.list_todos(session_id),
         }
 
     @api.post("/sessions/{session_id}/archive")

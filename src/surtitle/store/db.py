@@ -19,11 +19,18 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-__all__ = ["Message", "Project", "Session", "Store", "ToolCallRecord"]
+__all__ = ["REASONING_ROLE", "Message", "Project", "Session", "Store", "ToolCallRecord"]
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+
+# The ``messages.role`` used for one model step's thinking, stored so a reopened
+# conversation can show how the work was reasoned about rather than only what it
+# ran. It is a transcript entry, not something the model is ever sent: the turn
+# loop builds the next request from the conversation messages it is given, so a
+# stored reasoning row is display-only by construction.
+REASONING_ROLE = "reasoning"
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -83,6 +90,26 @@ CREATE TABLE IF NOT EXISTS tool_calls (
 );
 
 CREATE INDEX IF NOT EXISTS idx_tool_calls_session ON tool_calls(session_id, id);
+
+-- The agent's working plan for the conversation.
+--
+-- A conversation is the right scope, not the turn: the point of a plan is to
+-- outlive the turn that wrote it, so that the agent can see what it said it would
+-- do and how far it got. It is replaced wholesale on each write, so `position`
+-- carries the order the agent chose rather than insertion order.
+CREATE TABLE IF NOT EXISTS todos (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    position    INTEGER NOT NULL DEFAULT 0,
+    content     TEXT NOT NULL,
+    -- Present-tense form ("Running the tests"), for showing what is in hand.
+    active_form TEXT,
+    -- pending | in_progress | completed
+    status      TEXT NOT NULL DEFAULT 'pending',
+    created_at  REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_todos_session ON todos(session_id, position);
 """
 
 
@@ -272,8 +299,16 @@ class Store:
 
     def _index_message(self, message_id: int, session_id: str, role: str, content: str) -> None:
         """Add a message to the search index. Best-effort by design: failing to
-        index must never fail the conversation."""
-        if not self.fts5 or not content.strip():
+        index must never fail the conversation.
+
+        Reasoning is deliberately never indexed. It is stored so a reopened
+        conversation can show the process, but it is the model's private
+        brainstorm: it is full of self-corrections ("no, that is wrong, use the
+        other one") and of guesses it explicitly declined to act on. Surfacing
+        those later as retrieved "what you did before" would put a discarded idea
+        back in front of the model as though it were a finding.
+        """
+        if not self.fts5 or not content.strip() or role == REASONING_ROLE:
             return
         with contextlib.suppress(sqlite3.Error):
             self._conn.execute(
@@ -311,18 +346,23 @@ class Store:
                         " JOIN messages m ON m.id = CAST(message_search.message_id AS INTEGER)"
                         " JOIN sessions s ON s.id = m.session_id"
                         " WHERE message_search MATCH ? AND s.archived_at IS NULL"
+                        # Reasoning is never indexed (see `_index_message`), but the
+                        # filter is repeated here so the rule holds even for an
+                        # index written by an older build that did include it.
+                        " AND m.role != ?"
                         " ORDER BY score LIMIT ?",
-                        (match, limit + 5),
+                        (match, REASONING_ROLE, limit + 5),
                     ).fetchall()
             if not rows:
                 # Fallback, and also the path taken when a quoted phrase finds
-                # nothing: a plain substring scan is slower but never misses.
+                # nothing: a plain substring scan is slower but never misses. It
+                # reads `messages` directly, so it needs the same exclusion.
                 rows = self._conn.execute(
                     "SELECT m.session_id, m.role, m.content, m.content AS excerpt, 0 AS score"
                     " FROM messages m JOIN sessions s ON s.id = m.session_id"
-                    " WHERE m.content LIKE ? AND s.archived_at IS NULL"
+                    " WHERE m.content LIKE ? AND s.archived_at IS NULL AND m.role != ?"
                     " ORDER BY m.id DESC LIMIT ?",
-                    (f"%{needle}%", limit + 5),
+                    (f"%{needle}%", REASONING_ROLE, limit + 5),
                 ).fetchall()
 
         results: list[dict[str, Any]] = []
@@ -699,3 +739,72 @@ class Store:
                 )
             )
         return records
+
+    # --- the agent's plan ------------------------------------------------
+    def set_todos(self, session_id: str, todos: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Replace the conversation's plan with ``todos`` and return what was stored.
+
+        Replaced wholesale rather than merged: the agent sends its full list every
+        time, and a merge would leave items it deliberately dropped still showing
+        as pending work. One transaction, so a reader never sees a half-written
+        plan.
+
+        Unknown statuses are stored as ``pending`` rather than rejected: the
+        status is a display hint, and a plan that fails to save because the model
+        invented a fourth value would be worse than one that reads as not-started.
+        """
+        now = time.time()
+        rows: list[dict[str, Any]] = []
+        for position, item in enumerate(todos):
+            if not isinstance(item, dict):
+                continue
+            content = str(item.get("content") or item.get("task") or "").strip()
+            if not content:
+                continue
+            status = str(item.get("status") or "pending").strip().lower()
+            if status not in {"pending", "in_progress", "completed"}:
+                status = "pending"
+            active = item.get("activeForm") or item.get("active_form")
+            rows.append(
+                {
+                    "position": position,
+                    "content": content,
+                    "active_form": str(active).strip() if active else None,
+                    "status": status,
+                }
+            )
+
+        with self._lock, self._conn:
+            self._conn.execute("DELETE FROM todos WHERE session_id = ?", (session_id,))
+            for row in rows:
+                self._conn.execute(
+                    "INSERT INTO todos"
+                    " (session_id, position, content, active_form, status, created_at)"
+                    " VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        session_id,
+                        row["position"],
+                        row["content"],
+                        row["active_form"],
+                        row["status"],
+                        now,
+                    ),
+                )
+            self._conn.execute("UPDATE sessions SET updated_at = ? WHERE id = ?", (now, session_id))
+        return self.list_todos(session_id)
+
+    def list_todos(self, session_id: str) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT content, active_form, status FROM todos WHERE session_id = ?"
+                " ORDER BY position ASC, id ASC",
+                (session_id,),
+            ).fetchall()
+        return [
+            {
+                "content": row["content"],
+                "activeForm": row["active_form"],
+                "status": row["status"],
+            }
+            for row in rows
+        ]

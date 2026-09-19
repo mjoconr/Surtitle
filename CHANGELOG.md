@@ -7,6 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A turn that did the work no longer ends without an answer.** A model round can
+  come back with no text and no tool calls, and the loop treated that as a finished
+  turn: the reply was stored as its `[work this turn]` log alone, with nothing to
+  read and nothing spoken. In the session this was found in, the agent made 38 tool
+  calls across 28 steps and eleven minutes on a feeder-conveyor investigation, then
+  closed the turn with an empty message — which from the user's side is
+  indistinguishable from the agent having stopped. A turn that has work behind it and
+  produces no text is now asked once to wrap up and speak; if that also comes back
+  empty, the turn ends with a reported failure and a spoken explanation rather than
+  being stored as a silent success.
+- **You can see what the agent is thinking, and what it did about it.** A long turn
+  used to show a wall of identical `run_shell` rows: the reasoning that explained
+  them sat in a separate Activity panel, truncated to a trailing fragment, in no
+  particular order relative to the commands it produced. A turn is now grouped into
+  the model rounds that produced it — each one with its reasoning behind a "Think"
+  disclosure, then the calls that round made — in the transcript and in the Activity
+  panel, which are two views of the same thing. The reasoning is stored per round, so
+  reopening a conversation shows the process rather than only the answer, and the
+  tool calls, outcomes and durations that were already being stored are now replayed
+  instead of being fetched and ignored.
+- **Running work shows how long it has been running.** Each step and each tool call
+  carries an elapsed time, and a turn that is still going ends with a live
+  "Deep diving… 14m 38s" line. The status pill said "Thinking" whether that had been
+  true for one second or twenty minutes, which left no way to tell working from hung.
+- **The agent keeps a plan you can watch.** A new `todo_write` tool lets the agent
+  record what it intends to do and update it as it goes, shown in a Plan tab in the
+  right-hand panel beside the work it describes. It is stored with the conversation
+  rather than the turn, so it survives a reload and shows what is still outstanding.
+- **A turn that stops says why, on screen and aloud.** A turn cut short by the step
+  limit or an error now ends with a banner naming the reason and offering
+  **Continue**, and the agent speaks the same sentence. It also warns once when the
+  step budget is nearly spent, so the stop is expected rather than a surprise.
+  Previously the indicator returned to "Idle" whether the work had finished or been
+  abandoned, and the only way to find out was to ask again.
+
+### Notes
+
+- Reopening a conversation rebuilds that process view from what was already stored.
+  Conversations recorded before this release have no stored reasoning, so they show
+  their steps and commands without the Think blocks.
+- The local speech engines remain an opt-in install (`--with-voice-local` at build
+  time, or **Settings → Voice**, the tray menu, or `surtitle voice install` after).
+  Neither the in-app install nor an in-place update prunes them: both sync with
+  `--inexact`, which is what stops a later `uv sync` from removing the extra that
+  was just installed.
+
 ## [0.6.0] - 2026-09-19
 
 ### Fixed

@@ -35,10 +35,17 @@ const state = {
   toolRows: new Map(),
   files: { path: ".", entries: [] },
   activity: [],
+  // The agent's plan for the work in hand: [description, status] rows it keeps
+  // current with the todo_write tool. Reloaded with the conversation, because a
+  // plan that forgets itself on refresh is worse than none.
+  todos: [],
   micOpen: false,
   // Set from the server's ready event; false disables the mic button.
   voiceAvailable: true,
   pendingApproval: null,
+  // The last thing the user asked for, so a step-limited turn can be resumed
+  // without retyping it.
+  lastUserText: "",
   settings: null,
   rightTab: "files",
   environment: null,
@@ -79,6 +86,11 @@ const el = {
   approvalStrip: document.getElementById("approvalStrip"),
   approvalText: document.getElementById("approvalText"),
   approvalActions: document.getElementById("approvalActions"),
+  stopNote: document.getElementById("stopNote"),
+  stopTitle: document.getElementById("stopTitle"),
+  stopDetail: document.getElementById("stopDetail"),
+  stopContinue: document.getElementById("stopContinue"),
+  stopDismiss: document.getElementById("stopDismiss"),
   toast: document.getElementById("toast"),
   attachments: document.getElementById("attachments"),
   fileInput: document.getElementById("fileInput"),
@@ -118,6 +130,98 @@ function toast(message, tone = "ok") {
   }, tone === "error" ? 6500 : 2600);
 }
 
+/**
+ * Durations, in the shortest form that is still readable.
+ *
+ * A turn that shells out to a build server runs for minutes, and "312.4s" makes
+ * the reader do arithmetic. Sub-second work still shows milliseconds, because
+ * that is the number that says a command was instant rather than slow.
+ */
+function formatDuration(ms) {
+  const total = Math.max(0, Math.round(Number(ms) || 0));
+  if (total < 1000) return `${total} ms`;
+  const seconds = total / 1000;
+  if (seconds < 60) return `${seconds.toFixed(1)} s`;
+  const whole = Math.floor(seconds);
+  const minutes = Math.floor(whole / 60);
+  const rest = whole % 60;
+  if (minutes < 60) return rest ? `${minutes}m ${rest}s` : `${minutes}m`;
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+}
+
+/**
+ * One ticker for every live timer on the page.
+ *
+ * Running per-element intervals would multiply with the number of open steps and
+ * tool rows, and each would be its own timer to clear on a turn boundary. One
+ * interval walks the live elements and writes the elapsed time in place, which
+ * keeps the text changing without re-rendering any of the rows it belongs to.
+ */
+let timerTicker = null;
+
+function startTimers() {
+  if (timerTicker) return;
+  timerTicker = setInterval(updateTimers, 500);
+  updateTimers();
+}
+
+function stopTimers() {
+  if (timerTicker) clearInterval(timerTicker);
+  timerTicker = null;
+}
+
+function updateTimers() {
+  const now = Date.now();
+  let live = false;
+  for (const turn of state.turns.values()) {
+    for (const step of turn.stepRows.values()) {
+      if (step.end) {
+        step.timer.textContent = formatDuration(step.end - step.start);
+        continue;
+      }
+      live = true;
+      step.timer.textContent = formatDuration(now - step.start);
+    }
+  }
+  for (const record of state.toolRows.values()) {
+    if (!record.startedAt || !record.timer) continue;
+    if (record.endedAt) continue;
+    live = true;
+    record.timer.textContent = formatDuration(now - record.startedAt);
+  }
+  updateWorkingLine(now, live);
+  // The caller decides when to stop, not this function. `finishTimers` runs
+  // before `done` clears `state.currentTurn`, so nothing here could tell that the
+  // turn had ended — and a ticker left running writes to a transcript that is no
+  // longer live, once every 500 ms, for the life of the page.
+}
+
+/**
+ * "Deep diving… 14m 38s" — the line that says the turn is still moving.
+ *
+ * A turn that thinks and calls tools for ten minutes in silence is
+ * indistinguishable from one that has died, and the state pill alone says
+ * "Thinking" whether that has been true for one second or twenty minutes.
+ */
+function updateWorkingLine(now, anyLive) {
+  const turn = state.currentTurn;
+  const root = turn && turn.kind === "assistant" ? turn.root : null;
+  if (!root || !anyLive) {
+    if (workingLine && workingLine.parentNode) workingLine.remove();
+    workingLine = null;
+    return;
+  }
+  if (!workingLine) {
+    workingLine = node("div", "working");
+    workingLine.append(node("span", "working__dots", "Deep diving"));
+    workingLine.append(node("span", "working__time", ""));
+  }
+  if (workingLine.parentNode !== root) root.append(workingLine);
+  workingLine.querySelector(".working__time").textContent = formatDuration(now - turn.startedAt);
+}
+
+let workingLine = null;
+
 async function api(path, options) {
   const response = await fetch(path, {
     headers: options?.body ? { "Content-Type": "application/json" } : undefined,
@@ -141,6 +245,24 @@ async function api(path, options) {
 
 // ---------------------------------------------------------------- transcript
 
+/**
+ * The transcript is a turn → step → item tree.
+ *
+ * A *step* is one model round: it thinks, then calls zero or more tools. The
+ * server numbers them and puts that number on every thinking delta, tool call
+ * and tool result, so each event knows where it belongs without the client
+ * having to infer boundaries.
+ *
+ * Grouping this way is what makes the process legible. Flattened, a turn that
+ * ran fourteen commands was fourteen identical rows — which is exactly how a
+ * long release turn read: a wall of `run_shell` with no indication of what was
+ * being attempted or why. Grouped, each step carries the reasoning that produced
+ * its commands, and the commands sit under it.
+ *
+ * A step is created lazily by the first event that has content for it: the
+ * server announces a step before the model has produced anything, and creating
+ * the row then would leave empty steps behind on a cancelled turn.
+ */
 function beginTurn(kind) {
   const turn = node("div", "turn");
   const spoken = node("div");
@@ -148,10 +270,7 @@ function beginTurn(kind) {
   shown.style.display = "flex";
   shown.style.flexDirection = "column";
   shown.style.gap = "8px";
-  const tools = node("div");
-  tools.style.display = "flex";
-  tools.style.flexDirection = "column";
-  tools.style.gap = "6px";
+  const steps = node("div", "turn__steps");
 
   if (kind === "user") {
     const bubble = node("div", "bubble bubble--user");
@@ -165,13 +284,16 @@ function beginTurn(kind) {
       bubble,
       spoken,
       shown,
-      tools,
+      steps,
+      stepRows: new Map(),
+      startedAt: Date.now(),
+      endedAt: null,
       saidText: "",
       shownText: "",
     };
   }
 
-  turn.append(spoken, shown, tools);
+  turn.append(spoken, shown, steps);
   el.turns.append(turn);
   scrollToBottom();
   return {
@@ -181,10 +303,172 @@ function beginTurn(kind) {
     bubble: null,
     spoken,
     shown,
-    tools,
+    steps,
+    stepRows: new Map(),
+    startedAt: Date.now(),
+    endedAt: null,
     saidText: "",
     shownText: "",
   };
+}
+
+/**
+ * The step a step-numbered event belongs to, created if it is new.
+ *
+ * Events without a number (an older server, or a tool row rebuilt from the
+ * store's flat list) land in the most recent step, which is the only sensible
+ * place for them.
+ */
+function stepFor(turn, stepNumber) {
+  if (turn.kind !== "assistant") return null;
+  let index = Number(stepNumber);
+  if (!Number.isFinite(index) || index <= 0) {
+    index = turn.stepRows.size ? Math.max(...turn.stepRows.keys()) : 1;
+  }
+  const existing = turn.stepRows.get(index);
+  if (existing) return existing;
+
+  const root = node("div", "step");
+  root.dataset.state = "running";
+  root.dataset.step = String(index);
+
+  const head = node("button", "step__head");
+  head.type = "button";
+  head.setAttribute("aria-expanded", "true");
+  head.append(node("span", "step__index", String(index)));
+  const summary = node("span", "step__summary", "thinking…");
+  head.append(summary);
+  const timer = node("span", "step__timer", "");
+  head.append(timer);
+
+  const body = node("div", "step__body");
+  const thinking = node("div", "step__thinking");
+  const tools = node("div", "step__tools");
+
+  body.append(thinking, tools);
+  root.append(head, body);
+
+  head.addEventListener("click", () => {
+    const open = head.getAttribute("aria-expanded") === "true";
+    head.setAttribute("aria-expanded", String(!open));
+    body.hidden = open;
+  });
+
+  const record = {
+    index,
+    root,
+    head,
+    summary,
+    timer,
+    body,
+    thinking,
+    tools,
+    think: null,
+    start: Date.now(),
+    end: null,
+    toolCount: 0,
+    counts: new Map(),
+  };
+
+  // The step being worked on is the one to watch, so it starts open; earlier
+  // steps collapse as the turn moves on, which keeps a long turn from becoming
+  // a page of open panels.
+  if (turn.stepRows.size > 0) {
+    head.setAttribute("aria-expanded", "false");
+    body.hidden = true;
+  }
+  for (const earlier of turn.stepRows.values()) collapseStep(earlier);
+  turn.stepRows.set(index, record);
+  turn.steps.append(root);
+  state.toolRows.set(`step:${index}`, record);
+  scrollToBottom();
+  return record;
+}
+
+function collapseStep(step) {
+  if (!step || step.root.dataset.state === "running") return;
+  step.head.setAttribute("aria-expanded", "false");
+  step.body.hidden = true;
+}
+
+function noteStepTool(step, name) {
+  if (!step) return;
+  step.toolCount += 1;
+  step.counts.set(name, (step.counts.get(name) || 0) + 1);
+  step.summary.textContent = planSummary(step);
+}
+
+/** "14 commands", "read_file ×3, run_shell ×2", etc. */
+function planSummary(step) {
+  if (!step || step.toolCount === 0) return "thinking…";
+  if (step.counts.size === 1) {
+    const [name, count] = [...step.counts.entries()][0];
+    return count === 1 ? name : `${name} ×${count}`;
+  }
+  const parts = [...step.counts.entries()].map(([name, count]) =>
+    count === 1 ? name : `${name} ×${count}`,
+  );
+  return `${step.toolCount} calls · ${parts.join(", ")}`;
+}
+
+/**
+ * One Think block inside a step.
+ *
+ * Deltas are coalesced into the same block rather than one row each: a row per
+ * delta turned this into a wall of single words and rebuilt the DOM dozens of
+ * times a second. The full text is kept here because a Think block is only
+ * rendered when someone opens it — the cap is only for what the server stores.
+ */
+function addThinking(turn, text, stepNumber) {
+  if (!text) return;
+  const step = stepFor(turn, stepNumber);
+  if (!step) return;
+  if (!step.think) {
+    const wrap = node("div", "think");
+    const head = node("button", "think__head");
+    head.type = "button";
+    head.setAttribute("aria-expanded", "true");
+    head.append(node("span", "think__chevron", "▾"));
+    head.append(node("span", "think__title", "Think"));
+    const peek = node("span", "think__peek", "");
+    head.append(peek);
+    const body = node("div", "think__body");
+    head.addEventListener("click", () => {
+      const open = head.getAttribute("aria-expanded") === "true";
+      head.setAttribute("aria-expanded", String(!open));
+      body.hidden = open;
+    });
+    wrap.append(head, body);
+    step.thinking.append(wrap);
+    step.think = { wrap, head, peek, body, text: "" };
+  }
+  step.think.text += text;
+  step.think.body.textContent = step.think.text;
+  // A one-line gist, so a collapsed step still says what was being considered.
+  // Static per block: rewriting it on every token is what made the panel churn.
+  if (!step.think.peek.textContent) {
+    step.think.peek.textContent = gistOf(step.think.text);
+    // The Activity panel renders from `state.activity`, not from the transcript's
+    // DOM, so the gist is recorded there too — otherwise its Think rows are
+    // silently empty and the panel shows commands with no reasoning above them.
+    pushActivity({
+      kind: "think",
+      step: step.index,
+      at: step.start,
+      label: "Think",
+      detail: step.think.peek.textContent,
+    });
+  }
+}
+
+/** First line of some thinking, trimmed to something a row can show. */
+function gistOf(text) {
+  const line = String(text || "")
+    .split("\n")
+    .map((part) => part.trim())
+    .find((part) => part.length > 0);
+  if (!line) return "";
+  return line.length > 120 ? `${line.slice(0, 120)}…` : line;
 }
 
 function assistantTurn() {
@@ -226,7 +510,7 @@ function appendError(turn, message) {
   turn.root.append(block);
 }
 
-function addToolRow(turn, callId, name) {
+function addToolRow(step, callId, name) {
   const existing = callId ? state.toolRows.get(callId) : null;
   if (existing) {
     // An approval prompt already opened a row for this call. Reuse it: appending
@@ -239,6 +523,8 @@ function addToolRow(turn, callId, name) {
     existing.summary.textContent = "running…";
     existing.body.textContent = "";
     existing.body.hidden = true;
+    existing.startedAt = Date.now();
+    existing.endedAt = null;
     state.toolRows.set(callId, existing);
     return existing;
   }
@@ -254,6 +540,10 @@ function addToolRow(turn, callId, name) {
   head.append(nameNode);
   const summary = node("span", "toolrow__summary", "running…");
   head.append(summary);
+  // A running call shows its own elapsed time, so a slow command is visibly
+  // making progress rather than looking like the agent has stopped.
+  const timer = node("span", "toolrow__timer", "");
+  head.append(timer);
 
   const body = node("div", "toolrow__body");
   body.hidden = true;
@@ -263,12 +553,39 @@ function addToolRow(turn, callId, name) {
   });
 
   row.append(head, body);
-  turn.tools.append(row);
+  if (step) step.tools.append(row);
   scrollToBottom();
 
-  const record = { row, summary, body, name, nameNode };
+  const record = {
+    row,
+    summary,
+    body,
+    name,
+    nameNode,
+    timer,
+    startedAt: Date.now(),
+    endedAt: null,
+  };
   state.toolRows.set(callId, record);
   return record;
+}
+
+/** Settle a tool row with its outcome and how long it took. */
+function settleToolRow(record, data) {
+  const elapsed = data.duration_ms ?? (record.startedAt ? Date.now() - record.startedAt : 0);
+  record.endedAt = Date.now();
+  record.row.dataset.state = data.ok ? "ok" : "error";
+  record.summary.textContent = data.display || data.error || (data.ok ? "done" : "failed");
+  record.timer.textContent = formatDuration(elapsed);
+  record.body.textContent = [
+    data.display,
+    data.error,
+    elapsed ? formatDuration(elapsed) : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+  // Surface failures open, because a collapsed error is easy to miss.
+  if (!data.ok) record.body.hidden = false;
 }
 
 /**
@@ -579,25 +896,27 @@ function renderHeader() {
 
 // ------------------------------------------------------------- right panel
 
-// Reasoning streams as many small deltas. Keeping one row per delta turned the
-// activity panel into a wall of single words and rebuilt the whole panel dozens
-// of times a second, so deltas are coalesced into one row and the re-render is
-// throttled.
-const REASONING_MAX_CHARS = 2000;
-let reasoningRenderTimer = null;
+/**
+ * A note in the Activity panel.
+ *
+ * Entries carry the step they belong to, so the panel is a running list of the
+ * turn's process — the same steps the transcript shows — rather than a flat log
+ * where "Called run_shell" and "Voice engines" are neighbours. `kind` lets the
+ * panel group and icon them; a note without a step is installation or voice
+ * diagnostics, which belong to no step and are listed separately.
+ */
+function pushActivity(entry) {
+  state.activity.push({ at: Date.now(), ...entry });
+  // Reasoning is coalesced into a step's Think block instead; nothing else
+  // streams fast enough to need throttle-tying the re-render.
+  scheduleActivityRender();
+}
 
-function pushReasoning(text) {
-  if (!text) return;
-  const last = state.activity[state.activity.length - 1];
-  if (last && last.label === "Reasoning") {
-    // Keep the tail: during a stream the newest reasoning is the useful part.
-    last.detail = (last.detail + text).slice(-REASONING_MAX_CHARS);
-  } else {
-    state.activity.push({ label: "Reasoning", detail: text.slice(-REASONING_MAX_CHARS) });
-  }
-  if (reasoningRenderTimer) return;
-  reasoningRenderTimer = setTimeout(() => {
-    reasoningRenderTimer = null;
+let activityRenderTimer = null;
+function scheduleActivityRender() {
+  if (activityRenderTimer) return;
+  activityRenderTimer = setTimeout(() => {
+    activityRenderTimer = null;
     renderRightbar();
   }, 120);
 }
@@ -607,10 +926,18 @@ function renderRightbar() {
   document
     .getElementById("tabActivity")
     .setAttribute("aria-selected", String(state.rightTab === "activity"));
+  document
+    .getElementById("tabTodo")
+    .setAttribute("aria-selected", String(state.rightTab === "todo"));
+  document.getElementById("tabTodo").hidden = state.todos.length === 0;
 
   el.rightbarBody.replaceChildren();
   if (state.rightTab === "activity") {
     renderActivity();
+    return;
+  }
+  if (state.rightTab === "todo") {
+    renderTodo();
     return;
   }
   renderFiles();
@@ -691,19 +1018,149 @@ function renderEnvironment() {
   el.rightbarBody.append(section);
 }
 
+/**
+ * The running list of the turn's process, grouped by step.
+ *
+ * This is the live view of what the agent is doing, laid out the way the
+ * transcript groups it — a step's reasoning, then the calls it made — so the two
+ * panels describe the same work rather than one showing commands and the other
+ * showing unrelated notices. Notes that belong to no step (voice engines, an
+ * install) are collected at the bottom under their own heading.
+ *
+ * Only the summary is rendered here. A tool's output and a step's full thinking
+ * are in the transcript, one disclosure away; printing a command's whole stdout
+ * into this column is what buried the useful rows under a wall of text.
+ */
 function renderActivity() {
   renderEnvironment();
-  if (state.activity.length === 0) {
+
+  const steps = new Map();
+  const loose = [];
+  for (const item of state.activity) {
+    if (item.step) {
+      if (!steps.has(item.step)) steps.set(item.step, []);
+      steps.get(item.step).push(item);
+    } else {
+      loose.push(item);
+    }
+  }
+
+  if (steps.size === 0 && loose.length === 0) {
     el.rightbarBody.append(node("p", "empty", "Nothing has happened yet."));
     return;
   }
-  const list = node("div", "filetree");
-  for (const item of [...state.activity].reverse()) {
-    const row = node("div", "row");
-    row.style.cursor = "default";
-    const main = node("div", "row__main");
-    main.append(node("div", "row__title", item.label));
-    if (item.detail) main.append(node("div", "row__meta", item.detail));
+
+  for (const [index, items] of [...steps.entries()].sort((a, b) => b[0] - a[0])) {
+    const card = node("div", "actcard");
+    const head = node("div", "actcard__head");
+    head.append(node("span", "actcard__index", `Step ${index}`));
+    // A running estimate of how long the step's thinking took, sized from the
+    // text rather than from wall-clock timestamps. Those timestamps are not
+    // reliable at this scale — everything in a step is written within the same
+    // millisecond — and presenting that as a duration would put "0 ms" beside a
+    // paragraph of reasoning, which is worse than saying nothing.
+    const chars = items
+      .filter((item) => item.kind === "think")
+      .reduce((total, item) => total + (item.detail || "").length, 0);
+    if (chars) {
+      head.append(node("span", "actcard__time", `~${formatDuration((chars / 40) * 1000)} think`));
+    }
+    card.append(head);
+
+    // Reasoning is represented by its first line here and in full in the
+    // transcript; a step that thought a thousand words would otherwise dwarf
+    // every command under it in a narrow column.
+    const think = items.find((item) => item.kind === "think");
+    if (think && think.detail) {
+      const block = node("div", "actcard__think");
+      block.append(node("span", "actcard__thinkTitle", "Think"));
+      block.append(node("span", "actcard__thinkText", think.detail));
+      block.addEventListener("click", () => focusStep(index));
+      block.style.cursor = "pointer";
+      card.append(block);
+    }
+
+    for (const item of items) {
+      if (item.kind === "think") continue;
+      const row = node("div", "actrow");
+      row.dataset.state = item.kind === "result" ? (item.ok ? "ok" : "error") : "run";
+      row.append(node("span", "actrow__dot"));
+      const main = node("div", "actrow__main");
+      main.append(node("div", "actrow__title", item.label));
+      if (item.detail) main.append(node("div", "actrow__detail", item.detail));
+      row.append(main);
+      if (item.duration_ms) row.append(node("span", "actrow__time", formatDuration(item.duration_ms)));
+      row.addEventListener("click", () => focusStep(index));
+      card.append(row);
+    }
+    el.rightbarBody.append(card);
+  }
+
+  if (loose.length) {
+    const section = node("div", "actcard actcard--notes");
+    section.append(node("div", "actcard__head", "Diagnostics"));
+    for (const item of [...loose].reverse()) {
+      const row = node("div", "actrow");
+      const main = node("div", "actrow__main");
+      main.append(node("div", "actrow__title", item.label));
+      if (item.detail) main.append(node("div", "actrow__detail", item.detail));
+      row.append(main);
+      section.append(row);
+    }
+    el.rightbarBody.append(section);
+  }
+}
+
+/** The step currently being worked on, or 0 when nothing is running. */
+function currentStepIndex() {
+  const turn = state.currentTurn;
+  if (!turn || turn.kind !== "assistant" || turn.stepRows.size === 0) return 0;
+  return Math.max(...turn.stepRows.keys());
+}
+
+/** Scroll the transcript to a step and flash it, linking panel to process. */
+function focusStep(index) {
+  const turn = state.currentTurn || [...state.turns.values()].reverse().find((t) => t.kind === "assistant");
+  const step = turn && turn.stepRows.get(Number(index));
+  if (!step) return;
+  step.head.setAttribute("aria-expanded", "true");
+  step.body.hidden = false;
+  step.root.scrollIntoView({ block: "center", behavior: "smooth" });
+  step.root.dataset.flash = "true";
+  setTimeout(() => {
+    delete step.root.dataset.flash;
+  }, 1200);
+}
+
+/**
+ * The agent's plan, as it last wrote it.
+ *
+ * Kept visible rather than tucked into the transcript because its whole value is
+ * answering "what is it trying to do, and how far has it got" at a glance. The
+ * status is the point: an agent that stopped with three items still pending has
+ * not finished, and nothing else in the UI says so.
+ */
+function renderTodo() {
+  if (state.todos.length === 0) {
+    el.rightbarBody.append(node("p", "empty", "The agent has not written a plan."));
+    return;
+  }
+  const done = state.todos.filter((item) => item.status === "completed").length;
+  const header = node("div", "todohead");
+  header.append(node("span", "todohead__title", "Plan"));
+  header.append(node("span", "todohead__count", `${done}/${state.todos.length}`));
+  el.rightbarBody.append(header);
+
+  const list = node("div", "todolist");
+  for (const item of state.todos) {
+    const row = node("div", "todo");
+    row.dataset.status = item.status || "pending";
+    row.append(node("span", "todo__box", item.status === "completed" ? "☑" : "☐"));
+    const main = node("div", "todo__main");
+    main.append(node("div", "todo__text", item.content || ""));
+    if (item.activeForm && item.activeForm !== item.content) {
+      main.append(node("div", "todo__active", item.activeForm));
+    }
     row.append(main);
     list.append(row);
   }
@@ -760,7 +1217,7 @@ function handleEvent(event) {
         // Which engine each direction uses belongs in the Activity panel: it is
         // the first thing a voice bug report needs, and it is never obvious from
         // the UI otherwise.
-        state.activity.push({
+        pushActivity({
           label: "Voice engines",
           detail: `speech in: ${data.voice_backends.stt}; speech out: ${data.voice_backends.tts}`,
         });
@@ -768,7 +1225,7 @@ function handleEvent(event) {
       if (data.voice_problem) {
         // A configured engine that did not start must say so, with the fix. The
         // alternative is a microphone button that looks fine and records nothing.
-        state.activity.push({
+        pushActivity({
           label: "Voice unavailable",
           detail: data.voice_fix ? `${data.voice_problem} — ${data.voice_fix}` : data.voice_problem,
         });
@@ -777,14 +1234,13 @@ function handleEvent(event) {
       // The server synthesises at this rate. Adopting it is what keeps a
       // configured rate from being decoded as if it were the default.
       if (data.sample_rate && !playback.setServerRate(data.sample_rate)) {
-        state.activity.push({
+        pushActivity({
           label: "Speech rate mismatch",
           detail:
             `synthesised at ${data.sample_rate} Hz but the audio output runs at ` +
             `${playback.status.negotiatedRate} Hz. Speech will sound too fast or too slow; ` +
             "reload the page to rebuild the audio output.",
         });
-        renderRightbar();
       }
       // Only used when the server could not ask Deepgram for the speed itself.
       if (data.speech_speed) playback.setPlaybackRate(data.speech_speed);
@@ -815,16 +1271,22 @@ function handleEvent(event) {
         // A cancellation reports `idle` without ever sending `done`, so the release
         // has to happen here too — but only for a real cancellation, never for an
         // ordinary state change.
-        if (data.reason === "cancelled" || data.reason === "stopped") clearApproval();
+        if (data.reason === "cancelled" || data.reason === "stopped") {
+          clearApproval();
+          if (state.currentTurn) finishTimers(state.currentTurn);
+        }
+        // A turn that is working needs its clock running from the moment it says
+        // so, not from the first thing it happens to think or run. "Thinking" with
+        // no counter is the state that reads as a hang.
+        if (data.state === "thinking" || data.state === "tool") startTimers();
       }
       // Deepgram refused the speed, so the server asked us to apply it here.
       if (data.speech_speed && data.kind_detail === "speed_fallback") {
         playback.setPlaybackRate(data.speech_speed);
-        state.activity.push({
+        pushActivity({
           label: "Speech speed",
           detail: `${data.speech_speed}× applied during playback (the voice rejected it)`,
         });
-        renderRightbar();
       }
       break;
     }
@@ -848,8 +1310,12 @@ function handleEvent(event) {
       clearApproval();
       const turn = beginTurn("user");
       turn.bubble.textContent = data.text || "";
+      // Kept so a stopped turn can be resumed: the server continues from its own
+      // stored conversation, and this is only what the composer re-offers.
+      state.lastUserText = data.text || "";
       state.currentTurn = null;
       el.captions.replaceChildren();
+      hideStopNote();
       break;
     }
     case "say": {
@@ -867,10 +1333,18 @@ function handleEvent(event) {
     }
     case "tool_call": {
       const turn = assistantTurn();
-      addToolRow(turn, data.call_id, data.name || "tool");
+      const step = stepFor(turn, data.step);
+      const record = addToolRow(step, data.call_id, data.name || "tool");
+      noteStepTool(step, data.name || "tool");
+      startTimers();
+      record.arguments = data.arguments || {};
       clearApprovalFor(data.call_id);
-      state.activity.push({ label: `Called ${data.name}`, detail: formatArgs(data.arguments) });
-      renderRightbar();
+      pushActivity({
+        kind: "tool",
+        step: step ? step.index : 0,
+        label: data.name || "tool",
+        detail: formatArgs(data.arguments),
+      });
       break;
     }
     case "tool_result": {
@@ -878,20 +1352,20 @@ function handleEvent(event) {
       // retry, a remembered tool, or one the user just declined.
       clearApprovalFor(data.call_id);
       const record = state.toolRows.get(data.call_id);
-      if (record) {
-        record.row.dataset.state = data.ok ? "ok" : "error";
-        record.summary.textContent = data.display || data.error || (data.ok ? "done" : "failed");
-        record.body.textContent = [data.display, data.error, data.duration_ms ? `${data.duration_ms} ms` : ""]
-          .filter(Boolean)
-          .join("\n");
-        // Surface failures open, because a collapsed error is easy to miss.
-        if (!data.ok) record.body.hidden = false;
+      if (record) settleToolRow(record, data);
+      const step = stepFor(assistantTurn(), data.step);
+      if (step) {
+        step.end = Date.now();
+        step.root.dataset.state = data.ok ? "ok" : "error";
+        step.summary.textContent = planSummary(step);
       }
-      state.activity.push({
+      pushActivity({
+        kind: "result",
+        step: step ? step.index : 0,
         label: `${data.name} ${data.ok ? "succeeded" : "failed"}`,
         detail: data.display || data.error || "",
+        duration_ms: data.duration_ms,
       });
-      renderRightbar();
       break;
     }
     case "artifact": {
@@ -901,8 +1375,12 @@ function handleEvent(event) {
       link.target = "_blank";
       link.rel = "noopener";
       turn.root.append(link);
-      state.activity.push({ label: "Created file", detail: data.path });
-      renderRightbar();
+      pushActivity({
+        kind: "artifact",
+        step: currentStepIndex(),
+        label: "Created file",
+        detail: data.path,
+      });
       break;
     }
     case "approval_request": {
@@ -915,7 +1393,9 @@ function handleEvent(event) {
       el.sendButton.hidden = true;
       el.approvalText.textContent = describeApproval(data);
       const turn = assistantTurn();
-      const record = addToolRow(turn, data.call_id, data.name || "tool");
+      const step = stepFor(turn, data.step);
+      const record = addToolRow(step, data.call_id, data.name || "tool");
+      noteStepTool(step, data.name || "tool");
       record.row.dataset.state = "awaiting";
       record.summary.textContent = "awaiting approval";
       setAgentState("awaiting_approval");
@@ -928,9 +1408,33 @@ function handleEvent(event) {
       break;
     }
     case "thinking": {
-      // Reasoning is shown in the activity panel only: it is useful, but it is
-      // not the answer and must not be confused with it.
-      pushReasoning(data.text);
+      // Reasoning sits in the step that produced it, in the transcript, so the
+      // process reads in order: what was considered, then what was run. It is
+      // never mixed into the answer — the step's Think block is collapsed unless
+      // someone opens it.
+      const turn = assistantTurn();
+      addThinking(turn, data.text || "", data.step);
+      startTimers();
+      const step = stepFor(turn, data.step);
+      if (step) {
+        const existing = state.activity.find((item) => item.kind === "think" && item.step === step.index);
+        const gist = gistOf(step.think ? step.think.text : "");
+        if (existing) existing.detail = gist;
+        else pushActivity({ kind: "think", step: step.index, label: "Think", detail: gist });
+      }
+      break;
+    }
+    case "todos": {
+      // The agent rewrote its plan. Replacing wholesale rather than merging keeps
+      // the panel a faithful picture of what the agent believes, including items
+      // it decided to drop.
+      state.todos = Array.isArray(data.todos) ? data.todos : [];
+      if (state.todos.length && state.rightTab === "files") {
+        // Show the plan the first time it exists: a tab that appears and stays
+        // hidden is a tab nobody finds.
+        state.rightTab = "todo";
+      }
+      renderRightbar();
       break;
     }
     case "error": {
@@ -952,6 +1456,11 @@ function handleEvent(event) {
       // turn object is created by the first event that renders something. So make
       // one rather than concluding there is nothing to recover.
       const finished = state.currentTurn || beginTurn("assistant");
+      finishTimers(finished);
+      // Why it ended, when that was not simply "it finished". A turn that stops
+      // because it ran out of steps is not a failure and not an answer, and
+      // leaving the indicator to slide back to "Idle" made the two look alike.
+      showStopNote(data, finished);
       state.currentTurn = null;
       // A completed turn must show something. If nothing was rendered, the events
       // never arrived: a dropped or half-dead socket loses them silently, and the
@@ -972,6 +1481,122 @@ function handleEvent(event) {
 /** True when a turn ended up showing the user anything at all. */
 function turnHasVisibleText(turn) {
   return Boolean((turn.saidText && turn.saidText.trim()) || (turn.shownText && turn.shownText.trim()));
+}
+
+/**
+ * Freeze a turn's clocks and clear the "still working" line.
+ *
+ * Called on the turn boundary rather than by each row: a row that stops its own
+ * timer keeps ticking if its completion event is the one that got lost, and a
+ * timer that runs forever after the turn ended is its own kind of lie.
+ */
+function finishTimers(turn) {
+  const now = Date.now();
+  if (turn && turn.kind === "assistant") {
+    turn.endedAt = now;
+    for (const step of turn.stepRows.values()) {
+      if (!step.end) step.end = now;
+      step.root.dataset.state = step.root.dataset.state === "running" ? "ok" : step.root.dataset.state;
+    }
+  }
+  for (const record of state.toolRows.values()) {
+    if (record.startedAt && !record.endedAt && record.row) {
+      // A call whose result never arrived is not silently "ok": it is unknown,
+      // and saying so is better than a green dot that means nothing.
+      if (record.row.dataset.state === "running") {
+        record.row.dataset.state = "stopped";
+        record.summary.textContent = "no result reported";
+      }
+      record.endedAt = now;
+    }
+  }
+  if (workingLine && workingLine.parentNode) workingLine.remove();
+  workingLine = null;
+  updateTimers();
+  stopTimers();
+}
+
+/**
+ * Say why a turn ended, when it did not simply finish.
+ *
+ * The agent speaks this itself (see `Session._speak_problem`), so the same
+ * sentence appears here as text. The reason and the wording are kept aligned by
+ * the server sending `reason`/`detail` on the done event; a user who heard the
+ * voice should find the same explanation on screen.
+ *
+ * `failed` and `truncated` are the two cases worth a banner. A cancellation was
+ * the user's own doing and an ordinary completion needs no explanation.
+ */
+function showStopNote(data, turn) {
+  const reason = data.reason || (data.failed ? "failed" : data.truncated ? "step_limit" : "");
+  if (!reason) {
+    hideStopNote();
+    return;
+  }
+  if (reason === "cancelled" || reason === "stopped") {
+    // The user stopped it; they already know why.
+    hideStopNote();
+    return;
+  }
+  const copy = {
+    step_limit: {
+      title: "Stopped — the step limit was reached",
+      detail:
+        data.detail ||
+        "It worked through as many steps as it is allowed in one turn and stopped part-way. " +
+          "The work so far is above. Continue to let it carry on, or ask for a smaller piece.",
+    },
+    no_answer: {
+      title: "Stopped — it finished without answering",
+      detail:
+        data.detail ||
+        "The turn did its work but produced no reply. The commands it ran are recorded above. " +
+          "Continue to ask for the answer.",
+    },
+    failed: {
+      title: "Stopped — something went wrong",
+      detail: data.detail || "That turn ended with an error. The detail is in the transcript above.",
+    },
+    stopped: { title: "Stopped", detail: data.detail || "" },
+  }[reason] || { title: "Stopped", detail: data.detail || "" };
+
+  el.stopTitle.textContent = copy.title;
+  el.stopDetail.textContent = copy.detail;
+  el.stopNote.hidden = false;
+  el.stopNote.dataset.reason = reason;
+  // Continue is only offered when continuing can actually work: a step-limited
+  // turn resumes from its stored conversation, an internal failure may not.
+  // Continue is offered for the two endings that resuming actually fixes: a turn
+  // that ran out of steps, and one that did the work but never answered. An
+  // internal failure may not repeat the same way, so it gets no button.
+  const resumable = reason === "step_limit" || reason === "no_answer";
+  el.stopContinue.hidden = !(resumable && Boolean(state.lastUserText));
+  scrollToBottom();
+}
+
+function hideStopNote() {
+  el.stopNote.hidden = true;
+}
+
+/**
+ * Ask the agent to carry on with the turn that stopped.
+ *
+ * The server keeps the conversation, so the nudge is deliberately short — the
+ * work in flight is already in its history. Saying "continue" as a fresh turn
+ * also means it starts with a step budget of its own, which is the whole point:
+ * the previous turn's limit is what stopped it.
+ */
+function continueLastTurn() {
+  if (!state.session) return;
+  const nudge = "Continue from where you stopped.";
+  hideStopNote();
+  const turn = beginTurn("user");
+  turn.bubble.textContent = "Continue";
+  state.currentTurn = null;
+  state.lastUserText = nudge;
+  connection.sendCommand("text", { text: nudge });
+  setAgentState("thinking");
+  startTimers();
 }
 
 /**
@@ -1001,7 +1626,7 @@ async function recoverMissingAnswer(turn) {
     if (last.content && last.content.trim() !== (last.spoken || "").trim()) {
       appendShown(turn, last.content);
     }
-    state.activity.push({
+    pushActivity({
       label: "Recovered a missing reply",
       detail: "The answer was produced and stored, but its events did not reach this page.",
     });
@@ -1088,7 +1713,7 @@ const capture = new Capture({
     // A backend switch is a degraded mode, not a normal event: the user should
     // know their audio is being captured by the fallback path.
     if (backend === "script-processor") {
-      state.activity.push({
+      pushActivity({
         label: "Capture fallback in use",
         detail:
           "The AudioWorklet produced no audio in this browser, so the universal " +
@@ -1134,14 +1759,13 @@ const playback = new Playback({
     // trail instead of a mystery.
     const status = playback.status;
     console.info("[surtitle] playback started", status);
-    state.activity.push({ label: "Speaking", detail: playback.statusLine });
+    pushActivity({ label: "Speaking", detail: playback.statusLine });
     if (!status.rateMatches) {
-      state.activity.push({
+      pushActivity({
         label: "Speech rate mismatch",
         detail: `synthesised at ${status.requestedRate} Hz, output at ${status.negotiatedRate} Hz`,
       });
     }
-    renderRightbar();
   },
   onIdle: () => {
     capture.notifyPlayback(false);
@@ -1219,7 +1843,7 @@ async function toggleMic() {
     // diagnostic for a silent microphone, and it is readable in the UI.
     const started = capture.status;
     console.info("[surtitle] microphone opened", started);
-    state.activity.push({
+    pushActivity({
       label: "Microphone opened",
       detail:
         `device="${started.deviceLabel || "unknown"}" ` +
@@ -1253,14 +1877,14 @@ async function toggleMic() {
         const inputs = await capture.listInputDevices();
         if (inputs.length > 1) {
           const names = inputs.map((d) => d.label).join(" | ");
-          state.activity.push({ label: "Audio inputs available", detail: names });
+          pushActivity({ label: "Audio inputs available", detail: names });
           renderRightbar();
         }
       } else if (status.maxLevel < 0.01) {
         problem = `The microphone is open${device} but the signal is silent. Raise the input level.`;
       }
       console.info("[surtitle] capture check", status);
-      state.activity.push({
+      pushActivity({
         label: "Capture check (3.5 s)",
         detail:
           `frames=${status.framesReceived} peak=${status.maxLevel.toFixed(4)} ` +
@@ -1515,40 +2139,160 @@ async function selectSession(sessionId) {
   state.toolRows.clear();
   state.currentTurn = null;
   state.activity = [];
+  state.todos = Array.isArray(session.todos) ? session.todos : [];
+  state.lastUserText = "";
+  hideStopNote();
 
   // Replay the stored transcript so reopening a conversation shows its history,
   // then land on the newest message rather than the oldest.
+  //
+  // Assistant turns are rebuilt as steps, not as one flat block: the server
+  // stores each step's thinking as a `reasoning` message and each call's step
+  // number, so a reopened conversation shows the same reasoning-then-commands
+  // process the live view showed. Without this a reopened turn was a bare answer
+  // with no sign of the fourteen commands behind it.
   await replayThenJumpToLatest(() => {
-    if (!session.messages) return;
-    for (const message of session.messages) {
-      if (message.role === "user") {
-        const turn = beginTurn("user");
-        turn.bubble.textContent = message.content;
-      } else if (message.role === "system") {
-        // Attachment records and similar notices: context, not something to answer.
-        const turn = beginTurn("assistant");
-        appendShown(turn, message.content);
-      } else {
-        const turn = beginTurn("assistant");
-        // Show the spoken line first when there was one, then the full text.
-        //
-        // This previously rendered `spoken` *instead of* `content`, so reopening a
-        // conversation showed only the short spoken summary and the real answer —
-        // tables, paths, detail — silently vanished. Keeping the two channels
-        // distinct across a reload is the reason they are stored separately.
-        if (message.spoken && message.spoken.trim()) {
-          appendSaid(turn, message.spoken);
-        }
-        if (message.content && message.content.trim() !== (message.spoken || "").trim()) {
+    const calls = session.tool_calls || [];
+    // One chronological stream: the store keeps thinking as messages and calls
+    // as their own rows, and their order relative to each other is what the
+    // process view is. `id` is unique across both tables, so the sort is stable
+    // where timestamps land in the same millisecond.
+    const stream = [
+      ...(session.messages || []).map((message) => ({ at: message.created_at, message })),
+      ...calls.map((call) => ({ at: call.created_at, call })),
+    ].sort((a, b) => (a.at || 0) - (b.at || 0));
+
+    // Thinking is keyed by the step it belongs to, and calls place it. The stored
+    // reasoning row carries no step number of its own, so the step is taken from
+    // the calls that follow it — which is exactly how it was written: a step's
+    // thinking is stored when the step ends, immediately before its calls.
+    //
+    // Holding it back until the answer instead put a step's Think block in the
+    // *next* turn, and dropped it entirely when the turn had no answer of its own.
+    // That is the shape a stopped conversation has, so the one case where the
+    // reasoning matters most was the one that lost it.
+    const thinking = new Map();
+    const tookStep = new Set();
+    let looseThinking = [];
+
+    const flushThinking = (turn, step) => {
+      const index = Number(step) || 1;
+      if (!thinking.has(index)) return;
+      addThinking(turn, thinking.get(index), index);
+      thinking.delete(index);
+    };
+
+    const attachLoose = (turn) => {
+      for (const text of looseThinking) addThinking(turn, text);
+      looseThinking = [];
+    };
+
+    for (const item of stream) {
+      if (item.message) {
+        const { message } = item;
+        if (message.role === "user") {
+          const turn = beginTurn("user");
+          turn.bubble.textContent = message.content;
+          state.lastUserText = message.content || state.lastUserText;
+        } else if (message.role === "reasoning") {
+          looseThinking.push(message.content || "");
+        } else if (message.role === "system") {
+          // Attachment records and similar notices: context, not something to answer.
+          const turn = beginTurn("assistant");
           appendShown(turn, message.content);
+        } else {
+          const turn = beginTurn("assistant");
+          // Any thinking still unclaimed belongs above this answer.
+          for (const [index, text] of thinking) {
+            addThinking(turn, text, index);
+          }
+          thinking.clear();
+          attachLoose(turn);
+          // Show the spoken line first when there was one, then the full text.
+          //
+          // This previously rendered `spoken` *instead of* `content`, so reopening a
+          // conversation showed only the short spoken summary and the real answer —
+          // tables, paths, detail — silently vanished. Keeping the two channels
+          // distinct across a reload is the reason they are stored separately.
+          if (message.spoken && message.spoken.trim()) {
+            appendSaid(turn, message.spoken);
+          }
+          if (message.content && message.content.trim() !== (message.spoken || "").trim()) {
+            appendShown(turn, message.content);
+          }
         }
+      } else {
+        const call = item.call;
+        const turn = assistantTurn();
+        if (looseThinking.length) {
+          // Thinking that precedes the first call of a step is that step's.
+          thinking.set(Number(call.step) || 1, looseThinking.join(""));
+          looseThinking = [];
+        }
+        tookStep.add(Number(call.step) || 1);
+        replayToolCall(turn, call);
+        flushThinking(turn, call.step);
       }
+    }
+
+    // Work with no answer after it: the store ends mid-process. Show it rather
+    // than dropping what the user watched happen, and say that it stopped —
+    // otherwise a reopened conversation looks like an answer that trailed off.
+    if (thinking.size || looseThinking.length || tookStep.size) {
+      const turn = beginTurn("assistant");
+      for (const [index, text] of thinking) addThinking(turn, text, index);
+      attachLoose(turn);
+      showStopNote({ reason: "step_limit", detail: STOPPED_WITHOUT_ANSWER }, turn);
     }
     state.currentTurn = null;
   });
 
   renderSessions();
+  renderRightbar();
   openConnection();
+}
+
+/** The stored line shown when a conversation ends mid-process. */
+const STOPPED_WITHOUT_ANSWER =
+  "This conversation ends part-way through the work: the last thing stored is a tool call " +
+  "with no answer after it. Continue to let the agent carry on from here.";
+
+/**
+ * Rebuild one stored tool call as a settled row in its step.
+ *
+ * The store keeps the outcome, the duration and the step, so a reopened row is
+ * the same row the live turn produced rather than a placeholder: a command that
+ * failed is still red, and one that took thirty seconds still says so. No timer
+ * is started — the call is over.
+ */
+function replayToolCall(turn, call) {
+  const step = stepFor(turn, call.step);
+  const record = addToolRow(step, `stored_${call.id}`, call.name || "tool");
+  noteStepTool(step, call.name || "tool");
+  record.arguments = call.arguments || {};
+  const ok = call.ok !== false;
+  settleToolRow(record, {
+    ok,
+    display: call.result || (ok ? "done" : ""),
+    error: ok ? "" : call.result || "failed",
+    duration_ms: call.duration_ms,
+  });
+  if (call.approved === false) {
+    record.row.dataset.state = "stopped";
+    record.summary.textContent = "declined";
+  }
+  step.end = step.end || (call.created_at ? call.created_at * 1000 : Date.now());
+  step.root.dataset.state = ok ? "ok" : "error";
+  step.summary.textContent = planSummary(step);
+  pushActivity({
+    kind: "result",
+    step: step.index,
+    label: call.name || "tool",
+    detail: formatArgs(call.arguments),
+    duration_ms: call.duration_ms,
+    ok,
+    at: call.created_at ? call.created_at * 1000 : Date.now(),
+  });
 }
 
 function openConnection() {
@@ -1713,6 +2457,12 @@ document.getElementById("tabActivity").addEventListener("click", () => {
   state.rightTab = "activity";
   renderRightbar();
 });
+document.getElementById("tabTodo").addEventListener("click", () => {
+  state.rightTab = "todo";
+  renderRightbar();
+});
+el.stopContinue.addEventListener("click", () => continueLastTurn());
+el.stopDismiss.addEventListener("click", () => hideStopNote());
 document.getElementById("rightbarToggle").addEventListener("click", () => {
   const collapsed = el.frame.dataset.rightbarCollapsed === "true";
   el.frame.dataset.rightbarCollapsed = String(!collapsed);
