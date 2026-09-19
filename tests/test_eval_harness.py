@@ -50,11 +50,41 @@ class TestTaskFiles:
                 "must not name a project on this machine"
             )
 
-    def test_a_selector_filters_and_an_unknown_one_is_an_error(self):
-        assert harness.load_tasks("example")
-        assert len(harness.load_tasks("example")) < len(harness.load_tasks())
+    def test_a_selector_filters_and_an_unknown_one_is_an_error(self, tmp_path, monkeypatch):
+        """Built on a directory this test owns: the real task set is per-machine —
+        `evals/tasks/` is gitignored — so a test that counted it would pass here and
+        fail in CI."""
+        for name, task_id in (("a.json", "wanted-one"), ("b.json", "other-one")):
+            (tmp_path / name).write_text(
+                json.dumps({"id": task_id, "root": "/tmp", "prompt": "p", "checks": ["answered"]}),
+                encoding="utf-8",
+            )
+        monkeypatch.setattr(harness, "EXAMPLES_DIR", tmp_path)
+        monkeypatch.setattr(harness, "TASKS_DIR", tmp_path / "absent")
+
+        assert [task["id"] for task in harness.load_tasks("wanted")] == ["wanted-one"]
+        assert len(harness.load_tasks()) == 2
         with pytest.raises(ValueError):
             harness.load_tasks("no-such-task")
+
+    def test_a_local_task_replaces_an_example_of_the_same_id(self, tmp_path, monkeypatch):
+        """Yours wins: it is the one written against the machine in front of you."""
+        example = tmp_path / "examples"
+        mine = tmp_path / "mine"
+        example.mkdir()
+        mine.mkdir()
+        for directory, prompt in ((example, "the example"), (mine, "mine")):
+            (directory / "t.json").write_text(
+                json.dumps(
+                    {"id": "same-id", "root": "/tmp", "prompt": prompt, "checks": ["answered"]}
+                ),
+                encoding="utf-8",
+            )
+        monkeypatch.setattr(harness, "EXAMPLES_DIR", example)
+        monkeypatch.setattr(harness, "TASKS_DIR", mine)
+
+        tasks = harness.load_tasks()
+        assert [task["prompt"] for task in tasks] == ["mine"]
 
     def test_an_unknown_check_is_rejected_rather_than_ignored(self, tmp_path, monkeypatch):
         (tmp_path / "bad.json").write_text(
