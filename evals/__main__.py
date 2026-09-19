@@ -2,7 +2,7 @@
 
     uv run python -m evals --list
     uv run python -m evals
-    uv run python -m evals conveyor --repeat 3 --label effort-high --effort high
+    uv run python -m evals example --repeat 3 --label effort-high --effort high
 
 Exit status is 1 when a task fails a check, so a run can gate a change.
 """

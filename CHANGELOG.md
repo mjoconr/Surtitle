@@ -48,7 +48,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **A turn that pauses with the plan still open is no longer recorded as the
   answer.** The loop ends a turn on the first round that calls no tool, so a model
-  that stopped mid-work in prose — "let me now check the feeder gate", "the sim is
+  that stopped mid-work in prose — "let me now check the parser", "the report is
   not written yet", "say go and I'll start at change 1" — ended the turn as
   `complete`: no banner, no Continue button, and a Plan tab still claiming work was
   outstanding. In one real session that happened eight times in a day, each one
@@ -327,7 +327,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   come back with no text and no tool calls, and the loop treated that as a finished
   turn: the reply was stored as its `[work this turn]` log alone, with nothing to
   read and nothing spoken. In the session this was found in, the agent made 38 tool
-  calls across 28 steps and eleven minutes on a feeder-conveyor investigation, then
+  calls across 28 steps and eleven minutes on an investigation, then
   closed the turn with an empty message — which from the user's side is
   indistinguishable from the agent having stopped. A turn that has work behind it and
   produces no text is now asked once to wrap up and speak; if that also comes back
