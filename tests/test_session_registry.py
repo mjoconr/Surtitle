@@ -316,3 +316,34 @@ class TestRealSession:
         await manager.acquire(session, "conn-1")
         await manager.remove(session.session_id)
         assert manager.get(session.session_id) is None
+
+    async def test_a_closed_session_stops_a_connection_pumping_into_it(self, session):
+        """The consequence, on the real object rather than a stub.
+
+        A closed session that keeps its socket is what "I just restarted but it
+        seems broken, text and voice" was: the engines are stopped and `emit`
+        drops every event, so the browser goes on talking into nothing while a
+        turn runs and stores its work. The pump must end the connection instead,
+        so the browser's own reconnect builds a session that works.
+        """
+        from surtitle.server import _pump
+
+        assert session.closed is False
+        await session.close()
+        assert session.closed is True
+
+        class Socket:
+            def __init__(self):
+                self.reads = 0
+
+            async def receive(self):
+                self.reads += 1
+                return {
+                    "type": "websocket.receive",
+                    "text": '{"kind": "text", "data": {"text": "are you there?"}}',
+                }
+
+        socket = Socket()
+        await _pump(socket, session)
+
+        assert socket.reads == 0, "no command may be dispatched into a closed session"
