@@ -16,7 +16,15 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from surtitle.tools import artifacts, documents, environment, fs_tools, shell_tools, web_tools
+from surtitle.tools import (
+    artifacts,
+    documents,
+    environment,
+    fs_tools,
+    jobs,
+    shell_tools,
+    web_tools,
+)
 from surtitle.tools.fs_tools import ToolContext, ToolResult
 from surtitle.vcs.guide import DETAIL_LEVELS, detail_menu
 
@@ -29,6 +37,11 @@ __all__ = [
     "build_registry_for_project",
     "default_registry",
 ]
+
+# Tools about the conversation's own background jobs. Not offered to a sub-agent:
+# the jobs belong to the parent, and a child that could read or kill them would be
+# acting on processes it cannot see started.
+_JOB_TOOLS = ("run_background", "job_output", "job_kill")
 
 log = logging.getLogger(__name__)
 
@@ -612,7 +625,7 @@ _WEB_FETCH_CHARS = 12_000
 # they belong to — `todo_write` writes its plan, `search_history` reads other
 # conversations, and a sub-agent has neither — and the third starts another
 # sub-agent, which is how a delegation becomes a fork bomb.
-_NOT_FOR_A_SUBAGENT = frozenset({TODO_TOOL, "search_history", SUBAGENT_TOOL})
+_NOT_FOR_A_SUBAGENT = frozenset({TODO_TOOL, "search_history", SUBAGENT_TOOL, *_JOB_TOOLS})
 
 
 def _todo_write_handler(ctx: ToolContext, todos: list[dict[str, Any]] | None = None) -> ToolResult:
@@ -821,6 +834,68 @@ _WEB_FETCH = Tool(
 )
 
 
+_RUN_BACKGROUND = Tool(
+    name="run_background",
+    description=(
+        "Start a shell command and return immediately, naming the job. Use it for "
+        "anything slow — a build, a test suite, a long search, a command on a remote "
+        "machine — so the turn is not blocked while it runs. Read it later with "
+        "job_output; it keeps running whether or not you do. Same working directory "
+        "and permissions as run_shell, and stopped when the conversation closes."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {"command": _string("Shell command to run in the project root.")},
+        "required": ["command"],
+    },
+    handler=jobs.run_background,
+    approval="ask",
+    summary="Start a command in the background",
+    mutating=True,
+)
+
+_JOB_OUTPUT = Tool(
+    name="job_output",
+    description=(
+        "Read the end of a background job's output and whether it has finished. "
+        "Give `wait_seconds` to wait for it to finish rather than asking again in a "
+        "loop — that is one step instead of several, and it is bounded."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "job": _string("The job name, as run_background returned it."),
+            "wait_seconds": {
+                "type": "number",
+                "description": "Wait this long for the job to finish before reporting.",
+                "default": 0,
+            },
+        },
+        "required": ["job"],
+    },
+    handler=jobs.job_output,
+    approval="never",
+    summary="Read a background job's output",
+)
+
+_JOB_KILL = Tool(
+    name="job_kill",
+    description=(
+        "Stop a background job and everything it started. Use it when a command is "
+        "wrong, stuck, or no longer needed — a job nobody wants should not keep "
+        "running quietly."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {"job": _string("The job name, as run_background returned it.")},
+        "required": ["job"],
+    },
+    handler=jobs.job_kill,
+    approval="never",
+    summary="Stop a background job",
+)
+
+
 def default_tool_list() -> list[Tool]:
     """Every tool the agent may use."""
     return [
@@ -832,6 +907,9 @@ def default_tool_list() -> list[Tool]:
         _EDIT_FILE,
         _RUN_PYTHON,
         _RUN_SHELL,
+        _RUN_BACKGROUND,
+        _JOB_OUTPUT,
+        _JOB_KILL,
         _MAKE_PDF,
         _MAKE_SPREADSHEET,
         _MAKE_CHART,

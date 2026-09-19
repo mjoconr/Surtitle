@@ -40,6 +40,7 @@ from surtitle.llm.deepseek import ChatMessage, DeepSeekClient
 from surtitle.stats import RunStats, context_window, is_peak, resolve_price
 from surtitle.store.db import Store
 from surtitle.tools.environment import environment_summary
+from surtitle.tools.jobs import JobRegistry
 from surtitle.tools.project_config import load_project_config
 from surtitle.tools.registry import default_registry, mount_mcp_tools
 from surtitle.voice.engine import (
@@ -226,6 +227,11 @@ class Session:
     _announced_steps: set[int] = field(default_factory=set)
     _spoke_this_turn: bool = False
     _subagent_announced: bool = False
+    # The conversation's background commands. Owned here rather than by a turn: a
+    # build started in one turn is still running three turns later, and it must be
+    # killed when this session closes — a process nobody can see or stop is worse
+    # than one that never started. See `tools/jobs.py`.
+    jobs: JobRegistry = field(default_factory=JobRegistry)
     _audio_seconds: float = 0.0
     # Diagnostics: how much audio this listening session actually delivered, and
     # how many times the microphone has been opened.
@@ -437,6 +443,11 @@ class Session:
         self._closed = True
         log.info("session closed: id=%s", self.session_id)
         await self.cancel_turn()
+        # Before anything else that could fail: a background command left running
+        # after the window that started it has gone is the one thing here the user
+        # cannot see or stop.
+        with contextlib.suppress(Exception):
+            await self.jobs.kill_all()
         if self.mcp_manager is not None:
             with contextlib.suppress(Exception):
                 await self.mcp_manager.close()
@@ -945,6 +956,7 @@ class Session:
             system_prompt=self._system_prompt(),
             context_note=self._context_note(),
             repeat_guard=self._repeat_guard,
+            jobs=self.jobs,
         )
         loop.set_emitter(self._emit_side_channel)
 

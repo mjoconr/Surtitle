@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Long commands no longer hold a turn open.** `run_background` starts a command and
+  returns at once with a name for it; `job_output` reads it — waiting a bounded time
+  if you ask it to, so the agent does not sit in a polling loop — and `job_kill`
+  stops it. A job belongs to the conversation rather than the turn: a build started
+  in one turn is still there three turns later, and everything the conversation
+  started is killed when it closes, because a background process that outlives its
+  window is one you cannot see or stop. Output is written to a file rather than a
+  pipe so a chatty command cannot deadlock on a reader that stopped reading, and it
+  is read from the end with the elision stated. Starting a job asks your approval —
+  it is `run_shell`, deferred — while reading and stopping one does not.
+
 - **The agent can read a page from the internet.** `web_fetch` returns a URL's
   readable text — documentation, a changelog, a release note, an error page — for
   the questions the project's own files cannot answer. It reads only `http` and

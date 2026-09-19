@@ -112,6 +112,9 @@ class ToolContext:
     # everywhere else — a tool must not be able to start an agent, only the loop
     # that owns the conversation can.
     subagent: Any = None
+    # The conversation's background commands, supplied by the session. Owned above
+    # the turn on purpose: a job started in one turn is still there in the next.
+    jobs: Any = None
 
 
 @dataclass(slots=True)

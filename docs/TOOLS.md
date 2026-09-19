@@ -25,6 +25,8 @@ asks about packages the project has not already approved.
 | `web_fetch` | ask | no |
 | `write_file`, `edit_file` | ask | yes |
 | `run_python`, `run_shell` | ask | yes |
+| `run_background` | ask | yes |
+| `job_output`, `job_kill` | never | no |
 | `make_pdf`, `make_spreadsheet`, `make_chart` | ask | yes |
 | `convert_document` | ask | yes |
 | `install_packages` | ask (per new package) | yes |
@@ -143,6 +145,34 @@ Both:
   were whole.
 
 Cancellation is real: pressing stop (or barging in) kills the subprocess tree.
+
+### Background jobs
+
+A command that takes four minutes does not belong inside a turn: the turn is blocked
+for those four minutes, the user hears nothing, and the model cannot tell "not
+finished yet" from "broken". `run_background` starts it and returns a name;
+`job_output` reads it — waiting a bounded time if asked, so one step replaces a
+polling loop — and `job_kill` stops it.
+
+Three properties make it safe to leave running:
+
+- **A job belongs to its conversation.** The registry is owned by the `Session`, not
+  by a turn, so a build started in one turn is there three turns later; and
+  `Session.close()` kills everything it started. A background process that outlives
+  the window it came from is one the user cannot see or stop.
+- **Output goes to a file, not a pipe.** Nothing has to be drained for the command
+  to make progress, so a job that prints for an hour cannot fill a pipe buffer and
+  block on a reader that stopped reading.
+- **The file is read from the end**, capped, and what comes back says it was cut:
+  for something that has been running a while, the newest lines are the ones that
+  say where it got to.
+
+The registry keeps the newest 20 jobs and drops the oldest *finished* one, so a loop
+that starts jobs forever does not grow a list forever. `run_background` is `ask` for
+the same reason `run_shell` is — it is the same act, deferred — and the two readers
+are `never`, since reading what already ran, or stopping the agent's own job, is not
+a new thing to approve. None of the three reaches a sub-agent: the jobs belong to the
+parent, and a child has nobody to answer an approval prompt.
 
 ## Artifacts
 

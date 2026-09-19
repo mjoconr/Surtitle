@@ -345,6 +345,13 @@ and this is not. It asks the user's permission each time, since a request to a U
 the one thing here that can carry something out; use it deliberately, and say what
 you are looking up before you do.
 
+**Do not hold the turn open on something slow.** A build, a test suite, a long search,
+or a command on another machine belongs in `run_background`: it returns at once with a
+name for the job. Say what you started, do something else, and read it with
+`job_output` when you need it — give that a `wait_seconds` rather than asking again in
+a loop, because one step that waits is worth five that check. Stop a job you no longer
+want with `job_kill`; a job nobody wants should not keep running quietly.
+
 **Write the plan down when the work is bigger than a couple of steps.** The user
 can see your plan while you work, which is the difference between watching
 something happen and waiting to find out what happened. Use `todo_write` with the
@@ -735,6 +742,7 @@ class AgentLoop:
         system_prompt: str | None = None,
         context_note: str = "",
         repeat_guard: RepeatCallGuard | None = None,
+        jobs: Any = None,
     ) -> None:
         self.settings = settings
         self.root = root
@@ -743,6 +751,9 @@ class AgentLoop:
         self.store = store
         self.registry = registry or default_registry()
         self.approvals = approvals or ApprovalBroker()
+        # The conversation's background jobs, owned by the session and passed in:
+        # a job started two turns ago is still this loop's to read.
+        self.jobs = jobs
         self._client = client
         self._owns_client = client is None
         self.system_prompt = system_prompt or build_system_prompt(root.name)
@@ -1358,6 +1369,7 @@ class AgentLoop:
                         # the conversation, so a tool reaches a sub-agent through it
                         # or not at all.
                         subagent=self._spawn_subagent,
+                        jobs=self.jobs,
                     ),
                     arguments,
                 )
