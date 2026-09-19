@@ -20,6 +20,15 @@ Each direction has two implementations, chosen independently with
 They are independent, so "local ears, hosted voice" is supported and is usually
 the sensible combination — recognition is where the privacy and cost pressure is.
 
+> **Diagnosing a local engine that will not start.** `surtitle models status` and
+> `models verify` inspect the downloaded model *files* only — they never import
+> `sherpa_onnx`. So they report every model "installed" even when the
+> `voice-local` extra is missing from the active venv, and the session then fails
+> with no `local STT ready` line in `surtitle.log`. `scripts/run.sh` does not
+> repair this: with an existing `.venv` it launches without syncing, and its
+> first-run bootstrap runs `uv sync --inexact` with no extra. The fix is an
+> explicit `uv sync --extra voice-local`, then restart the server.
+
 ## What the two engines are, measured
 
 Measured on the development machine (2019 Intel i9, macOS, no GPU, CPU only) with
