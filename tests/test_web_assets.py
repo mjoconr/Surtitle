@@ -719,6 +719,12 @@ class TestTheContextMeter:
         assert "data.context_limit" in script
         assert "contextLimit" in script
 
+    def test_a_million_token_window_does_not_read_as_a_thousand_k(self, script):
+        block = script[script.index("function formatTokens(") :]
+        block = block[: block.index("\n}\n")]
+        assert "1_000_000" in block, "the window can be a million tokens now"
+        assert "M`" in block, "it must read as 1M, not 1000k"
+
     def test_it_is_drawn_from_the_last_completion(self, script):
         block = script[script.index("function renderContextMeter(") :]
         block = block[: block.index("\n}\n")]
@@ -1109,8 +1115,9 @@ class TestReadyEventContract:
         ]
         assert ready, "a session must announce itself"
         assert ready[0]["data"]["sample_rate"] == session.settings.tts_sample_rate
-        assert ready[0]["data"]["context_limit"] == session.settings.context_limit, (
-            "the browser measures a turn's usage against the window the server reports"
+        assert ready[0]["data"]["context_limit"] == 1_000_000, (
+            "deepseek-flash accepts 1M tokens, and the meter measures against that — "
+            "a default window is wrong by however much the models differ"
         )
 
 

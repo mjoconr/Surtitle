@@ -122,14 +122,15 @@ class Settings(BaseSettings):
     thinking_enabled: bool = Field(default=True, alias="SURTITLE_THINKING")
     temperature: float = Field(default=0.7, alias="SURTITLE_TEMPERATURE")
     max_tokens: int = Field(default=4096, alias="SURTITLE_MAX_TOKENS")
-    # The model's context window, in tokens, which the browser shows the turn's
-    # usage against.
+    # An override for the model's context window, which the browser shows a
+    # turn's usage against. Zero means "use the window published for the model" —
+    # see `surtitle.stats.MODEL_CONTEXT_WINDOWS`. It has to be stated somewhere
+    # because no API reports it: `GET /models` returns an id and an owner and
+    # nothing else.
     #
     # Reported, not enforced: the window belongs to the model, and the app trims
-    # by message count rather than to a token budget. It is configurable because
-    # the number changes when the model does, and a meter measuring against a
-    # stale window is worse than no meter.
-    context_limit: int = Field(default=128_000, alias="SURTITLE_CONTEXT_LIMIT")
+    # by message count rather than to a token budget.
+    context_limit: int = Field(default=0, alias="SURTITLE_CONTEXT_LIMIT")
 
     # --- agent loop limits ----------------------------------------------
     # A backstop against runaway tool use, not a work budget.

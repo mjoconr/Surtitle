@@ -594,12 +594,13 @@ function scheduleThinkPeek(think) {
   }, 250);
 }
 
-/** "24.3k" — a token count at a glance, where the exact figure is not the point. */
+/** "24.3k", "384k", "1M" — a token count at a glance, where exact is not the point. */
 function formatTokens(count) {
   const value = Number(count) || 0;
   if (value < 1000) return String(value);
-  if (value < 100_000) return `${(value / 1000).toFixed(1)}k`;
-  return `${Math.round(value / 1000)}k`;
+  if (value < 1_000_000) return `${(value / 1000).toFixed(value < 100_000 ? 1 : 0)}k`;
+  const millions = value / 1_000_000;
+  return `${millions >= 10 ? Math.round(millions) : millions.toFixed(1).replace(/\.0$/, "")}M`;
 }
 
 /**

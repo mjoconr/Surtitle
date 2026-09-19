@@ -18,6 +18,7 @@ from surtitle.stats import (
     MODEL_PRICES,
     ModelPrice,
     RunStats,
+    context_window,
     cost_of,
     format_duration,
     is_peak,
@@ -190,3 +191,34 @@ class TestDurationFormatting:
 
     def test_negative_is_clamped(self):
         assert format_duration(-5) == "0s"
+
+
+class TestContextWindow:
+    """The window is not something the API will tell us.
+
+    `GET /models` returns an id, an object type and an owner, and nothing else —
+    so the published table is the answer, and an override is the escape hatch for
+    a model that arrives before the table does. This matters more than it sounds:
+    measured against a 128k default, a 1M window read "55% full" at 7%.
+    """
+
+    def test_the_published_window_for_the_model_in_use(self):
+        assert context_window("deepseek-flash") == 1_000_000
+
+    def test_the_retired_identifiers_keep_their_window(self):
+        assert context_window("deepseek-v4-flash") == 1_000_000
+        assert context_window("deepseek-v4-pro") == 1_000_000
+
+    def test_an_unknown_model_has_no_window(self):
+        """Saying nothing beats measuring against a guess."""
+        assert context_window("a-model-from-next-year") == 0
+
+    def test_the_configured_override_wins(self):
+        configured = Settings(DEEPSEEK_API_KEY="k", SURTITLE_CONTEXT_LIMIT=32_000)
+
+        assert context_window("deepseek-flash", configured) == 32_000
+        assert context_window("a-model-from-next-year", configured) == 32_000
+
+    def test_the_default_is_not_a_number_of_its_own(self):
+        """A default window is the bug: it is right only until the model changes."""
+        assert Settings(DEEPSEEK_API_KEY="k").context_limit == 0

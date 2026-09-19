@@ -35,7 +35,7 @@ from surtitle.core.agent import (
 from surtitle.core.events import Event, EventKind, SessionState
 from surtitle.core.speak import Chunk, ChunkKind
 from surtitle.llm.deepseek import ChatMessage, DeepSeekClient
-from surtitle.stats import RunStats, is_peak, resolve_price
+from surtitle.stats import RunStats, context_window, is_peak, resolve_price
 from surtitle.store.db import Store
 from surtitle.tools.environment import environment_summary
 from surtitle.tools.project_config import load_project_config
@@ -284,9 +284,11 @@ class Session:
             voice_fix=self.voice_fix,
             voice_backends=self.voice_backends,
             model=self.settings.deepseek_model,
-            # What the browser measures a turn's usage against. Sent rather than
-            # hardcoded there because it changes with the model.
-            context_limit=self.settings.context_limit,
+            # What the browser measures a turn's usage against: the window
+            # published for the model, or the configured override. Zero when
+            # neither is known, and the meter then says nothing rather than
+            # measuring against a number nobody has.
+            context_limit=context_window(self.settings.deepseek_model, self.settings),
             stt_api=self.settings.stt_api if self.stt else None,
             sample_rate=self.settings.tts_sample_rate,
             capture_rate=self.settings.stt_sample_rate,

@@ -74,6 +74,24 @@ MODEL_PRICES: dict[str, ModelPrice] = {
     "deepseek-v4-flash-vision-exp": _FLASH,
 }
 
+# How much context each model accepts, in tokens, from the same page as the
+# prices.
+#
+# It has to be a table because no API reports it: `GET /models` returns an id, an
+# object type and an owner, and nothing else. The window is the one number the
+# browser's budget meter is measured against, so a stale value is not a cosmetic
+# problem — a 128k default against a 1M window read "55% full" at 7%.
+#
+# An unknown model deliberately has no window: the meter hides itself rather than
+# picking a number, and `SURTITLE_CONTEXT_LIMIT` is the way to state one.
+MODEL_CONTEXT_WINDOWS: dict[str, int] = {
+    "deepseek-flash": 1_000_000,
+    "deepseek-v4-pro": 1_000_000,
+    # Retired identifiers, served by the Flash model — same window.
+    "deepseek-v4-flash": 1_000_000,
+    "deepseek-v4-flash-vision-exp": 1_000_000,
+}
+
 
 def is_peak(moment: datetime | None = None) -> bool:
     """True when ``moment`` (UTC, default now) falls in a published peak window."""
@@ -115,6 +133,21 @@ def resolve_price(model: str, settings: Settings | None = None) -> ModelPrice | 
         input_hit=overrides[1] if overrides[1] is not None else price.input_hit,
         output=overrides[2] if overrides[2] is not None else price.output,
     )
+
+
+def context_window(model: str, settings: Settings | None = None) -> int:
+    """How much context ``model`` accepts, in tokens; ``0`` when unknown.
+
+    The table is the answer and ``SURTITLE_CONTEXT_LIMIT`` overrides it, because
+    a new model can reach the account before it reaches this file. Zero means
+    "say nothing": the browser hides the meter rather than measuring against a
+    number nobody knows, which is the failure this replaced — the meter read
+    "55% full" against a 128k window that was eight times too small.
+    """
+    override = int(getattr(settings, "context_limit", 0) or 0)
+    if override > 0:
+        return override
+    return MODEL_CONTEXT_WINDOWS.get((model or "").strip().lower(), 0)
 
 
 def cost_of(
