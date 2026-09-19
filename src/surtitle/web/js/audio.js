@@ -332,7 +332,14 @@ export class Capture {
 
   setMuted(muted) {
     this._muted = Boolean(muted);
-    if (this.node && this.backend === "worklet" && this.node.port) {
+    // The worklet keeps its own mute state and does not read `_muted`, so it has to
+    // be told. It was told only when `backend === "worklet"` — and a worklet that
+    // is attached but not labelled that way went on posting frames after the
+    // microphone was switched off. The server then recognised audio for a
+    // microphone the user had closed, and a turn could start from speech they had
+    // already stopped: "the mic in the window was off but it was still converting
+    // voice". If there is a worklet node, it gets the message.
+    if (this.node && this.node.port) {
       this.node.port.postMessage({ type: "mute", value: muted });
     }
   }

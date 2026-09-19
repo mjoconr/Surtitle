@@ -1197,6 +1197,9 @@ function pushActivity(entry) {
 }
 
 let activityRenderTimer = null;
+// Whether the panel should follow the newest content on the next render.
+let panelFollows = true;
+
 function scheduleActivityRender() {
   if (activityRenderTimer) return;
   activityRenderTimer = setTimeout(() => {
@@ -1206,6 +1209,11 @@ function scheduleActivityRender() {
 }
 
 function renderRightbar() {
+  // Whether the reader is sitting at the newest end of the panel, decided before
+  // the rebuild resets it. Following only when they are is the same courtesy the
+  // transcript extends.
+  const box = el.rightbarBody;
+  panelFollows = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
   // Plan, Thinking, Notes, Files — in the order they answer a question. The plan
   // is what the agent intends, thinking is what it is doing, notes are what it
   // has decided to keep, files are what it has done to the project. Plan leads
@@ -1258,6 +1266,14 @@ function renderNotes() {
     loadNotes();
     return;
   }
+  if (notes.error) {
+    // A failed read is not an empty notebook. Treating one as the other is how a
+    // notebook with 3,700 characters in it sat behind "Nothing recorded yet".
+    el.rightbarBody.append(
+      node("p", "empty", `Could not read the notebook: ${notes.error}`),
+    );
+    return;
+  }
   if (!notes.text) {
     el.rightbarBody.append(
       node(
@@ -1297,8 +1313,9 @@ async function loadNotes() {
   try {
     state.notes = await api(`/api/projects/${state.project.id}/notes`);
   } catch (error) {
-    state.notes = { text: "", path: "", chars: 0 };
-    toast(error.message, "error");
+    // Kept as an error, not cached as an empty notebook: the panel would
+    // otherwise keep saying it is empty long after the reason has gone.
+    state.notes = { error: error.message || "the request failed" };
   } finally {
     notesLoading = false;
   }
@@ -1352,6 +1369,15 @@ function renderTouchedFiles() {
   el.rightbarBody.append(section);
 }
 
+/**
+ * Files: what this turn touched, with the project tree folded away behind it.
+ *
+ * The tree was the whole panel, and it was useless — a wall of dot-directories
+ * says what exists, which the person working in the project already knows. What is
+ * worth the click is what the agent did with it. The tree is still here, because
+ * "what is in this project" is a fair question, but it is closed by default and
+ * costs one line until someone asks.
+ */
 function renderFiles() {
   if (!state.project) {
     el.rightbarBody.append(node("p", "empty", "No project open."));
@@ -1359,6 +1385,19 @@ function renderFiles() {
   }
 
   renderTouchedFiles();
+  if (state.touched.size === 0) {
+    el.rightbarBody.append(
+      node(
+        "p",
+        "empty",
+        "Nothing touched yet. The files the agent reads and writes this turn appear here.",
+      ),
+    );
+  }
+
+  const browse = node("details", "browse");
+  browse.append(node("summary", "browse__summary", "Browse project files"));
+  el.rightbarBody.append(browse);
 
   const header = node("div", "row");
   header.style.cursor = "default";
@@ -1372,7 +1411,7 @@ function renderFiles() {
   });
   const path = node("div", "row__main row__meta", state.files.path);
   header.append(up, path);
-  el.rightbarBody.append(header);
+  browse.append(header);
 
   const tree = node("div", "filetree");
   if (state.files.entries.length === 0) {
@@ -1391,7 +1430,7 @@ function renderFiles() {
     });
     tree.append(item);
   }
-  el.rightbarBody.append(tree);
+  browse.append(tree);
 }
 
 function renderEnvironment() {
@@ -1449,8 +1488,6 @@ function renderEnvironment() {
  * into this column is what buried the useful rows under a wall of text.
  */
 function renderThinking() {
-  renderEnvironment();
-
   const steps = new Map();
   const loose = [];
   for (const item of state.activity) {
@@ -1467,7 +1504,12 @@ function renderThinking() {
     return;
   }
 
-  for (const [index, items] of [...steps.entries()].sort((a, b) => b[0] - a[0])) {
+  // Oldest first, newest last, and follow the newest — the same shape as the
+  // transcript. Newest-first looked live but behaved as though it were frozen:
+  // every new step arrived *above* whatever was on screen, so the panel appeared
+  // not to change while the agent worked.
+  const newest = Math.max(...steps.keys(), 0);
+  for (const [index, items] of [...steps.entries()].sort((a, b) => a[0] - b[0])) {
     const card = node("div", "actcard");
     const head = node("div", "actcard__head");
     head.append(node("span", "actcard__index", `Step ${index}`));
@@ -1482,16 +1524,25 @@ function renderThinking() {
     if (chars) {
       head.append(node("span", "actcard__time", `~${formatDuration((chars / 40) * 1000)} think`));
     }
+    if (index === newest) head.dataset.state = "current";
     card.append(head);
 
-    // Reasoning is represented by its first line here and in full in the
-    // transcript; a step that thought a thousand words would otherwise dwarf
-    // every command under it in a narrow column.
+    // The step being worked on shows its reasoning in full and keeps growing: it
+    // is the one thing here the transcript shows only inside a disclosure. Older
+    // steps keep the one-line summary, because a column of finished reasoning
+    // would bury the step that is actually running.
     const think = items.find((item) => item.kind === "think");
-    if (think && think.detail) {
+    if (think && (think.detail || think.full)) {
       const block = node("div", "actcard__think");
       block.append(node("span", "actcard__thinkTitle", "Think"));
-      block.append(node("span", "actcard__thinkText", think.detail));
+      const live = index === newest;
+      block.append(
+        node(
+          "div",
+          live ? "actcard__thinkLive" : "actcard__thinkText",
+          live && think.full ? think.full : think.detail,
+        ),
+      );
       block.addEventListener("click", () => focusStep(index));
       block.style.cursor = "pointer";
       card.append(block);
@@ -1526,6 +1577,11 @@ function renderThinking() {
     }
     el.rightbarBody.append(section);
   }
+
+  // The environment is install diagnostics, and it was the first thing in the
+  // panel — three lines of "0 packages installed" above the work being done.
+  renderEnvironment();
+  if (panelFollows) el.rightbarBody.scrollTop = el.rightbarBody.scrollHeight;
 }
 
 /** The step currently being worked on, or 0 when nothing is running. */
@@ -2038,9 +2094,18 @@ function handleEvent(event) {
         const live = latestLineOf(step.think ? step.think.text : "");
         if (existing) {
           existing.detail = live;
+          // The full text too: the Thinking panel shows the running step's
+          // reasoning in full, and a one-line summary is not something to watch.
+          existing.full = step.think ? step.think.text : live;
           scheduleActivityRender();
         } else {
-          pushActivity({ kind: "think", step: step.index, label: "Think", detail: live });
+          pushActivity({
+            kind: "think",
+            step: step.index,
+            label: "Think",
+            detail: live,
+            full: step.think ? step.think.text : live,
+          });
         }
       }
       break;
@@ -3263,6 +3328,11 @@ document.getElementById("newSession").addEventListener("click", () => createSess
 function showRightTab(tab) {
   state.rightTab = tab;
   if (state.session) state.sessionTabs.set(state.session.id, tab);
+  if (tab === "notes") {
+    // Re-read whenever it is opened. The notebook belongs to the project, so
+    // another conversation may have added to it since this panel last looked.
+    state.notes = null;
+  }
   renderRightbar();
 }
 

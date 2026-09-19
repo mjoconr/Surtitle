@@ -1290,3 +1290,90 @@ class TestStopAndPushControls:
         assert "interrupt: Boolean(options && options.interrupt)" in script, (
             "the flag has to reach the wire"
         )
+
+
+class TestThePanelAfterASecondLook:
+    """Built, used, and three of the tabs did not earn their place.
+
+    Reported after a real session: "the side bar except for the plan seems to still
+    be useless — the files should be dropped or just show the files accessed;
+    thinking is useless it does not seem to update; no idea what notes does."
+    """
+
+    def test_a_failed_notebook_read_is_not_an_empty_notebook(self, script):
+        """A notebook with 3,700 characters in it sat behind "Nothing recorded yet".
+
+        The route did not exist on the running server, the fetch failed, and the
+        failure was cached as an empty notebook — so the panel went on saying there
+        was nothing to see long after the reason had gone.
+        """
+        block = script[script.index("async function loadNotes(") :]
+        block = block[: block.index("\n}\n")]
+
+        assert "error:" in block, "a failed read is stored as a failure"
+        assert 'text: ""' not in block, "and never as an empty notebook"
+
+    def test_opening_the_tab_re_reads_it(self, script):
+        """The notebook belongs to the project, not to this panel's last look."""
+        block = script[script.index("function showRightTab(") :]
+        block = block[: block.index("\n}\n")]
+
+        assert 'tab === "notes"' in block
+        assert "state.notes = null" in block
+
+    def test_the_project_tree_is_folded_away(self, script):
+        """It was a wall of dot-directories above nothing, and it was the panel."""
+        block = script[script.index("function renderFiles(") :]
+        block = block[: block.index("\n}\n")]
+
+        assert "renderTouchedFiles();" in block, "what the turn touched comes first"
+        assert 'node("details", "browse")' in block, "the tree is one line until asked for"
+        assert block.index("renderTouchedFiles();") < block.index('node("details", "browse")')
+
+    def test_the_process_reads_oldest_first_and_follows_the_newest(self, script):
+        """Newest-first looked live and behaved as though frozen.
+
+        Every new step arrived *above* whatever was on screen, so the panel seemed
+        not to change while the agent worked.
+        """
+        block = script[script.index("function renderThinking(") :]
+        block = block[: block.index("\n}\n")]
+
+        assert ".sort((a, b) => a[0] - b[0])" in block, "oldest first, like the transcript"
+        assert "panelFollows" in block, "and follow the newest unless the reader scrolled back"
+
+    def test_the_running_step_shows_its_reasoning_in_full(self, script):
+        """A one-line summary of the reasoning is not something anyone can watch."""
+        block = script[script.index("function renderThinking(") :]
+        block = block[: block.index("\n}\n")]
+
+        assert "actcard__thinkLive" in block
+        assert "think.full" in block, "the streaming text, not the gist"
+
+    def test_install_diagnostics_are_not_the_first_thing_shown(self, script):
+        block = script[script.index("function renderThinking(") :]
+        block = block[: block.index("\n}\n")]
+
+        assert block.index("renderEnvironment()") > block.index("el.rightbarBody.append(card)"), (
+            "three lines of '0 packages installed' do not belong above the work"
+        )
+
+
+class TestMutingActuallyReachesTheWorklet:
+    """A worklet that is attached but not labelled "worklet" kept sending audio.
+
+    The mute message was posted only when `backend === "worklet"`, and the worklet
+    keeps its own mute state — it does not read the flag the fallback path uses. So
+    the microphone showed off while frames were still arriving at the server, which
+    went on recognising them. Reported as "the mic in the window was off but it was
+    still converting voice".
+    """
+
+    def test_the_message_goes_whenever_there_is_a_worklet_node(self, audio):
+        block = audio[audio.index("setMuted(muted)") :]
+        block = block[: block.index("\n  }")]
+
+        assert 'this.backend === "worklet"' not in block, (
+            "the label is not the same as the node being there"
+        )
+        assert "this.node.port.postMessage" in block

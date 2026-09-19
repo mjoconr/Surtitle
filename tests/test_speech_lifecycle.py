@@ -159,13 +159,17 @@ class TestEndOfTurnIsReported:
 
 
 class RecordingStt:
-    """Stands in for the recogniser, recording suppression changes."""
+    """Stands in for the recogniser, recording suppression changes and audio."""
 
     def __init__(self) -> None:
         self.suppression: list[bool] = []
+        self.audio: list[bytes] = []
 
     def set_suppression(self, suppressed: bool) -> None:
         self.suppression.append(suppressed)
+
+    def push_audio(self, frame: bytes) -> None:
+        self.audio.append(frame)
 
 
 @pytest.fixture
@@ -1044,3 +1048,37 @@ class TestStopAndPush:
         assert session._turn is None or session._turn.done()
         kinds = [e.kind for e in self._drain(session)]
         assert EventKind.STATE in kinds, "the browser is told the turn ended"
+
+
+class TestAudioForAClosedMicrophone:
+    """Reported: the mic in the window was off, but it was still converting voice.
+
+    The browser is supposed to stop sending when the mic is toggled off, and it did
+    not — a worklet that never received its mute message kept posting frames — so
+    the recogniser went on converting speech the user had switched off, and a
+    transcript from it could start a turn. The log shows the shape: a microphone
+    closed at 15:04:42 and an utterance committed at 15:04:55, from 236 seconds of
+    audio that had been streaming since before the close.
+
+    The server cannot fix the browser, but it can refuse the audio.
+    """
+
+    async def test_frames_are_refused_while_the_microphone_is_closed(self, wired):
+        session, _tts, stt = wired
+        session._state.mic_open = False
+
+        await session.handle_audio(b"\x01\x02" * 100)
+
+        assert stt.audio == [], "a closed microphone must not be recognised"
+        assert session._frames_in == 0, "and it must not count as captured audio"
+        assert session._frames_closed == 1, "the client fault is counted for the log"
+
+    async def test_frames_are_accepted_once_the_microphone_is_open(self, wired):
+        session, _tts, stt = wired
+        await session.handle_mic(True)
+
+        await session.handle_audio(b"\x01\x02" * 100)
+
+        assert len(stt.audio) == 1
+        assert session._frames_in == 1
+        assert session._frames_closed == 0

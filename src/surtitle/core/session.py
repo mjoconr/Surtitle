@@ -146,6 +146,10 @@ class Session:
     # how many times the microphone has been opened.
     _frames_in: int = 0
     _mic_opens: int = 0
+    # Frames that arrived while the microphone was closed and were refused. Worth
+    # counting separately: a non-zero value means the browser is still capturing
+    # after the toggle, which is a client fault the server cannot fix.
+    _frames_closed: int = 0
     # Loudest sample (0..1) seen this listening session.
     _peak_in: float = 0.0
     # True while the agent's own voice is playing, and whether anything has been
@@ -410,6 +414,21 @@ class Session:
         """Accept a PCM16 frame from the browser microphone."""
         if not frame:
             return
+        if not self._state.mic_open:
+            # Audio for a microphone that is closed is not audio anybody asked to
+            # have recognised. The browser is supposed to stop sending when the mic
+            # is toggled off, and it does not always: a worklet that never received
+            # its mute message keeps posting frames, and the recogniser goes on
+            # converting them — so a turn could be started by speech the user had
+            # already switched off. Reported as "the mic in the window was off but
+            # it was still converting voice".
+            self._frames_closed += 1
+            if self._frames_closed == 1:
+                log.warning(
+                    "audio arriving with the microphone closed; ignoring it "
+                    "(capture should stop when the mic is toggled off)"
+                )
+            return
         self._frames_in += 1
         self._audio_seconds += len(frame) / 2 / self.settings.stt_sample_rate
         # Track the loudest sample seen. Frame counts alone cannot tell a working
@@ -440,6 +459,7 @@ class Session:
             self._frames_in = 0
             self._audio_seconds = 0.0
             self._peak_in = 0.0
+            self._frames_closed = 0
             self._mic_opens += 1
             log.info(
                 "microphone opened (#%d); awaiting audio%s",

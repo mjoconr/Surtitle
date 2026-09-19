@@ -966,6 +966,56 @@ button, input, textarea, select {
   white-space: nowrap;
 }
 
+/* The step being worked on shows its reasoning as it grows.
+ *
+ * This is the one thing the panel has that the transcript keeps folded away, and
+ * a one-line summary of it is not something anyone can watch. Capped, because a
+ * step can think for ten thousand characters and the tools below it still matter.
+ */
+.actcard__thinkLive {
+  margin-top: 2px;
+  max-height: 220px;
+  overflow: auto;
+  color: var(--dsw-alias-label-secondary);
+  font: var(--dsw-font-xxs-12);
+  line-height: 17px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* Marked so the running step is findable in a long column. */
+.actcard__head[data-state="current"] .actcard__index {
+  color: var(--dsw-alias-state-business-primary);
+}
+
+/* The project tree, folded away.
+ *
+ * The panel's job is what the turn touched; the tree answers a different question
+ * and used to answer it unprompted — a wall of dot-directories above nothing. */
+.browse {
+  margin-top: 12px;
+  border-top: 0.5px solid var(--dsw-alias-border-l3);
+  padding-top: 6px;
+}
+
+.browse__summary {
+  cursor: pointer;
+  font: var(--dsw-font-xxs-12);
+  color: var(--dsw-alias-label-caption);
+  list-style: none;
+}
+
+.browse__summary::-webkit-details-marker { display: none; }
+
+.browse__summary::before {
+  content: "▸ ";
+  font-size: 9px;
+}
+
+.browse[open] .browse__summary::before { content: "▾ "; }
+
+.browse[open] .browse__summary { margin-bottom: 6px; }
+
 .actrow {
   display: flex;
   align-items: center;
