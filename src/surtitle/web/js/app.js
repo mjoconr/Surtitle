@@ -64,6 +64,11 @@ const state = {
   // Files this turn has read or written, so the Files panel can lead with what
   // the agent actually touched instead of an undifferentiated project tree.
   touched: new Map(),
+  // The last completion's usage, and the window it is measured against. Both are
+  // about the conversation on screen, so both are cleared when it changes — a
+  // budget meter showing another conversation's numbers is a lie.
+  usage: null,
+  contextLimit: 0,
   environment: null,
   attachments: [],
 };
@@ -98,6 +103,9 @@ const el = {
   headerTitle: document.getElementById("headerTitle"),
   headerSubtitle: document.getElementById("headerSubtitle"),
   rightbarBody: document.getElementById("rightbarBody"),
+  rightbarMeter: document.getElementById("rightbarMeter"),
+  meterFill: document.getElementById("meterFill"),
+  meterLabel: document.getElementById("meterLabel"),
   modelBadge: document.getElementById("modelBadge"),
   approvalStrip: document.getElementById("approvalStrip"),
   approvalText: document.getElementById("approvalText"),
@@ -581,6 +589,46 @@ function scheduleThinkPeek(think) {
     thinkPeekTarget = null;
     if (target && target.peek) target.peek.textContent = latestLineOf(target.text);
   }, 250);
+}
+
+/** "24.3k" — a token count at a glance, where the exact figure is not the point. */
+function formatTokens(count) {
+  const value = Number(count) || 0;
+  if (value < 1000) return String(value);
+  if (value < 100_000) return `${(value / 1000).toFixed(1)}k`;
+  return `${Math.round(value / 1000)}k`;
+}
+
+/**
+ * How full the model's context window is.
+ *
+ * Nothing showed this, and the one number that was on screen answered a
+ * different question: the model badge carried a running total of every token the
+ * process had ever sent, which grows forever and says nothing about the
+ * conversation in front of you. The window is what explains an agent that starts
+ * forgetting its own work, and it is the number that tells you a conversation has
+ * done its job and the next one should start fresh.
+ */
+function renderContextMeter() {
+  const usage = state.usage;
+  const limit = Number(state.contextLimit) || 0;
+  if (!usage || !limit) {
+    el.rightbarMeter.hidden = true;
+    return;
+  }
+  const sent = Number(usage.prompt_tokens || 0);
+  const reply = Number(usage.completion_tokens || 0);
+  const used = sent + reply;
+  const share = Math.min(1, used / limit);
+  el.rightbarMeter.hidden = false;
+  el.rightbarMeter.dataset.level = share >= 0.9 ? "high" : share >= 0.7 ? "warm" : "ok";
+  el.meterFill.style.width = `${(share * 100).toFixed(1)}%`;
+  el.meterLabel.textContent = `${formatTokens(used)} / ${formatTokens(limit)}`;
+  el.rightbarMeter.title =
+    `This conversation is carrying about ${used.toLocaleString()} of the model's ` +
+    `${limit.toLocaleString()}-token window (${sent.toLocaleString()} sent, ` +
+    `${reply.toLocaleString()} written). The oldest turns fall out of the model's ` +
+    "view as it fills, so start a new conversation when the work moves on.";
 }
 
 /** First line of some thinking, trimmed to something a row can show. */
@@ -1562,6 +1610,11 @@ function handleEvent(event) {
         }
       }
       if (data.model) el.modelBadge.textContent = data.model;
+      // What the meter measures against. Sent by the server because the window
+      // belongs to the model, and a meter drawn against a stale one is worse
+      // than no meter at all.
+      if (data.context_limit) state.contextLimit = Number(data.context_limit) || 0;
+      renderContextMeter();
       if (data.voice_backends) {
         // Which engine each direction uses belongs in the Activity panel: it is
         // the first thing a voice bug report needs, and it is never obvious from
@@ -1784,9 +1837,11 @@ function handleEvent(event) {
       break;
     }
     case "usage": {
-      if (data.total_tokens) {
-        el.modelBadge.textContent = `${state.settings?.model || ""} · ${data.total_tokens} tok`.trim();
-      }
+      // The model badge keeps the model; the numbers belong to the meter, which
+      // has the room to say what they mean. `prompt_tokens` is the size of the
+      // conversation the model was just sent, and that is what the window bounds.
+      state.usage = data;
+      renderContextMeter();
       break;
     }
     case "thinking": {
@@ -2606,6 +2661,10 @@ async function selectSession(sessionId) {
   // The panel this conversation was last left on, if it has been open before.
   state.rightTab = state.sessionTabs.get(sessionId) || "todo";
   state.touched.clear();
+  // The window is a fact about this conversation; another one's usage is not a
+  // smaller version of it, it is a different number entirely.
+  state.usage = null;
+  renderContextMeter();
   state.lastUserText = "";
   state.pendingStopNote = null;
   hideStopNote();

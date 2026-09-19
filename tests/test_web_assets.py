@@ -683,6 +683,47 @@ class TestTheCentreSaysWhatItIsDoing:
         )
 
 
+class TestTheContextMeter:
+    """The window is what explains an agent that starts forgetting its own work.
+
+    Nothing showed it, and the one number that *was* on screen answered a
+    different question: a running total of every token the process had ever sent,
+    which grows forever and says nothing about the conversation in front of you.
+    """
+
+    def test_the_window_comes_from_the_server(self, script):
+        """A meter drawn against a hardcoded window is wrong the moment the model changes."""
+        assert "data.context_limit" in script
+        assert "contextLimit" in script
+
+    def test_it_is_drawn_from_the_last_completion(self, script):
+        block = script[script.index("function renderContextMeter(") :]
+        block = block[: block.index("\n}\n")]
+        assert "usage.prompt_tokens" in block, "the sent conversation is what the window bounds"
+        assert "usage.completion_tokens" in block
+        assert "meterFill.style.width" in block, "a number alone does not show a ratio"
+
+    def test_it_warns_before_the_window_is_full(self, script):
+        block = script[script.index("function renderContextMeter(") :]
+        block = block[: block.index("\n}\n")]
+        assert '"high"' in block and '"warm"' in block, (
+            "a meter that looks the same at 5% and 95% is not a warning"
+        )
+
+    def test_switching_conversation_clears_it(self, script):
+        block = script[script.index("async function selectSession(") :]
+        block = block[: block.index("\n}\n")]
+        assert "state.usage = null" in block, (
+            "another conversation's usage is a different number, not a smaller one"
+        )
+
+    def test_the_usage_event_feeds_the_meter_not_the_badge(self, script):
+        block = script[script.index('case "usage": {') :]
+        block = block[: block.index("break;")]
+        assert "renderContextMeter()" in block
+        assert "modelBadge" not in block, "the badge keeps the model; the numbers go to the meter"
+
+
 class TestStepGrouping:
     """A turn's process must be grouped by the step that produced it.
 
@@ -1011,6 +1052,9 @@ class TestReadyEventContract:
         ]
         assert ready, "a session must announce itself"
         assert ready[0]["data"]["sample_rate"] == session.settings.tts_sample_rate
+        assert ready[0]["data"]["context_limit"] == session.settings.context_limit, (
+            "the browser measures a turn's usage against the window the server reports"
+        )
 
 
 def _drain(session) -> list:

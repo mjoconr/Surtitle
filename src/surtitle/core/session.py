@@ -281,6 +281,9 @@ class Session:
             voice_fix=self.voice_fix,
             voice_backends=self.voice_backends,
             model=self.settings.deepseek_model,
+            # What the browser measures a turn's usage against. Sent rather than
+            # hardcoded there because it changes with the model.
+            context_limit=self.settings.context_limit,
             stt_api=self.settings.stt_api if self.stt else None,
             sample_rate=self.settings.tts_sample_rate,
             capture_rate=self.settings.stt_sample_rate,

@@ -1417,6 +1417,51 @@ button, input, textarea, select {
 
 .rightbar__body { flex: 1; overflow: auto; padding: 10px 12px; min-height: 0; }
 
+/* How full the model's context window is.
+ *
+ * Sits above every tab rather than inside one: it is a fact about the
+ * conversation, not about the plan or the files, and the moment it matters is the
+ * moment the user is looking at something else. */
+.rightbar__meter {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px 0;
+  font: var(--dsw-font-xxs-12);
+  color: var(--dsw-alias-label-caption);
+}
+
+.meter__bar {
+  flex: none;
+  width: 64px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--dsw-alias-border-l1);
+  overflow: hidden;
+}
+
+.meter__fill {
+  display: block;
+  width: 0;
+  height: 100%;
+  background: var(--dsw-alias-label-caption);
+  transition: width 0.3s ease-in-out;
+}
+
+.meter__label { font-variant-numeric: tabular-nums; }
+
+.rightbar__meter[data-level="warm"] .meter__fill {
+  background: var(--dsw-alias-state-business-primary);
+}
+
+.rightbar__meter[data-level="high"] .meter__fill {
+  background: var(--dsw-alias-state-error-primary);
+}
+
+.rightbar__meter[data-level="high"] .meter__label {
+  color: var(--dsw-alias-state-error-primary);
+}
+
 .filetree { display: flex; flex-direction: column; gap: 1px; }
 
 .filetree__item {
