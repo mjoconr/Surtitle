@@ -1932,7 +1932,16 @@ button, input, textarea, select {
   font-weight: 500;
 }
 
-.modal__content { display: flex; flex-direction: column; min-width: 0; }
+/* `min-height: 0` on both of these is what makes the panel scroll rather than
+ * clip. As a grid item, `.modal__content` defaults to `min-height: auto` and grows
+ * past the row it sits in; the flex column inside then hands its child enough height
+ * for all of its content, so `.modal__options` never overflows and its
+ * `overflow-y: auto` never fires. The panel's own `overflow: hidden` then hides the
+ * rest — which is how a third provider card became unreachable, with no scrollbar to
+ * say so. A grid item and a flex item with a scrolling child each have to be allowed
+ * to be smaller than their contents.
+ */
+.modal__content { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 
 .modal__header {
   display: flex;
@@ -1944,7 +1953,7 @@ button, input, textarea, select {
 }
 
 .modal__title { font-size: 14px; font-weight: 600; }
-.modal__options { padding: 16px 18px 20px; overflow-y: auto; flex: 1; }
+.modal__options { padding: 16px 18px 20px; overflow-y: auto; flex: 1; min-height: 0; }
 .modal__footer { padding: 12px 18px; border-top: 0.5px solid var(--dsw-alias-border-l3); display: flex; gap: 8px; justify-content: flex-end; }
 
 /* A single setting row: label + description left, control right. */

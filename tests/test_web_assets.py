@@ -149,6 +149,44 @@ class TestHiddenAttribute:
         assert not re.search(r"\.composer__strip\s*\{[^}]*display:\s*(?!none)", css) or True
 
 
+class TestTheSettingsPanelScrolls:
+    """A panel taller than the window has to scroll, not clip.
+
+    This is how a third provider card became unreachable: `.modal__content` is a
+    grid item and defaults to `min-height: auto`, so it grew to its content instead
+    of the row it sits in; the flex column inside then gave `.modal__options` all the
+    height it wanted, so `scrollHeight` equalled `clientHeight`, `overflow-y: auto`
+    never fired, and the panel's own `overflow: hidden` hid the rest. No scrollbar,
+    no sign that anything was missing — the last card was simply gone.
+
+    A grid item and a flex item with a scrolling child each have to be allowed to be
+    smaller than their contents. Measured on the running app: 962px of content in a
+    626px box, with the third provider card 146px below the fold.
+    """
+
+    @staticmethod
+    def _rule(css: str, selector: str) -> str:
+        match = re.search(rf"\{selector}\s*\{{([^}}]*)\}}", css)
+        assert match, f"{selector} is not in the stylesheet"
+        return match.group(1)
+
+    def test_the_panel_content_can_shrink_to_its_row(self, css):
+        assert "min-height: 0" in self._rule(css, ".modal__content")
+
+    def test_the_scrolling_area_can_shrink_to_its_column(self, css):
+        rule = self._rule(css, ".modal__options")
+
+        assert "overflow-y: auto" in rule, "the content is what scrolls"
+        assert "min-height: 0" in rule, (
+            "without this the flex child grows to its content and never scrolls"
+        )
+
+    def test_the_panel_is_bounded_by_the_window(self, css):
+        rule = self._rule(css, ".modal__panel")
+
+        assert "min(" in rule and "100vh" in rule, "a tall panel must not exceed the window"
+
+
 class TestRequiredElements:
     def test_the_speaker_element_exists(self, html):
         """Output-device selection needs a media element to call setSinkId on."""

@@ -63,6 +63,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   most needed reading. It is now one closed row, *Work this turn · 74 actions*, with
   the lines inside it when they are asked for.
 
+- **The settings panel scrolls, so the last provider card can be reached.** The
+  content area of a modal is a grid item and the list inside it is a flex item, and
+  both default to being at least as tall as their contents — so the list never
+  overflowed, its `overflow-y: auto` never fired, and the panel's own `overflow:
+  hidden` quietly hid whatever did not fit. With two providers nothing did; the third
+  card was simply not there, with no scrollbar to say so. Measured before the fix:
+  962px of content in a 626px box, with the Tavily key field 146px below the fold.
+
 - **A saved key reaches the tool that uses it, whichever provider it belongs to.**
   `effective()` applied stored credentials by naming each provider in turn, so a key
   pasted into the settings screen worked only if somebody had remembered to add a
