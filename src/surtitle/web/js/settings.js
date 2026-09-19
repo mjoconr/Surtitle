@@ -15,11 +15,12 @@
 const SECTION_LABELS = {
   model: "Model",
   agent: "Agent",
+  search: "Search",
   voice: "Voice",
   general: "General",
 };
 
-const SECTION_ORDER = ["model", "agent", "voice", "general"];
+const SECTION_ORDER = ["model", "agent", "search", "voice", "general"];
 
 export class SettingsPanel {
   constructor({ onSaved, onToast, onMicrophoneChange, onSpeakerChange, playback }) {

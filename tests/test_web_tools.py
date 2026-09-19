@@ -8,12 +8,15 @@ the happy path is the easy part.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from urllib.parse import quote
 
 import httpx
 import pytest
 
+from surtitle.config import Settings
+from surtitle.store.settings_store import PROVIDER_SPECS, SETTINGS_FIELDS
 from surtitle.tools import web_tools
 from surtitle.tools.fs_tools import ToolContext
 from surtitle.tools.registry import (
@@ -411,7 +414,7 @@ class TestSearchingThroughTheTool:
         monkeypatch.setattr(
             web_tools,
             "search",
-            lambda query: web_tools.SearchResults(
+            lambda query, **_kwargs: web_tools.SearchResults(
                 query=query,
                 hits=[web_tools.SearchHit("T", "https://example.test/", "S")],
             ),
@@ -425,7 +428,9 @@ class TestSearchingThroughTheTool:
 
     def test_an_unreadable_page_says_so_rather_than_nothing_found(self, monkeypatch):
         monkeypatch.setattr(
-            web_tools, "search", lambda query: web_tools.SearchResults(query=query, unreadable=True)
+            web_tools,
+            "search",
+            lambda query, **_kwargs: web_tools.SearchResults(query=query, unreadable=True),
         )
 
         result = _web_search_handler(ToolContext(root=Path(".")), query="anything")
@@ -435,7 +440,7 @@ class TestSearchingThroughTheTool:
         assert "nothing exists" in (result.error or ""), "and warns against that conclusion"
 
     def test_a_broken_endpoint_is_a_result_not_an_exception(self, monkeypatch):
-        def explodes(query):
+        def explodes(query, **_kwargs):
             raise RuntimeError("connection reset")
 
         monkeypatch.setattr(web_tools, "search", explodes)
@@ -461,3 +466,289 @@ class TestSearchingThroughTheTool:
         child = ToolRegistry(default_tool_list()).read_only()
 
         assert WEB_SEARCH_TOOL not in child.names()
+
+
+def _tavily_body(*rows: tuple[str, str, str]) -> bytes:
+    import json as _json
+
+    return _json.dumps(
+        {
+            "query": "q",
+            "results": [
+                {"title": title, "url": url, "content": content, "score": 0.9}
+                for title, url, content in rows
+            ],
+        }
+    ).encode()
+
+
+class TestSearchingWithATavilyKey:
+    """The keyed route: a real search API instead of a scrape of one.
+
+    Optional on purpose — a machine with no key still searches — so the tests that
+    matter are that the key is *used* when it is there, that a key is never echoed
+    back, and that the ways a key can fail are reported as what they are rather than
+    as an empty web.
+    """
+
+    def test_the_key_is_sent_and_the_question_is_asked(self, resolves_public):
+        seen: dict = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["url"] = str(request.url)
+            seen["auth"] = request.headers.get("authorization")
+            seen["body"] = json.loads(request.content)
+            return _page(_tavily_body(("T", "https://example.test/a", "s")))
+
+        found = web_tools.search(
+            "who won", api_key="tvly-secret", transport=httpx.MockTransport(handler)
+        )
+
+        assert seen["url"].startswith("https://api.tavily.com/search")
+        assert seen["auth"] == "Bearer tvly-secret"
+        assert seen["body"]["query"] == "who won"
+        assert seen["body"]["search_depth"] == "basic"
+        assert seen["body"]["include_answer"] is False, "no second voice in the transcript"
+        assert found.provider == "tavily"
+
+    def test_results_become_hits(self, resolves_public):
+        transport = httpx.MockTransport(
+            lambda request: _page(
+                _tavily_body(
+                    ("Release notes", "https://example.test/notes", "Version 2 fixed it."),
+                    ("Changelog", "https://example.test/log", "What changed, and when."),
+                )
+            )
+        )
+
+        found = web_tools.search("release notes", api_key="tvly-k", transport=transport)
+
+        assert [hit.url for hit in found.hits] == [
+            "https://example.test/notes",
+            "https://example.test/log",
+        ]
+        assert found.hits[0].title == "Release notes"
+        assert found.hits[0].snippet == "Version 2 fixed it."
+        assert found.unreadable is False and found.blocked is False
+
+    def test_the_number_asked_for_is_the_number_that_comes_back(self, resolves_public):
+        rows = tuple((f"R{n}", f"https://example.test/{n}", "s") for n in range(10))
+        transport = httpx.MockTransport(lambda request: _page(_tavily_body(*rows)))
+
+        found = web_tools.search("many", limit=3, api_key="tvly-k", transport=transport)
+
+        assert len(found.hits) == 3
+
+    def test_a_bad_key_says_so_rather_than_nothing_was_found(self, resolves_public):
+        transport = httpx.MockTransport(lambda request: _page(b"{}", status=401))
+
+        with pytest.raises(web_tools.FetchError, match="rejected the API key"):
+            web_tools.search("anything", api_key="tvly-bad", transport=transport)
+
+    def test_a_rate_limit_and_a_plan_limit_are_different_answers(self, resolves_public):
+        limited = httpx.MockTransport(lambda request: _page(b"{}", status=429))
+        with pytest.raises(web_tools.FetchError, match="rate-limiting"):
+            web_tools.search("x", api_key="tvly-k", transport=limited)
+
+        over = httpx.MockTransport(lambda request: _page(b"{}", status=432))
+        with pytest.raises(web_tools.FetchError, match="usage limit"):
+            web_tools.search("x", api_key="tvly-k", transport=over)
+
+    def test_a_server_error_is_reported_with_its_status(self, resolves_public):
+        transport = httpx.MockTransport(lambda request: _page(b"", status=503))
+
+        with pytest.raises(web_tools.FetchError, match="503"):
+            web_tools.search("x", api_key="tvly-k", transport=transport)
+
+    def test_a_200_without_results_is_not_an_empty_web(self, resolves_public):
+        transport = httpx.MockTransport(lambda request: _page(b'{"unexpected": true}'))
+
+        found = web_tools.search("x", api_key="tvly-k", transport=transport)
+
+        assert found.hits == []
+        assert found.unreadable is True
+
+    def test_a_result_that_is_not_a_web_address_is_dropped(self, resolves_public):
+        body = json.dumps(
+            {
+                "results": [
+                    {"title": "no", "url": "javascript:alert(1)"},
+                    {"title": "yes", "url": "https://ok.test/"},
+                ]
+            }
+        ).encode()
+        transport = httpx.MockTransport(lambda request: _page(body))
+
+        found = web_tools.search("x", api_key="tvly-k", transport=transport)
+
+        assert [hit.url for hit in found.hits] == ["https://ok.test/"]
+
+    def test_without_a_key_the_scrape_is_still_what_runs(self, resolves_public):
+        """A machine with no key has to keep working: that is the whole reason the
+        keyless path exists."""
+        seen: dict = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["host"] = request.url.host
+            return _page(_results_html(("A", "https://example.test/a", "s")))
+
+        found = web_tools.search("anything", transport=httpx.MockTransport(handler))
+
+        assert seen["host"] == "html.duckduckgo.com"
+        assert found.provider == "duckduckgo"
+
+
+class TestTheKeyedProviderThroughTheTool:
+    def test_the_key_from_settings_is_what_is_used(self, monkeypatch):
+        seen: dict = {}
+
+        def fake(query, **kwargs):
+            seen["api_key"] = kwargs.get("api_key")
+            return web_tools.SearchResults(query=query, hits=[], provider="tavily")
+
+        monkeypatch.setattr(web_tools, "search", fake)
+        settings = Settings(DEEPSEEK_API_KEY="k", TAVILY_API_KEY="tvly-from-settings")
+
+        result = _web_search_handler(
+            ToolContext(root=Path("."), settings=settings), query="anything"
+        )
+
+        assert seen["api_key"] == "tvly-from-settings"
+        assert result.ok is True
+        assert (result.data or {})["provider"] == "tavily"
+
+    def test_a_settings_object_without_one_falls_back_to_the_scrape(self, monkeypatch):
+        seen: dict = {}
+
+        def fake(query, **kwargs):
+            seen["api_key"] = kwargs.get("api_key")
+            return web_tools.SearchResults(query=query, hits=[])
+
+        monkeypatch.setattr(web_tools, "search", fake)
+
+        _web_search_handler(
+            ToolContext(root=Path("."), settings=Settings(DEEPSEEK_API_KEY="k")), query="q"
+        )
+
+        assert seen["api_key"] is None
+
+    def test_the_key_never_reaches_the_model_or_the_screen(self, monkeypatch):
+        """The rule for every credential in this application: a secret does not
+        travel toward the UI — not in the result, not in the display line, not in an
+        error."""
+        secret = "tvly-should-not-appear"
+
+        def fake(query, **_kwargs):
+            return web_tools.SearchResults(
+                query=query,
+                hits=[web_tools.SearchHit("T", "https://x.test/", "S")],
+                provider="tavily",
+            )
+
+        monkeypatch.setattr(web_tools, "search", fake)
+        settings = Settings(DEEPSEEK_API_KEY="k", TAVILY_API_KEY=secret)
+
+        result = _web_search_handler(
+            ToolContext(root=Path("."), settings=settings), query="anything"
+        )
+
+        assert secret not in json.dumps(result.data)
+        assert secret not in (result.display or "")
+        assert secret not in (result.error or "")
+
+    def test_the_settings_panel_knows_about_the_provider(self):
+        """The panel is built from these specs, so the key can be pasted in, tested
+        and cleared without anything else being written for it."""
+        spec = PROVIDER_SPECS["tavily"]
+
+        assert spec.api_key_env == "TAVILY_API_KEY"
+        assert spec.discovery_path == "/usage", "a real authenticated call, and free"
+        # Optional: nothing requires it, and the doctor must not ask for it.
+        assert Settings(DEEPSEEK_API_KEY="k").needs_credential("TAVILY_API_KEY") is False
+
+
+class TestChoosingTheSearchProvider:
+    """Search can be told which provider to use, and the choice is the user's.
+
+    Both are kept because they fail differently: the keyless one needs nothing
+    configured and gets rate-limited, the keyed one needs a key and does not.
+    """
+
+    def test_automatic_takes_the_key_when_there_is_one(self):
+        assert web_tools.choose_provider("automatic", "tvly-k") == "tavily"
+        assert web_tools.choose_provider("automatic", None) == "duckduckgo"
+        assert web_tools.choose_provider(None, "tvly-k") == "tavily", "unset means automatic"
+
+    def test_duckduckgo_can_be_asked_for_even_with_a_key(self):
+        """Somebody with a key may still prefer the scrape — to keep queries off a
+        third party, or to compare the two."""
+        assert web_tools.choose_provider("duckduckgo", "tvly-k") == "duckduckgo"
+
+    def test_tavily_without_a_key_is_a_mistake_that_is_reported(self):
+        """Not a silent fallback: the user asked for the provider they pay for, and
+        getting a scrape instead would be invisible in the results."""
+        with pytest.raises(web_tools.FetchError, match="needs an API key"):
+            web_tools.choose_provider("tavily", None)
+
+    def test_the_case_and_spacing_of_the_setting_do_not_matter(self):
+        assert web_tools.choose_provider("  TAVILY ", "tvly-k") == "tavily"
+        assert web_tools.choose_provider("DuckDuckGo", "tvly-k") == "duckduckgo"
+
+    def test_an_unknown_value_does_not_break_search(self):
+        """A stored setting from a newer version, or a typo by hand: the useful
+        default is better than a refusal."""
+        assert web_tools.choose_provider("bing", "tvly-k") == "tavily"
+        assert web_tools.choose_provider("bing", None) == "duckduckgo"
+
+    def test_the_chosen_provider_is_the_one_asked(self, resolves_public):
+        seen: dict = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["host"] = request.url.host
+            if request.url.host == "api.tavily.com":
+                return _page(_tavily_body(("T", "https://example.test/a", "s")))
+            return _page(_results_html(("A", "https://example.test/a", "s")))
+
+        transport = httpx.MockTransport(handler)
+
+        forced_scrape = web_tools.search(
+            "x", api_key="tvly-k", provider="duckduckgo", transport=transport
+        )
+        assert seen["host"] == "html.duckduckgo.com"
+        assert forced_scrape.provider == "duckduckgo"
+
+        forced_api = web_tools.search("x", api_key="tvly-k", provider="tavily", transport=transport)
+        assert seen["host"] == "api.tavily.com"
+        assert forced_api.provider == "tavily"
+
+    def test_the_tool_passes_the_stored_preference_through(self, monkeypatch):
+        seen: dict = {}
+
+        def fake(query, **kwargs):
+            seen.update(kwargs)
+            return web_tools.SearchResults(query=query, hits=[])
+
+        monkeypatch.setattr(web_tools, "search", fake)
+        settings = Settings(
+            DEEPSEEK_API_KEY="k", SURTITLE_SEARCH_PROVIDER="duckduckgo", TAVILY_API_KEY="tvly-k"
+        )
+
+        _web_search_handler(ToolContext(root=Path("."), settings=settings), query="q")
+
+        assert seen["provider"] == "duckduckgo"
+        assert seen["api_key"] == "tvly-k", "the key is still there to be used if asked"
+
+    def test_the_tool_reports_a_provider_that_cannot_be_used(self, monkeypatch):
+        """The mistake is the user's to fix, so it is said rather than swallowed."""
+        settings = Settings(DEEPSEEK_API_KEY="k", SURTITLE_SEARCH_PROVIDER="tavily")
+
+        result = _web_search_handler(ToolContext(root=Path("."), settings=settings), query="q")
+
+        assert result.ok is False
+        assert "API key" in (result.error or "")
+
+    def test_the_setting_exists_for_the_settings_screen_to_offer(self):
+        field = next(f for f in SETTINGS_FIELDS if f.name == "search_provider")
+
+        assert field.section == "search"
+        assert field.choices == web_tools.SEARCH_PROVIDERS

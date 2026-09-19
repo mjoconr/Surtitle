@@ -56,6 +56,7 @@ __all__ = [
     "SearchHit",
     "SearchResults",
     "assert_public_url",
+    "choose_provider",
     "fetch_page",
     "html_to_text",
     "search",
@@ -70,9 +71,17 @@ _TIMEOUT = httpx.Timeout(10.0, read=15.0)
 _MAX_BYTES = 2 * 1024 * 1024
 _USER_AGENT = "Surtitle/1.0 (+https://github.com/mjoconr/Surtitle)"
 
-# DuckDuckGo's no-JavaScript endpoint. The ordinary site needs a browser to render
-# anything, so this is the one that answers with results in the markup.
+# DuckDuckGo's no-JavaScript endpoint, used when there is no key. The ordinary site
+# needs a browser to render anything, so this is the one that answers with results
+# in the markup.
 _SEARCH_URL = "https://html.duckduckgo.com/html/"
+# Tavily, used when there is one. A real search API: JSON in, JSON out, no markup to
+# parse and nobody to get rate-limited by. Optional, because it needs a key.
+_TAVILY_URL = "https://api.tavily.com/search"
+# What Tavily calls a "basic" search: one credit per call, and it is the depth whose
+# results are the snippets this tool returns. `advanced` costs two and returns more
+# content per result than a snippet field should hold.
+_TAVILY_DEPTH = "basic"
 # Enough to choose from, few enough to read. The agent can search again.
 _MAX_RESULTS = 6
 _MAX_QUERY_CHARS = 400
@@ -125,6 +134,10 @@ class SearchResults:
 
     query: str
     hits: list[SearchHit] = field(default_factory=list)
+    # Which provider answered: "tavily" when a key is configured, otherwise
+    # "duckduckgo". Reported rather than inferred, because "no results" means
+    # different things depending on who was asked.
+    provider: str = "duckduckgo"
     # The endpoint answered with a page carrying no result links at all. Carried
     # rather than raised so the tool can say "the markup moved" instead of "nothing
     # matched", which are very different things to be told. Testing never produced a
@@ -433,18 +446,45 @@ def _unwrap_result_url(href: str) -> str:
     return unwrapped[0] if unwrapped else candidate
 
 
+# The providers a user may choose between, and the default. "automatic" is the
+# useful default: the best one this machine can actually use.
+SEARCH_PROVIDERS = ("automatic", "duckduckgo", "tavily")
+
+
+def choose_provider(preference: str | None, api_key: str | None) -> str:
+    """Which provider a search will actually use, or raise if it cannot be made.
+
+    Choosing Tavily without a key is a configuration mistake, and the one thing not
+    to do about it is fall back silently: the user asked for the provider they pay
+    for and would be getting a scrape, with no way to tell from the results.
+    """
+    wanted = (preference or "automatic").strip().lower()
+    if wanted == "duckduckgo":
+        return "duckduckgo"
+    if wanted == "tavily":
+        if not api_key:
+            raise FetchError(
+                "Web search is set to Tavily, which needs an API key, and none is "
+                "set. Add one under Settings → API keys, or set the search provider "
+                "back to automatic."
+            )
+        return "tavily"
+    return "tavily" if api_key else "duckduckgo"
+
+
 def search(
     query: str,
     *,
     limit: int = _MAX_RESULTS,
     transport: httpx.BaseTransport | None = None,
+    api_key: str | None = None,
+    provider: str | None = None,
 ) -> SearchResults:
-    """Search the web, through DuckDuckGo's no-JavaScript endpoint.
+    """Search the web, with whichever provider the caller has settled on.
 
-    A scrape, deliberately and openly: there is no key-free search API, and the
-    alternative was another key for the user to go and get. What that buys is a tool
-    that can break without anything changing here — so a page this cannot read is an
-    error naming that possibility, never an empty result list.
+    Tavily when there is a key and the setting allows it, the keyless DuckDuckGo
+    scrape otherwise. Both are kept because they fail differently: one needs nothing
+    configured and gets rate-limited, the other needs a key and does not.
     """
     cleaned = " ".join((query or "").split())
     if not cleaned:
@@ -454,16 +494,108 @@ def search(
             f"that search is {len(cleaned)} characters; the limit is {_MAX_QUERY_CHARS}"
         )
 
+    if choose_provider(provider, api_key) == "tavily":
+        return _search_tavily(cleaned, limit=limit, transport=transport, api_key=api_key or "")
+    return _search_duckduckgo(cleaned, limit=limit, transport=transport)
+
+
+def _search_tavily(
+    query: str,
+    *,
+    limit: int,
+    transport: httpx.BaseTransport | None,
+    api_key: str,
+) -> SearchResults:
+    """One POST to Tavily, and its JSON read into the same shape as the scrape's.
+
+    The endpoint is fixed, so there is no address for the model to influence — but
+    it goes through the same resolver check as a fetch, because "this tool only ever
+    talks to one host" is exactly the assumption that stops being true quietly.
+    """
+    endpoint = assert_public_url(_TAVILY_URL)
+    payload: dict[str, object] = {
+        "query": query,
+        "max_results": max(1, min(limit, _MAX_RESULTS)),
+        "search_depth": _TAVILY_DEPTH,
+        # Off: this tool returns results for the agent to read, and a generated
+        # answer would be a second, unaudited voice in the transcript.
+        "include_answer": False,
+        "include_raw_content": False,
+    }
+    with httpx.Client(timeout=_TIMEOUT, transport=transport) as client:
+        response = client.post(
+            endpoint,
+            json=payload,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "User-Agent": _USER_AGENT,
+                "Accept": "application/json",
+            },
+        )
+
+    if response.status_code in (401, 403):
+        raise FetchError(
+            "Tavily rejected the API key. Check it in Settings, or clear it to fall "
+            "back to the keyless search."
+        )
+    if response.status_code == 429:
+        raise FetchError("Tavily is rate-limiting this key; try again shortly.")
+    if response.status_code in (432, 433):
+        raise FetchError(
+            "Tavily says this key is over its plan's usage limit. The key works; the "
+            "plan does not have the credits."
+        )
+    if response.status_code >= 400:
+        raise FetchError(f"Tavily answered HTTP {response.status_code}.")
+
+    try:
+        body = response.json()
+    except ValueError as exc:
+        raise FetchError("Tavily returned something that was not JSON.") from exc
+
+    raw = body.get("results") if isinstance(body, dict) else None
+    if not isinstance(raw, list):
+        # A 200 without a results list is not "nothing matched" — it is a shape this
+        # does not know, which is the distinction the caller reports.
+        return SearchResults(query=query, provider="tavily", unreadable=True)
+
+    # Cut to the caller's limit here rather than trusting `max_results` to have been
+    # honoured: a provider that returns more than it was asked for must not turn
+    # into a model that gets more than it asked for.
+    hits: list[SearchHit] = []
+    for item in raw[: max(1, limit)]:
+        if not isinstance(item, dict):
+            continue
+        url = str(item.get("url") or "")
+        if not url.lower().startswith(("http://", "https://")):
+            continue
+        snippet = " ".join(str(item.get("content") or "").split())[:_MAX_SNIPPET_CHARS]
+        title = " ".join(str(item.get("title") or "").split())
+        hits.append(SearchHit(title=title or url, url=url, snippet=snippet))
+    return SearchResults(query=query, hits=hits, provider="tavily")
+
+
+def _search_duckduckgo(
+    query: str,
+    *,
+    limit: int,
+    transport: httpx.BaseTransport | None,
+) -> SearchResults:
+    """The keyless scrape: read the results out of DuckDuckGo's HTML.
+
+    It can break without anything changing here, so a page it cannot read is an
+    error naming that possibility, never an empty result list.
+    """
     response = _get(
         _SEARCH_URL,
         transport=transport,
         accept="text/html,*/*;q=0.5",
-        params={"q": cleaned},
+        params={"q": query},
     )
     # The challenge comes back as 202 Accepted with a CAPTCHA, not as an error
     # status, so a status check alone would read it as a page of results.
     if response.status == 202 or _CHALLENGE_MARKER in response.body.lower():
-        return SearchResults(query=cleaned, blocked=True)
+        return SearchResults(query=query, provider="duckduckgo", blocked=True)
 
     parser = _ResultParser()
     parser.feed(response.body)
@@ -479,7 +611,8 @@ def search(
         hits.append(hit)
 
     return SearchResults(
-        query=cleaned,
+        query=query,
         hits=hits[:limit],
+        provider="duckduckgo",
         unreadable=not hits and not parser.saw_any_result,
     )

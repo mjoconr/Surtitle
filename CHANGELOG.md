@@ -25,6 +25,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rate-limited, the reliable route is a provider key, and the provider is one function
   wide.
 
+- **A Tavily key makes web search an API call instead of a scrape.** Search works with
+  nothing configured; with `TAVILY_API_KEY` set — in the environment, or in the key
+  field Settings now has for it — the query goes to Tavily's search API and comes back
+  as JSON. The tool is otherwise unchanged: same results, same failures, plus one field
+  saying which provider answered. A key that is wrong, rate-limited or over its plan is
+  reported as exactly that rather than as an empty web, because those are three
+  different things to do next. It is the REST API rather than their MCP server (no Node
+  process to install and supervise, and the results arrive as this tool rather than as
+  someone else's tool names) and it is written against `httpx` rather than their SDK,
+  which pulls in a compiled tokenizer for one POST. `include_answer` is off: this tool
+  returns results for the agent to read, not a second generated voice in the transcript.
+  Which provider runs is yours to choose under **Settings → Search** — automatic (a key
+  if there is one), DuckDuckGo always, or Tavily always. Asking for Tavily with no key
+  is reported as the misconfiguration it is rather than quietly serving a scrape, and
+  the key is entered under **API keys** where it can be tested before it is saved.
+
 - **What the agent shows you is rendered as Markdown.** The `<display>` channel is
   Markdown by contract — the prompt asks for tables, code, file listings, long numbers
   and paths there — and it was being shown as preformatted text, so a table arrived as
@@ -46,6 +62,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   two-sentence answer, which is the transcript burying itself in the transcripts that
   most needed reading. It is now one closed row, *Work this turn · 74 actions*, with
   the lines inside it when they are asked for.
+
+- **A saved key reaches the tool that uses it, whichever provider it belongs to.**
+  `effective()` applied stored credentials by naming each provider in turn, so a key
+  pasted into the settings screen worked only if somebody had remembered to add a
+  block for that provider. A key whose block was missing saved fine, showed
+  *configured*, and behaved as though it had never been set — a failure with no
+  symptom. The list of providers now drives it, so adding one is a spec and a field.
 
 - **A turn reads top-down now, with the answer at the bottom.** The reply used to be
   announced at the top of a turn with the steps accumulating underneath it, so the

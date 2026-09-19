@@ -148,12 +148,55 @@ redirect of its own (`//duckduckgo.com/l/?uddg=…`), which is unwrapped here so
 model is given the address it will actually fetch; a result that is not an `http(s)`
 address is dropped rather than offered as a dead end.
 
+**With a Tavily key it is an API call instead.** Search works with nothing
+configured, and it works better with a key: [Tavily](https://docs.tavily.com) is a
+real search API — JSON in, JSON out, no markup to parse and nobody to get
+rate-limited by. Which one runs is **Settings → Search**, and there are three
+answers:
+
+| Setting | What happens |
+|---|---|
+| `automatic` (default) | Tavily when a key is set, the DuckDuckGo scrape when not |
+| `duckduckgo` | the scrape, even with a key — the query stays off a third party |
+| `tavily` | the API, and an error naming the setting if no key is set |
+
+Choosing Tavily without a key is a configuration mistake and is reported as one
+rather than falling back quietly: the user asked for the provider they pay for, and
+a scrape would be indistinguishable from it in the results. An unknown value — a
+setting from a newer version, a hand-edited file — falls back to `automatic`, which
+is the useful default rather than a refusal. The key is set under **API keys**,
+where it can be tested before it is saved; it is read from the environment first, and
+either way the value never travels back toward the screen.
+
+The tool's shape does not change with the provider: same results, same failures, plus
+one field saying which one answered, because "no results" means different things
+depending on who was asked.
+
+Three decisions went into that, and the reasoning is worth keeping:
+
+- **The REST API, not their MCP server.** `@tavily/mcp` is a Node process that Surtitle
+  would have to install, run and supervise, and it would arrive as MCP tool names
+  rather than as this one. The application already speaks HTTP, and a search belongs
+  in the tool the agent is already told about.
+- **No SDK.** `tavily-python` depends on `requests`, `httpx` *and* `tiktoken`, which
+  is a compiled Rust extension — three extra wheels per platform in a release that
+  bundles its own interpreter, for one POST with a JSON body. What is here is that
+  POST.
+- **`include_answer` is off.** Tavily can generate an answer to the query. This tool
+  returns results for the agent to read; a second generated voice appearing in the
+  transcript unannounced is not something to switch on for tidiness.
+
+A key that is wrong, rate-limited, or over its plan is reported as exactly that —
+never as an empty web. The three are different next moves: check the key, wait,
+upgrade or fall back.
+
 The request itself goes through the same validated path as `web_fetch` — the address
-checks, the manual redirects, the size and content-type limits live in one place —
-and it asks for approval for the same reason: the query is what leaves the machine,
-and the query is what the prompt shows. A sub-agent cannot call either tool: a child
-has a fresh approval broker and nobody watching it, so an `ask` tool inside one would
-wait forever.
+checks, the manual redirects, the size and content-type limits live in one place, and
+Tavily's fixed endpoint is resolved and checked like any other — and it asks for
+approval for the same reason: the query is what leaves the machine, and the query is
+what the prompt shows. A sub-agent cannot call either tool: a child has a fresh
+approval broker and nobody watching it, so an `ask` tool inside one would wait
+forever.
 
 ## Execution
 

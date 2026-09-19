@@ -423,3 +423,73 @@ class TestCredentialEditability:
 
         with pytest.raises(SettingsValidationError, match="precedence"):
             store.set_credential("DEEPGRAM_API_KEY", "dg-replacement")
+
+
+class TestEveryProvidersKeyReachesTheCodeThatUsesIt:
+    """`effective()` applies stored credentials to the running Settings.
+
+    It used to name each provider in turn — DeepSeek, then Deepgram — so a key
+    saved in the settings screen reached the tool that needed it only if somebody
+    had remembered to add a block for it. A provider whose block was missing saved
+    fine, showed "configured" in the screen, and behaved as though it had never been
+    set: the failure mode with no symptom.
+    """
+
+    def test_a_key_saved_for_any_provider_lands_on_settings(self, tmp_path):
+        from surtitle.config import Settings
+        from surtitle.store.settings_store import PROVIDER_SPECS, SettingsStore
+
+        store = SettingsStore(Settings(SURTITLE_HOME=str(tmp_path)))
+        for spec in PROVIDER_SPECS.values():
+            store.set_credential(spec.api_key_env, f"value-for-{spec.id}")
+
+        effective = store.effective()
+
+        for spec in PROVIDER_SPECS.values():
+            field = spec.api_key_env.lower()
+            stored = getattr(effective, field)
+            assert stored is not None, f"{spec.api_key_env} never reached Settings"
+            assert stored.get_secret_value() == f"value-for-{spec.id}"
+
+    def test_the_tavily_key_in_particular(self, tmp_path):
+        """The one this was found by: web search reads `settings.tavily_key()`."""
+        from surtitle.config import Settings
+        from surtitle.store.settings_store import SettingsStore
+
+        store = SettingsStore(Settings(SURTITLE_HOME=str(tmp_path)))
+        store.set_credential("TAVILY_API_KEY", "tvly-stored")
+
+        assert store.effective().tavily_key() == "tvly-stored"
+
+    def test_the_screen_can_offer_the_search_provider(self, tmp_path):
+        from surtitle.config import Settings
+        from surtitle.store.settings_store import SettingsStore
+
+        store = SettingsStore(Settings(SURTITLE_HOME=str(tmp_path)))
+
+        described = store.describe()
+
+        assert "search" in described["sections"]
+        names = [field["name"] for field in described["sections"]["search"]]
+        assert "search_provider" in names
+        choice = next(f for f in described["sections"]["search"] if f["name"] == "search_provider")
+        assert choice["choices"] == ["automatic", "duckduckgo", "tavily"]
+        assert choice["value"] == "automatic"
+
+    def test_a_chosen_provider_is_stored_and_applied(self, tmp_path):
+        from surtitle.config import Settings
+        from surtitle.store.settings_store import SettingsStore
+
+        store = SettingsStore(Settings(SURTITLE_HOME=str(tmp_path)))
+        store.save_settings({"search_provider": "duckduckgo"})
+
+        assert store.effective().search_provider == "duckduckgo"
+
+    def test_a_provider_that_is_not_offered_is_refused(self, tmp_path):
+        from surtitle.config import Settings
+        from surtitle.store.settings_store import SettingsStore, SettingsValidationError
+
+        store = SettingsStore(Settings(SURTITLE_HOME=str(tmp_path)))
+
+        with pytest.raises(SettingsValidationError):
+            store.save_settings({"search_provider": "somebody-elses-search"})

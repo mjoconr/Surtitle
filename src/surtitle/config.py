@@ -114,6 +114,14 @@ class Settings(BaseSettings):
     # --- credentials -----------------------------------------------------
     deepseek_api_key: SecretStr | None = Field(default=None, alias="DEEPSEEK_API_KEY")
     deepgram_api_key: SecretStr | None = Field(default=None, alias="DEEPGRAM_API_KEY")
+    # Optional: the keyless web search is a scrape of a search endpoint and gets
+    # rate-limited, and a Tavily key is the dependable route. Absent by default, and
+    # never required — nothing else in the application depends on it.
+    tavily_api_key: SecretStr | None = Field(default=None, alias="TAVILY_API_KEY")
+
+    # Which provider web search uses: "automatic" (a key if there is one, otherwise
+    # the keyless scrape), or one of them by name.
+    search_provider: str = Field(default="automatic", alias="SURTITLE_SEARCH_PROVIDER")
 
     # --- models ----------------------------------------------------------
     deepseek_model: str = Field(default="deepseek-flash", alias="DEEPSEEK_MODEL")
@@ -338,6 +346,13 @@ class Settings(BaseSettings):
     def deepgram_key(self) -> str | None:
         """Return the Deepgram key value, or ``None`` when unset."""
         return self.deepgram_api_key.get_secret_value() if self.deepgram_api_key else None
+
+    def tavily_key(self) -> str | None:
+        """Return the Tavily key value, or ``None`` when unset.
+
+        Unset is the normal case: the search tool falls back to the keyless scrape.
+        """
+        return self.tavily_api_key.get_secret_value() if self.tavily_api_key else None
 
     def needs_credential(self, name: str) -> bool:
         """True when ``name`` is required by the selected backends.

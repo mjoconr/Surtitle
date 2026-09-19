@@ -105,6 +105,23 @@ PROVIDER_SPECS: dict[str, ProviderSpec] = {
         # socket probe in :mod:`surtitle.doctor` is the validation path.
         discovery_path=None,
     ),
+    "tavily": ProviderSpec(
+        id="tavily",
+        label="Tavily (web search)",
+        api_key_env="TAVILY_API_KEY",
+        base_url="https://api.tavily.com",
+        # Nothing to choose between: the search tool is either given a key or it
+        # is not. The empty tuple is what the settings panel renders as "no models
+        # to pick", and `default_model` is required by the spec rather than used.
+        models=(),
+        default_model="",
+        docs_url="https://app.tavily.com/home",
+        # A key is validated by asking what it has used. It is a real authenticated
+        # call, it costs nothing, and it distinguishes a revoked key from a working
+        # one — which is the whole job of the Test button. Tavily has no model list,
+        # so the verifier reports the provider and an empty list of models.
+        discovery_path="/usage",
+    ),
 }
 
 
@@ -159,6 +176,16 @@ SETTINGS_FIELDS: tuple[_Field, ...] = (
         "spoken turns feel slow.",
         choices=("minimal", "low", "medium", "high"),
         section="model",
+    ),
+    _Field(
+        "search_provider",
+        str,
+        "Search provider",
+        "'automatic' uses Tavily when a key is set and the keyless DuckDuckGo "
+        "search when not. DuckDuckGo needs nothing configured and is rate-limited; "
+        "Tavily needs a key under API keys and is not.",
+        choices=("automatic", "duckduckgo", "tavily"),
+        section="search",
     ),
     _Field(
         "thinking_enabled",
@@ -440,14 +467,20 @@ class SettingsStore:
             setattr(target, name, value)
 
         # Credentials: the environment and .env win over the stored file.
-        if key := self.credential_value("DEEPSEEK_API_KEY"):
-            from pydantic import SecretStr
+        #
+        # Driven by the provider list rather than one block per provider. Adding a
+        # provider — a search key, a second model vendor — is then a spec and a field
+        # on Settings, and a key saved in the settings screen reaches the code that
+        # uses it. Written the other way it does not: the key saves, the screen says
+        # "configured", and the tool behaves as though it were never set.
+        from pydantic import SecretStr
 
-            target.deepseek_api_key = SecretStr(key)
-        if key := self.credential_value("DEEPGRAM_API_KEY"):
-            from pydantic import SecretStr
-
-            target.deepgram_api_key = SecretStr(key)
+        for spec in PROVIDER_SPECS.values():
+            field = spec.api_key_env.lower()
+            if field not in type(target).model_fields:
+                continue
+            if key := self.credential_value(spec.api_key_env):
+                setattr(target, field, SecretStr(key))
         return target
 
     # --- credentials -----------------------------------------------------

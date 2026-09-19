@@ -9,6 +9,7 @@ run without asking.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import logging
 from collections.abc import Awaitable, Callable
@@ -847,8 +848,20 @@ def _web_search_handler(ctx: ToolContext, query: str = "", **_ignored: Any) -> T
     """Search the web and return the results, as results rather than as a page."""
     if not str(query or "").strip():
         return ToolResult(ok=False, error="Give the search something to look for.")
+    # A Tavily key, when the user has one, turns a scrape into an API call. The
+    # tool's own shape does not change: same results, same failures, and the key is
+    # read here rather than in `web_tools` so that module stays a function of its
+    # arguments.
+    settings = ctx.settings
+    key = None
+    preference = None
+    if settings is not None:
+        with contextlib.suppress(Exception):
+            key = settings.tavily_key()
+        with contextlib.suppress(Exception):
+            preference = settings.search_provider
     try:
-        found = web_tools.search(str(query))
+        found = web_tools.search(str(query), api_key=key, provider=preference)
     except web_tools.FetchError as exc:
         return ToolResult(ok=False, error=str(exc))
     except Exception as exc:  # a broken endpoint must not break the turn
@@ -886,6 +899,7 @@ def _web_search_handler(ctx: ToolContext, query: str = "", **_ignored: Any) -> T
         ok=True,
         data={
             "query": found.query,
+            "provider": found.provider,
             "count": len(found.hits),
             "results": [
                 {"title": hit.title or hit.url, "url": hit.url, "snippet": hit.snippet}
@@ -902,7 +916,7 @@ def _web_search_handler(ctx: ToolContext, query: str = "", **_ignored: Any) -> T
                 "not exist; try different words."
             ),
         },
-        display=f"{len(found.hits)} result(s) for {found.query[:40]!r}",
+        display=(f"{len(found.hits)} result(s) from {found.provider} for {found.query[:40]!r}"),
     )
 
 
@@ -913,7 +927,9 @@ _WEB_SEARCH = Tool(
         "each. Use it to find where something is published when you do not already "
         "have the URL, then read the promising ones with web_fetch, because a snippet "
         "is not the page and a result is not evidence. Searching is a last resort "
-        "after this project's own files and the skills it teaches."
+        "after this project's own files and the skills it teaches. It reports which "
+        "search provider answered; if it says it was blocked or the key was refused, "
+        "that is a fact about the search and not about the subject."
     ),
     parameters={
         "type": "object",
