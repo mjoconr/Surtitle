@@ -108,6 +108,8 @@ class Outcome:
     # Every turn's answer, oldest first. A one-turn task has one; a conversation
     # has the lot, which is what a memory check has to look at.
     answers: list[str] = field(default_factory=list)
+    # Steps and tokens are **summed over every turn**, because the price of a
+    # conversation is the whole conversation. For a one-turn task that is the turn.
     steps: int = 0
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
     duration_s: float = 0.0
@@ -245,9 +247,20 @@ async def run_task(
     session.project_config = load_project_config(root)
 
     started = time.monotonic()
+    # Summed across every turn, not read once at the end. A conversation's cost is
+    # the whole conversation, and the per-turn counters are reset at the start of
+    # each one — so reading them afterwards reports the last turn and calls it the
+    # price of a six-turn task, which is exactly the number a comparison needs.
+    steps = 0
+    prompt_tokens = 0
+    completion_tokens = 0
     try:
         for prompt in task_prompts(task):
             await session._run_turn(prompt)
+            stored = store.get_session(record.id)
+            steps += (stored.last_end_steps or 0) if stored is not None else 0
+            prompt_tokens += session._turn_prompt_tokens
+            completion_tokens += session._turn_completion_tokens
     except Exception as exc:  # noqa: BLE001 - a broken run is a result, not a crash
         outcome.error = f"{type(exc).__name__}: {exc}"
     finally:
@@ -259,9 +272,9 @@ async def run_task(
 
     stored = store.get_session(record.id)
     outcome.reason = (stored.last_end_reason if stored is not None else None) or outcome.reason
-    outcome.steps = (stored.last_end_steps if stored is not None else None) or 0
-    outcome.prompt_tokens = session._turn_prompt_tokens
-    outcome.completion_tokens = session._turn_completion_tokens
+    outcome.steps = steps
+    outcome.prompt_tokens = prompt_tokens
+    outcome.completion_tokens = completion_tokens
 
     outcome.answers = [
         strip_work_log(message.content)

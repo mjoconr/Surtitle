@@ -76,11 +76,21 @@ _AGED_WORK_KEEP_TURNS = 6
 # A work-log line keeps 320 characters of an outcome; the stored result holds up
 # to 4,000. That difference is the whole reason a turn could read a file, and a
 # later turn in the same conversation could not remember what it said and read it
-# again. Two turns is where the fidelity is worth its tokens: the turn just
-# finished is what the next one builds on, and the one before it is what "did I
-# already do this?" is usually asking about. Older turns keep the prose log, which
-# still names the tool and its target — re-reading a file is cheap, re-deriving
-# what a command printed is not.
+# again.
+#
+# Measured, on `evals/examples/tasks/example-six-turns-on-the-turn-loop.json`,
+# three runs each side: 23.7 steps and 393,655 prompt tokens per run with the
+# replay, 24.3 steps and 394,015 without. That is the same number — 0.09% apart,
+# inside a spread of ±25% between individual runs — so it is not the extra cost it
+# looks like. The mechanism is why: the history it adds is paid for by the reads
+# that stop happening.
+#
+# It is *not* evidence of a benefit. Those checks are text matches, and a task
+# whose checks turn on recalling a detail from an earlier read is what would settle
+# that; it does not exist yet. Two is kept on the grounds that it measures free and
+# the reason for it is sound — not because it was proved. Re-measure with
+# `--repeat` before trusting any single run of this: one run said the replay saved
+# 38,000 tokens and the next three said it saved nothing.
 _REPLAY_TURNS = 2
 
 # A cap per replayed result, so one enormous command output cannot crowd out the

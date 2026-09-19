@@ -1,0 +1,22 @@
+{
+  "id": "example-six-turns-on-the-turn-loop",
+  "root": "..",
+  "turns": [
+    "Read src/surtitle/core/agent.py and tell me the module-level constants that control how a turn behaves, with their values.",
+    "Quote the first line of _WRAP_UP_INSTRUCTION and of _CONTINUE_PLAN_INSTRUCTION.",
+    "Read src/surtitle/core/session.py and tell me what _REPLAY_TURNS is set to, and what the comment above it says the alternative was.",
+    "Which of those two instructions is used when a turn's closing round is empty, and which when the plan still has open items?",
+    "Now src/surtitle/tools/registry.py: what is the subagent tool's approval policy, and what does read_only() exclude?",
+    "In three sentences, what are the rules for how a turn ends? Name the files each rule lives in."
+  ],
+  "origin": "This repository's own code, and written for one measurement: does the two-turn replay earn its tokens? Every turn after the first asks about something a previous turn read, so a run with the replay can answer from what it already has while a run without it has to read the file again. Turn 5 asks about a file the replay window cannot hold, which is the control: neither setting should help there. Costs about six turns of real work, which is why it is the only example this long.",
+  "checks": [
+    "answered",
+    { "kind": "ended_complete" },
+    { "kind": "any_answer_contains", "all_of": ["_WRAP_UP_INSTRUCTION"] },
+    { "kind": "any_answer_contains", "all_of": ["_CONTINUE_PLAN_INSTRUCTION"] },
+    { "kind": "any_answer_contains", "all_of": ["_REPLAY_TURNS"] },
+    { "kind": "answer_contains", "all_of": ["turn"], "any_of": ["agent.py", "session.py"] },
+    { "kind": "writes_within", "paths": [] }
+  ]
+}
