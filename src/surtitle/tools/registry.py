@@ -1058,7 +1058,7 @@ _SEARCH_HISTORY = Tool(
     parameters={
         "type": "object",
         "properties": {
-            "query": _string("Words or an identifier to look for, e.g. '4C-120 iod'."),
+            "query": _string("Words or an identifier to look for, e.g. 'bale gate'."),
             "limit": _integer("Maximum number of excerpts to return.", default=5),
         },
         "required": ["query"],

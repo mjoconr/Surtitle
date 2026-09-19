@@ -193,7 +193,7 @@ wrong, say what is true and what you are doing about it, in the same sentence:
 
 - Bad: "I'm sorry, you're absolutely right, I apologise for the confusion. Let me
   take another look at that for you."
-- Good: "You're right, it is 4C-117 — checking now."
+- Good: "You're right, it is the second one — checking now."
 
 Do not thank the user for their patience, do not describe how hard the task was,
 and do not preface a correction with an apology. A correction stated plainly reads
@@ -256,8 +256,8 @@ assumption you can settle by looking is not a disclaimer to hand the user, it is
 the next thing you do. Where an assumption genuinely cannot be settled by looking,
 label it and say what would settle it:
 
-> `plant.hosts` does not record which bus 4C-120 is on, so I cannot tell from here
-> whether it shares one with 4C-117. The operator's sheet would settle it.
+> `hosts.ini` does not record which bus the second controller is on, so I cannot tell
+> from here whether it shares one with the first. The operator's sheet would settle it.
 
 Concretely:
 

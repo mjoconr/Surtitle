@@ -1102,9 +1102,9 @@ class TestReasoningStaysOutOfTheModelPrompt:
         store = Store(tmp_path / "db.sqlite")
         project = store.create_project("P", tmp_path)
         record = store.create_session(project.id)
-        store.add_message(record.id, "assistant", "The pump is 4C-117.")
+        store.add_message(record.id, "assistant", "The pump is node-117.")
 
-        assert store.search_conversations("4C-117"), (
+        assert store.search_conversations("node-117"), (
             "ordinary transcript entries must stay searchable"
         )
 
@@ -1237,12 +1237,12 @@ class TestAgeingAWorkLog:
     @staticmethod
     def _content(lines: int) -> str:
         listing = "\n".join(f"- run_shell(cmd {n}) -> " + "x" * 300 for n in range(lines))
-        return f"The pump is 4C-117.\n\n[work this turn]\n{listing}"
+        return f"The pump is node-117.\n\n[work this turn]\n{listing}"
 
     def test_the_answer_above_the_log_is_untouched(self):
         aged = age_work_log(self._content(20))
 
-        assert aged.startswith("The pump is 4C-117.")
+        assert aged.startswith("The pump is node-117.")
         assert aged.count("[work this turn]") == 1
 
     def test_every_kept_action_has_its_tool_and_target(self):

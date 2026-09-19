@@ -26,8 +26,8 @@ from surtitle.store.db import REASONING_ROLE, Store
 
 DOC = """# Project conventions
 
-- Machines are reached with `plant-mcp-cli -m <SITE> call`, never by ssh.
-- Tokens live in `plant.tokens` at the project root.
+- Machines are reached with `fleet-cli -m <SITE> call`, never by ssh.
+- Tokens live in `access.tokens` at the project root.
 """
 
 
@@ -65,7 +65,7 @@ class TestInstructionsAreReinjected:
 
         prompt = session._system_prompt()
 
-        assert "plant-mcp-cli" in prompt
+        assert "fleet-cli" in prompt
         assert "Tokens live in" in prompt
 
     def test_they_survive_a_conversation_far_longer_than_the_history_window(
@@ -83,24 +83,24 @@ class TestInstructionsAreReinjected:
         prompt = session._system_prompt()
 
         assert len(history) <= 40, "the history window should have trimmed the conversation"
-        assert "plant-mcp-cli" in prompt, (
+        assert "fleet-cli" in prompt, (
             "project learnings must come from the files, not from the conversation"
         )
 
     def test_a_project_file_added_mid_session_is_picked_up(self, session, tmp_path):
         """Re-read per turn, so a file the agent writes counts immediately."""
-        assert "plant-mcp-cli" not in session._system_prompt()
+        assert "fleet-cli" not in session._system_prompt()
 
         (tmp_path / "AGENTS.md").write_text(DOC, encoding="utf-8")
 
-        assert "plant-mcp-cli" in session._system_prompt()
+        assert "fleet-cli" in session._system_prompt()
 
     def test_the_notebook_also_reaches_the_prompt(self, session, tmp_path):
         """Recorded notes accumulate across sessions in the same way."""
         session.store.add_message(session.session_id, "user", "seed")
         from surtitle.tools.environment import write_notes
 
-        write_notes(tmp_path, "- 4C-120 is on the same bus as 4C-117")
+        write_notes(tmp_path, "- node-120 is on the same bus as node-117")
 
         # Delivered with the turn's changing context rather than in the system
         # prompt, so the head of the request stays cacheable. It still reaches the

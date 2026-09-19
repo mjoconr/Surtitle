@@ -3,8 +3,8 @@
 Both come from a real session. Across three turns the agent ran the same sequence
 every time:
 
-    list_dir -> search -> read AGENTS.md -> read README.md -> read plant.hosts
-             -> read CURRENT_STATE.md -> read dsh-memory -> run the same shell commands
+    list_dir -> search -> read AGENTS.md -> read README.md -> read hosts.ini
+             -> read CURRENT_STATE.md -> read memory-cli -> run the same shell commands
 
 It was not being lazy; it had amnesia. Tool calls and their results were never
 persisted, so history was rebuilt from prose alone and the model had no way to see
@@ -38,10 +38,10 @@ class TestActionLines:
     def test_a_command_is_summarised_with_the_command(self):
         line = _action_line(
             "run_shell",
-            {"command": "./dsh-memory 2G-120"},
+            {"command": "./memory-cli node-121"},
             ToolResult(ok=True, display="finished in 1377 ms"),
         )
-        assert "./dsh-memory 2G-120" in line
+        assert "./memory-cli node-121" in line
         assert "1377" in line
 
     def test_a_failure_is_marked_as_such(self):
@@ -51,9 +51,11 @@ class TestActionLines:
 
     def test_a_search_records_its_pattern(self):
         line = _action_line(
-            "search_files", {"pattern": "4C-120|2G-120"}, ToolResult(ok=True, display="2 matches")
+            "search_files",
+            {"pattern": "node-120|node-121"},
+            ToolResult(ok=True, display="2 matches"),
         )
-        assert "4C-120" in line
+        assert "node-120" in line
 
     def test_long_values_are_truncated(self):
         """These lines are replayed every turn, so they must stay cheap."""
@@ -130,10 +132,10 @@ class TestActionLines:
 
 class TestWorkIsAppended:
     def test_the_answer_comes_first_and_the_work_after(self):
-        text = _with_actions("The machine is down.", ["read_file(plant.hosts) -> ok"])
+        text = _with_actions("The machine is down.", ["read_file(hosts.ini) -> ok"])
         assert text.startswith("The machine is down.")
         assert "[work this turn]" in text
-        assert "read_file(plant.hosts)" in text
+        assert "read_file(hosts.ini)" in text
 
     def test_a_turn_with_no_tools_is_unchanged(self):
         assert _with_actions("Just talking.", []) == "Just talking."
@@ -204,10 +206,10 @@ class TestProjectInstructionsAreInjected:
 
     def test_agents_md_is_loaded(self, project_session):
         session, root = project_session
-        (root / "AGENTS.md").write_text("# House rules\nAlways check plant.hosts first.\n")
+        (root / "AGENTS.md").write_text("# House rules\nAlways check hosts.ini first.\n")
         prompt = session._system_prompt()
         assert "House rules" in prompt
-        assert "check plant.hosts first" in prompt
+        assert "check hosts.ini first" in prompt
 
     def test_contributing_is_loaded_as_a_convention_source(self, project_session):
         session, root = project_session
@@ -282,18 +284,18 @@ class TestProjectNotebook:
         from surtitle.tools.environment import project_notes, write_notes
 
         _session, root = project_session
-        write_notes(root, "4C-120 is down.")
+        write_notes(root, "node-120 is down.")
         write_notes(root, "The report lives in docs/.")
         text = project_notes(root)
-        assert "4C-120 is down." in text
+        assert "node-120 is down." in text
         assert "report lives in docs/" in text
 
     def test_replacing_is_available_for_corrections(self, project_session):
         from surtitle.tools.environment import project_notes, write_notes
 
         _session, root = project_session
-        write_notes(root, "4C-120 is down.")
-        write_notes(root, "4C-120 is back up.", append=False)
+        write_notes(root, "node-120 is down.")
+        write_notes(root, "node-120 is back up.", append=False)
         text = project_notes(root)
         assert "back up" in text
         assert "is down" not in text
@@ -340,10 +342,10 @@ class TestProjectNotebook:
         _session, root = project_session
         registry = default_registry()
         result = await registry.dispatch(
-            "remember", ToolContext(root=root), {"note": "2G-120 runs the sampling line."}
+            "remember", ToolContext(root=root), {"note": "node-121 runs the sampling line."}
         )
         assert result.ok, result.error
-        assert "2G-120 runs the sampling line" in project_notes(root)
+        assert "node-121 runs the sampling line" in project_notes(root)
 
     async def test_the_remember_tool_appends_by_default(self, project_session):
         from surtitle.tools.environment import project_notes
@@ -389,12 +391,12 @@ class TestProjectNotebook:
 class TestProjectBriefing:
     def test_the_working_directory_and_top_level_are_named(self, project_session):
         session, root = project_session
-        (root / "plant.hosts").write_text("2G-120\n")
+        (root / "hosts.ini").write_text("node-121\n")
         (root / "docs").mkdir()
         note = session._context_note()
         assert "## Project briefing" in note
         assert str(root) in note
-        assert "plant.hosts" in note
+        assert "hosts.ini" in note
 
     def test_hidden_directories_are_not_advertised(self, project_session):
         session, root = project_session
@@ -580,7 +582,7 @@ class TestRepeatCallGuard:
 
         guard = RepeatCallGuard()
         for _ in range(3):
-            guard.check("run_shell", {"command": "./dsh-memory 2G-120"})
+            guard.check("run_shell", {"command": "./memory-cli node-121"})
         reminder = guard.reminder() or ""
         assert "different" in reminder or "Stop repeating" in reminder
 
@@ -872,10 +874,10 @@ class TestDocumentationAwareness:
         session, root = project_session
         (root / "docs").mkdir()
         (root / "docs" / "ACCESS_METHOD.md").write_text(
-            "Use ./plant-mcp-cli -m <SITE> call to reach a machine.\\n"
+            "Use ./fleet-cli -m <SITE> call to reach a machine.\\n"
         )
         prompt = self._prompt(session)
-        assert "plant-mcp-cli" in prompt
+        assert "fleet-cli" in prompt
 
     def test_the_connection_guide_is_at_least_named_when_budget_is_tight(self, project_session):
         """Naming is sufficient: the agent is told to read what it needs.
@@ -887,7 +889,7 @@ class TestDocumentationAwareness:
         session, root = project_session
         (root / "AGENTS.md").write_text("Routing: read docs/ACCESS_METHOD.md.\\n" * 200)
         (root / "docs").mkdir()
-        (root / "docs" / "ACCESS_METHOD.md").write_text("plant-mcp-cli detail\\n" * 900)
+        (root / "docs" / "ACCESS_METHOD.md").write_text("fleet-cli detail\\n" * 900)
         prompt = self._prompt(session)
         # Either loaded or named in the index - never absent.
         assert "ACCESS_METHOD" in prompt, "the connection guide vanished entirely"

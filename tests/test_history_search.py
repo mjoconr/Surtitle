@@ -22,15 +22,15 @@ from surtitle.tools.registry import default_registry
 @pytest.fixture
 def populated(tmp_path: Path):
     store = Store(tmp_path / "db.sqlite")
-    project = store.create_project("plant", tmp_path)
-    first = store.create_session(project.id, "4C-120 investigation")
+    project = store.create_project("fleet", tmp_path)
+    first = store.create_session(project.id, "node-120 investigation")
     second = store.create_session(project.id, "unrelated chat")
 
-    store.add_message(first.id, "user", "why is 4C-120 down?")
+    store.add_message(first.id, "user", "why is node-120 down?")
     store.add_message(
         first.id,
         "assistant",
-        "4C-120 is down because the iod service crashed. Restart with dsh-plant restart 4C-120.",
+        "node-120 is down because the io service crashed. Restart with node-cli restart node-120.",
     )
     store.add_message(second.id, "user", "write me a poem about wool")
     return store, project, first, second
@@ -39,21 +39,21 @@ def populated(tmp_path: Path):
 class TestSearch:
     def test_it_finds_a_relevant_exchange(self, populated):
         store, _project, _first, _second = populated
-        results = store.search_conversations("4C-120")
+        results = store.search_conversations("node-120")
         assert results, "a known identifier was not found"
-        assert any("4C-120" in item["excerpt"] for item in results)
+        assert any("node-120" in item["excerpt"] for item in results)
 
     def test_the_cause_is_findable_by_its_own_wording(self, populated):
         """Not every useful fact contains the identifier that leads to it."""
         store, _project, _first, _second = populated
-        results = store.search_conversations("iod service crashed")
+        results = store.search_conversations("io service crashed")
         assert results, "the recorded cause was not retrievable"
-        assert any("iod" in item["excerpt"] for item in results)
+        assert any("io" in item["excerpt"] for item in results)
 
     def test_results_name_the_conversation_they_came_from(self, populated):
         store, _project, _first, _second = populated
-        results = store.search_conversations("4C-120")
-        assert results[0]["session_title"] == "4C-120 investigation"
+        results = store.search_conversations("node-120")
+        assert results[0]["session_title"] == "node-120 investigation"
 
     def test_it_does_not_return_unrelated_conversations(self, populated):
         store, _project, _first, _second = populated
@@ -64,7 +64,7 @@ class TestSearch:
     def test_punctuation_in_the_query_is_not_treated_as_syntax(self, populated):
         """A machine name or path must not break the query."""
         store, _project, _first, _second = populated
-        for query in ("4C-120", "dsh-plant", "iod service", '4C"120', "why is"):
+        for query in ("node-120", "node-cli", "io service", 'node"120', "why is"):
             results = store.search_conversations(query)
             assert isinstance(results, list), f"{query!r} raised"
 
@@ -105,10 +105,10 @@ class TestSearchTool:
         ctx = ToolContext(
             root=Path(store.path).parent, session_id=second.id, project_id=project.id, store=store
         )
-        result = await registry.dispatch("search_history", ctx, {"query": "4C-120"})
+        result = await registry.dispatch("search_history", ctx, {"query": "node-120"})
         assert result.ok, result.error
         assert result.data["results"], "the tool found nothing"
-        assert "4C-120" in result.display
+        assert "node-120" in result.display
 
     async def test_searching_from_the_same_session_includes_it_and_says_so(self, populated):
         """The agent must be able to recover its own record — and know it is its own.
@@ -127,7 +127,7 @@ class TestSearchTool:
         ctx = ToolContext(
             root=Path(store.path).parent, session_id=first.id, project_id=project.id, store=store
         )
-        result = await registry.dispatch("search_history", ctx, {"query": "4C-120"})
+        result = await registry.dispatch("search_history", ctx, {"query": "node-120"})
         assert result.ok
         assert any(item["session_id"] == first.id for item in result.data["results"])
         assert all(
@@ -142,7 +142,7 @@ class TestSearchTool:
         ctx = ToolContext(
             root=Path(store.path).parent, session_id=second.id, project_id=project.id, store=store
         )
-        result = await default_registry().dispatch("search_history", ctx, {"query": "4C-120"})
+        result = await default_registry().dispatch("search_history", ctx, {"query": "node-120"})
         assert result.ok
         assert result.data["results"], "the other session's finding must still be reachable"
         assert all(item["from"] == "an earlier conversation" for item in result.data["results"])

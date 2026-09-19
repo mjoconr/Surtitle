@@ -26,7 +26,7 @@ def project(tmp_path):
     root = tmp_path / "proj"
     root.mkdir()
     (root / "report.md").write_text("# the work\n", encoding="utf-8")
-    return store, store.create_project("plant", root), root
+    return store, store.create_project("fleet", root), root
 
 
 class TestArchiveState:
@@ -101,30 +101,30 @@ class TestArchiveListing:
 class TestArchivedConversationsLeaveSearch:
     def test_archived_chats_stop_being_retrieved(self, project):
         store, proj, _ = project
-        session = store.create_session(proj.id, "4C-120 investigation")
-        store.add_message(session.id, "user", "why is 4C-120 down?")
-        assert store.search_conversations("4C-120")
+        session = store.create_session(proj.id, "node-120 investigation")
+        store.add_message(session.id, "user", "why is node-120 down?")
+        assert store.search_conversations("node-120")
 
         store.set_session_archived(session.id, True)
 
-        assert store.search_conversations("4C-120") == []
+        assert store.search_conversations("node-120") == []
 
     def test_restoring_makes_them_searchable_again(self, project):
         store, proj, _ = project
-        session = store.create_session(proj.id, "4C-120 investigation")
-        store.add_message(session.id, "user", "why is 4C-120 down?")
+        session = store.create_session(proj.id, "node-120 investigation")
+        store.add_message(session.id, "user", "why is node-120 down?")
         store.set_session_archived(session.id, True)
 
         store.set_session_archived(session.id, False)
 
-        hits = store.search_conversations("4C-120")
+        hits = store.search_conversations("node-120")
         assert [hit["session_id"] for hit in hits] == [session.id]
 
     def test_the_substring_fallback_also_respects_the_archive(self, project):
         # Phrase queries with punctuation exercise the non-FTS path.
         store, proj, _ = project
         session = store.create_session(proj.id, "quoted")
-        store.add_message(session.id, "user", 'the "cold start" fault on 4C-117')
+        store.add_message(session.id, "user", 'the "cold start" fault on node-117')
         store.set_session_archived(session.id, True)
 
         assert store.search_conversations('"cold start"') == []
@@ -211,7 +211,7 @@ class TestMigration:
                 role TEXT NOT NULL, content TEXT NOT NULL, spoken TEXT,
                 created_at REAL NOT NULL
             );
-            INSERT INTO projects VALUES ('p1', 'plant', '/tmp/plant', 1.0, 1.0, '[]');
+            INSERT INTO projects VALUES ('p1', 'fleet', '/tmp/fleet', 1.0, 1.0, '[]');
             INSERT INTO sessions VALUES ('s1', 'p1', 'before the upgrade', 1.0, 1.0);
             INSERT INTO messages (session_id, role, content, created_at)
                 VALUES ('s1', 'user', 'kept across the upgrade', 1.0);
