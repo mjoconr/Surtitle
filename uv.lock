@@ -1860,7 +1860,7 @@ wheels = [
 
 [[package]]
 name = "surtitle"
-version = "0.1.0"
+version = "0.5.2"
 source = { editable = "." }
 dependencies = [
     { name = "fastapi" },
