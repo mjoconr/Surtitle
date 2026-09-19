@@ -1,0 +1,17 @@
+{
+  "id": "example-survey-the-turn-loop",
+  "root": "..",
+  "prompt": "Which files in src/surtitle/core/ take part in running one user turn, and what is each responsible for? Cover the agent loop, the session, the plan, and the rules about how a turn ends.",
+  "origin": "This repository's own code, chosen because it is a survey rather than a lookup: answering it means reading several files, which is the shape of task a sub-agent exists for. It also measures that the agent does not edit the repository to answer a question about it.",
+  "checks": [
+    "answered",
+    { "kind": "ended_complete" },
+    {
+      "kind": "answer_contains",
+      "any_of": ["agent.py", "session.py", "events.py", "speak.py", "subagent.py"],
+      "note": "A survey has to name the files it surveyed; which ones it picks is its business."
+    },
+    { "kind": "writes_within", "paths": [] },
+    { "kind": "max_steps", "value": 40 }
+  ]
+}

@@ -38,16 +38,21 @@ class TestTaskFiles:
     def test_a_committed_example_never_points_outside_this_repository(self):
         """The committed tasks are the ones anybody can run, so they are the ones
         that must not name a checkout on somebody's machine — or the client work
-        that lives in it. Real tasks belong in the gitignored ``evals/tasks/``."""
-        package = harness.PACKAGE_DIR.resolve()
+        that lives in it. Real tasks belong in the gitignored ``evals/tasks/``.
+
+        Inside the repository is the test, not inside ``evals/``: an example that
+        surveys this project's own code is as portable as one that runs against the
+        sample, and it is the only kind that can measure reading something real.
+        """
+        repository = harness.PACKAGE_DIR.resolve().parent
         examples = sorted(harness.EXAMPLES_DIR.glob("*.json"))
         assert examples, "the committed examples are what a fresh checkout runs"
         for path in examples:
             task = json.loads(path.read_text(encoding="utf-8"))
             root = harness.task_root(task).resolve()
-            assert package in root.parents, (
-                f"{path.name} points outside the harness ({root}); a committed task "
-                "must not name a project on this machine"
+            assert root == repository or repository in root.parents, (
+                f"{path.name} points outside this repository ({root}); a committed "
+                "task must not name a project on this machine"
             )
 
     def test_a_selector_filters_and_an_unknown_one_is_an_error(self, tmp_path, monkeypatch):
