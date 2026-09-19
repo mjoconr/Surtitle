@@ -30,9 +30,11 @@ const state = {
   showArchive: false,
   project: null,
   session: null,
-  turns: new Map(),
+  // View state is per conversation. It used to be global and cleared on every
+  // switch, which threw away the rows a background conversation was still
+  // building — so its `tool_call` found no matching row and its progress was lost.
+  views: new Map(),
   currentTurn: null,
-  toolRows: new Map(),
   files: { path: ".", entries: [] },
   activity: [],
   // The agent's plan for the work in hand: [description, status] rows it keeps
@@ -42,6 +44,9 @@ const state = {
   micOpen: false,
   // True while the server is discarding transcripts as the agent's own voice.
   echoSuppressed: false,
+  // What every open conversation is doing, keyed by session id, so the sidebar
+  // can show progress in one that is not on screen.
+  sessionActivity: new Map(),
   // Set from the server's ready event; false disables the mic button.
   voiceAvailable: true,
   pendingApproval: null,
@@ -177,7 +182,9 @@ function stopTimers() {
 function updateTimers() {
   const now = Date.now();
   let live = false;
-  for (const turn of state.turns.values()) {
+  const open = view();
+  if (!open) return;
+  for (const turn of open.turns.values()) {
     for (const step of turn.stepRows.values()) {
       if (step.end) {
         step.timer.textContent = formatDuration(step.end - step.start);
@@ -187,7 +194,7 @@ function updateTimers() {
       step.timer.textContent = formatDuration(now - step.start);
     }
   }
-  for (const record of state.toolRows.values()) {
+  for (const record of open.toolRows.values()) {
     if (!record.startedAt || !record.timer) continue;
     if (record.endedAt) continue;
     live = true;
@@ -267,7 +274,35 @@ async function api(path, options) {
  * server announces a step before the model has produced anything, and creating
  * the row then would leave empty steps behind on a cancelled turn.
  */
+/** The view state of one conversation, created on first use. */
+function viewFor(sessionId) {
+  let view = state.views.get(sessionId);
+  if (!view) {
+    view = { turns: new Map(), toolRows: new Map() };
+    state.views.set(sessionId, view);
+  }
+  return view;
+}
+
+/** The view state of the open conversation, or null when nothing is open. */
+function view() {
+  return state.session ? viewFor(state.session.id) : null;
+}
+
+/** Start a conversation's view over, leaving every other one alone. */
+function resetView(sessionId) {
+  if (!sessionId) return;
+  const existing = state.views.get(sessionId);
+  if (existing) {
+    existing.turns.clear();
+    existing.toolRows.clear();
+  } else {
+    state.views.set(sessionId, { turns: new Map(), toolRows: new Map() });
+  }
+}
+
 function beginTurn(kind) {
+  const open = view();
   const turn = node("div", "turn");
   const spoken = node("div");
   const shown = node("div");
@@ -281,10 +316,11 @@ function beginTurn(kind) {
     turn.append(bubble);
     el.turns.append(turn);
     scrollToBottom();
-    return {
+    const record = {
       id: Symbol("turn"),
       kind,
       root: turn,
+      toolRows: open.toolRows,
       bubble,
       spoken,
       shown,
@@ -295,15 +331,18 @@ function beginTurn(kind) {
       saidText: "",
       shownText: "",
     };
+    if (open) open.turns.set(record.id, record);
+    return record;
   }
 
   turn.append(spoken, shown, steps);
   el.turns.append(turn);
   scrollToBottom();
-  return {
+  const record = {
     id: Symbol("turn"),
     kind,
     root: turn,
+    toolRows: open.toolRows,
     bubble: null,
     spoken,
     shown,
@@ -314,6 +353,8 @@ function beginTurn(kind) {
     saidText: "",
     shownText: "",
   };
+  if (open) open.turns.set(record.id, record);
+  return record;
 }
 
 /**
@@ -324,7 +365,7 @@ function beginTurn(kind) {
  * place for them.
  */
 function stepFor(turn, stepNumber) {
-  if (turn.kind !== "assistant") return null;
+  if (!turn || turn.kind !== "assistant") return null;
   let index = Number(stepNumber);
   if (!Number.isFinite(index) || index <= 0) {
     index = turn.stepRows.size ? Math.max(...turn.stepRows.keys()) : 1;
@@ -367,6 +408,7 @@ function stepFor(turn, stepNumber) {
     body,
     thinking,
     tools,
+    toolRows: turn.toolRows,
     think: null,
     start: Date.now(),
     end: null,
@@ -384,7 +426,7 @@ function stepFor(turn, stepNumber) {
   for (const earlier of turn.stepRows.values()) collapseStep(earlier);
   turn.stepRows.set(index, record);
   turn.steps.append(root);
-  state.toolRows.set(`step:${index}`, record);
+  if (turn.toolRows) turn.toolRows.set(`step:${index}`, record);
   scrollToBottom();
   return record;
 }
@@ -515,7 +557,8 @@ function appendError(turn, message) {
 }
 
 function addToolRow(step, callId, name) {
-  const existing = callId ? state.toolRows.get(callId) : null;
+  const rows = (step && step.toolRows) || (view() && view().toolRows) || new Map();
+  const existing = callId ? rows.get(callId) : null;
   if (existing) {
     // An approval prompt already opened a row for this call. Reuse it: appending
     // a second row leaves the first orphaned in the transcript, still reading
@@ -529,7 +572,7 @@ function addToolRow(step, callId, name) {
     existing.body.hidden = true;
     existing.startedAt = Date.now();
     existing.endedAt = null;
-    state.toolRows.set(callId, existing);
+    rows.set(callId, existing);
     return existing;
   }
 
@@ -570,7 +613,7 @@ function addToolRow(step, callId, name) {
     startedAt: Date.now(),
     endedAt: null,
   };
-  state.toolRows.set(callId, record);
+  rows.set(callId, record);
   return record;
 }
 
@@ -602,7 +645,7 @@ function settleToolRow(record, data) {
 function settlePendingApproval(note) {
   const pending = state.pendingApproval;
   if (!pending) return;
-  const record = state.toolRows.get(pending.call_id);
+  const record = view()?.toolRows.get(pending.call_id);
   if (record && record.row.dataset.state === "awaiting") {
     record.row.dataset.state = "stopped";
     record.summary.textContent = note;
@@ -821,13 +864,24 @@ function sessionRow(session, { archived }) {
   const button = node("button", "row");
   button.type = "button";
   button.setAttribute("aria-current", String(state.session?.id === session.id));
+  button.dataset.session = session.id;
+  const activity = state.sessionActivity.get(session.id);
+  if (activity) {
+    button.dataset.working = String(Boolean(activity.working));
+    button.dataset.approval = String(Boolean(activity.awaitingApproval));
+    button.dataset.unread = String(Boolean(activity.unread));
+  }
   button.append(node("span", "row__icon", archived ? "▤" : "□"));
 
   const main = node("div", "row__main");
   main.append(node("div", "row__title", session.title));
   const when = new Date(session.updated_at * 1000).toLocaleString();
   main.append(node("div", "row__meta", archived ? `Archived · ${when}` : when));
-  button.append(main);
+  const badge = node("span", "row__badge", "");
+  badge.hidden = !activity?.awaitingApproval && !activity?.unread;
+  if (activity?.awaitingApproval) badge.textContent = "needs you";
+  else if (activity?.unread) badge.textContent = "reply";
+  button.append(main, badge);
   button.addEventListener("click", () => selectSession(session.id));
 
   const actions = node("div", "row__actions");
@@ -1124,7 +1178,9 @@ function currentStepIndex() {
 
 /** Scroll the transcript to a step and flash it, linking panel to process. */
 function focusStep(index) {
-  const turn = state.currentTurn || [...state.turns.values()].reverse().find((t) => t.kind === "assistant");
+  const open = view();
+  const turn =
+    state.currentTurn || [...(open ? open.turns.values() : [])].reverse().find((t) => t.kind === "assistant");
   const step = turn && turn.stepRows.get(Number(index));
   if (!step) return;
   step.head.setAttribute("aria-expanded", "true");
@@ -1237,7 +1293,88 @@ function setConnection(name, label) {
 
 // ------------------------------------------------------------- event handling
 
+/**
+ * Route one conversation's event, whether or not it is on screen.
+ *
+ * A conversation that is not being looked at still has a socket, so its events
+ * still arrive. Its transcript is not rendered — a refresh replays it from the
+ * store — but its *status* is tracked, because "working, needs approval, has an
+ * answer waiting" is exactly what the sidebar has to show for the user to work
+ * in one conversation while another carries on.
+ */
+function handleSessionEvent(sessionId, event) {
+  const data = event.data || {};
+  const open = sessionId === state.session?.id;
+
+  if (event.kind === "user_text" && data.source === "voice") {
+    noteActivity(sessionId, { working: true });
+  } else if (event.kind === "state") {
+    const name = data.state;
+    if (name === "thinking" || name === "tool") {
+      noteActivity(sessionId, { working: true, awaitingApproval: false });
+    } else if (name === "awaiting_approval") {
+      noteActivity(sessionId, { working: true, awaitingApproval: true });
+    } else if (name === "idle") {
+      noteActivity(sessionId, { working: false });
+    }
+  } else if (event.kind === "done" || event.kind === "error") {
+    noteActivity(sessionId, { working: false, awaitingApproval: false });
+  } else if (event.kind === "approval_request") {
+    noteActivity(sessionId, { working: true, awaitingApproval: true });
+  }
+
+  if (!open) {
+    // Only the badges change; the transcript is replayed when it is opened.
+    if (event.kind === "agent_text" || event.kind === "say") {
+      noteActivity(sessionId, { unread: true });
+    }
+    return;
+  }
+  handleEvent(event);
+}
+
+/** Update what a conversation is doing, and refresh its sidebar row. */
+function noteActivity(sessionId, patch) {
+  const current = state.sessionActivity.get(sessionId) || {
+    working: false,
+    awaitingApproval: false,
+    unread: false,
+  };
+  const next = { ...current, ...patch };
+  if (patch.working === true) next.unread = false;
+  if (
+    current.working === next.working &&
+    current.awaitingApproval === next.awaitingApproval &&
+    current.unread === next.unread
+  ) {
+    return;
+  }
+  state.sessionActivity.set(sessionId, next);
+  updateSessionRow(sessionId, next);
+}
+
+/**
+ * Patch one sidebar row rather than re-rendering the list.
+ *
+ * `renderSessions` rebuilds every row and re-attaches every handler; doing that
+ * for each event of a long turn was work with no visible benefit.
+ */
+function updateSessionRow(sessionId, activity) {
+  const button = el.sessionList.querySelector(`[data-session="${sessionId}"]`);
+  if (!button) return;
+  button.dataset.working = String(Boolean(activity.working));
+  button.dataset.approval = String(Boolean(activity.awaitingApproval));
+  button.dataset.unread = String(Boolean(activity.unread));
+  const badge = button.querySelector(".row__badge");
+  if (!badge) return;
+  badge.textContent = activity.awaitingApproval ? "needs you" : activity.unread ? "reply" : "";
+  badge.hidden = !activity.awaitingApproval && !activity.unread;
+}
+
 function handleEvent(event) {
+  // Nothing here may run for a conversation that is not on screen: every case
+  // below writes into the open transcript. `handleSessionEvent` decides.
+  if (!state.session) return;
   const data = event.data || {};
   switch (event.kind) {
     case "ready": {
@@ -1404,7 +1541,7 @@ function handleEvent(event) {
       // Also covers a call that was answered without the user: an auto-approved
       // retry, a remembered tool, or one the user just declined.
       clearApprovalFor(data.call_id);
-      const record = state.toolRows.get(data.call_id);
+      const record = view()?.toolRows.get(data.call_id);
       if (record) settleToolRow(record, data);
       const step = stepFor(assistantTurn(), data.step);
       if (step) {
@@ -1552,7 +1689,7 @@ function finishTimers(turn) {
       step.root.dataset.state = step.root.dataset.state === "running" ? "ok" : step.root.dataset.state;
     }
   }
-  for (const record of state.toolRows.values()) {
+  for (const record of (view()?.toolRows ?? new Map()).values()) {
     if (record.startedAt && !record.endedAt && record.row) {
       // A call whose result never arrived is not silently "ok": it is unknown,
       // and saying so is better than a green dot that means nothing.
@@ -1647,7 +1784,7 @@ function continueLastTurn() {
   turn.bubble.textContent = "Continue";
   state.currentTurn = null;
   state.lastUserText = nudge;
-  connection.sendCommand("text", { text: nudge });
+  activeConnection().sendCommand("text", { text: nudge });
   setAgentState("thinking");
   startTimers();
 }
@@ -1783,7 +1920,7 @@ const capture = new Capture({
     // seen the transcript, then tell the server to stop generating.
     if (playback.playing) {
       playback.stop();
-      connection.sendCommand("barge_in");
+      activeConnection().sendCommand("barge_in");
       setAgentState("listening");
     }
   },
@@ -1834,17 +1971,52 @@ const playback = new Playback({
   },
 });
 
-const connection = new Connection({
-  onEvent: handleEvent,
-  onAudio: (pcm) => playback.push(pcm),
-  onState: (connectionState) => {
-    if (connectionState === ConnectionState.OPEN) setConnection(connectionState, "Connected");
-    else if (connectionState === ConnectionState.CONNECTING)
-      setConnection(connectionState, "Connecting");
-    else setConnection(connectionState, "Disconnected");
-  },
-  onError: (message) => toast(message, "error"),
-});
+/**
+ * One socket per open conversation, not one socket for the app.
+ *
+ * A single socket was closed and reopened on every switch, so moving to another
+ * conversation stopped the one you left: it kept working on the server, but
+ * nothing was listening for its events, so its progress and its answer had no
+ * way back. Keeping a socket per conversation is what lets one chat carry on
+ * while you work in another — which the server has always supported; only the
+ * browser was holding it back.
+ *
+ * A conversation's socket is closed when the conversation goes away (archived or
+ * deleted), not when you look away from it.
+ */
+const connections = new Map();
+
+function connectionFor(sessionId) {
+  const existing = connections.get(sessionId);
+  if (existing) return existing;
+  const socket = new Connection({
+    onEvent: (event) => handleSessionEvent(sessionId, event),
+    onAudio: (pcm) => {
+      // Only the conversation on screen may speak: audio is played, not shown,
+      // and a background reply talking over the one being read would be worse
+      // than silent.
+      if (sessionId === state.session?.id) playback.push(pcm);
+    },
+    onState: (connectionState) => {
+      if (sessionId !== state.session?.id) return;
+      if (connectionState === ConnectionState.OPEN) setConnection(connectionState, "Connected");
+      else if (connectionState === ConnectionState.CONNECTING)
+        setConnection(connectionState, "Connecting");
+      else setConnection(connectionState, "Disconnected");
+    },
+    onError: (message) => {
+      if (sessionId === state.session?.id) toast(message, "error");
+    },
+  });
+  connections.set(sessionId, socket);
+  return socket;
+}
+
+/** The socket for the open conversation. Throws if there is none. */
+function activeConnection() {
+  if (!state.session) throw new Error("no conversation open");
+  return connectionFor(state.session.id);
+}
 
 async function toggleMic() {
   if (!state.session) {
@@ -1858,7 +2030,7 @@ async function toggleMic() {
       el.micButton.dataset.active = "false";
       el.micButton.setAttribute("aria-pressed", "false");
       renderMicLabel();
-      connection.sendCommand("mic", { open: false });
+      activeConnection().sendCommand("mic", { open: false });
       setAgentState("idle");
       el.captions.replaceChildren();
       return;
@@ -1887,7 +2059,7 @@ async function toggleMic() {
     el.micButton.dataset.active = "true";
     el.micButton.setAttribute("aria-pressed", "true");
     renderMicLabel();
-    connection.sendCommand("mic", { open: true });
+    activeConnection().sendCommand("mic", { open: true });
     setAgentState("listening");
     el.captions.replaceChildren();
     el.captions.append(node("span", "captions__hint", "Listening…"));
@@ -1971,12 +2143,11 @@ async function loadProjects() {
 
 async function selectProject(projectId) {
   const project = await api(`/api/projects/${projectId}`);
+  leaveSession();
   state.project = project;
   state.session = null;
   state.archive = [];
   state.showArchive = false;
-  state.turns.clear();
-  state.toolRows.clear();
   state.currentTurn = null;
   state.activity = [];
   el.turns.replaceChildren();
@@ -2059,13 +2230,12 @@ async function deleteProject(project) {
 
 /** Clear the view after the open project went away, then open another. */
 async function forgetOpenProject() {
+  leaveSession();
   state.project = null;
   state.session = null;
   state.sessions = [];
   state.archive = [];
   state.showArchive = false;
-  state.turns.clear();
-  state.toolRows.clear();
   state.currentTurn = null;
   state.activity = [];
   state.files = { path: ".", entries: [] };
@@ -2096,10 +2266,9 @@ async function refreshSessions() {
  * one so the user is never left staring at a transcript that no longer exists.
  */
 async function reopenAfterRemoval() {
+  leaveSession();
   state.session = null;
   el.turns.replaceChildren();
-  state.turns.clear();
-  state.toolRows.clear();
   state.currentTurn = null;
   state.activity = [];
   if (state.sessions.length) {
@@ -2113,6 +2282,8 @@ async function archiveSession(session) {
   try {
     await api(`/api/sessions/${session.id}/archive`, { method: "POST" });
     const wasOpen = state.session?.id === session.id;
+    closeConnection(session.id);
+    state.sessionActivity.delete(session.id);
     await refreshSessions();
     toast("Conversation archived. Your files are untouched.");
     if (wasOpen) await reopenAfterRemoval();
@@ -2142,6 +2313,8 @@ async function deleteSessionForever(session) {
   try {
     const wasOpen = state.session?.id === session.id;
     await api(`/api/sessions/${session.id}`, { method: "DELETE" });
+    closeConnection(session.id);
+    state.sessionActivity.delete(session.id);
     await refreshSessions();
     toast("Conversation deleted.");
     if (wasOpen) await reopenAfterRemoval();
@@ -2186,10 +2359,20 @@ let sessionRetry = 0;
 
 async function selectSession(sessionId) {
   const session = await api(`/api/sessions/${sessionId}`);
+  // The conversation may have changed while that request was in flight — a click
+  // is enough. Rendering the reply into whatever is open now would put one
+  // conversation's transcript in another's window.
+  if (state.session?.id === sessionId) {
+    // Re-selecting the same conversation: keep its rows and just reconnect.
+    state.session = session;
+    openConnection();
+    return;
+  }
+  leaveSession();
+  viewFor(sessionId);
   state.session = session;
   el.turns.replaceChildren();
-  state.turns.clear();
-  state.toolRows.clear();
+  resetView(sessionId);
   state.currentTurn = null;
   state.activity = [];
   state.todos = Array.isArray(session.todos) ? session.todos : [];
@@ -2353,10 +2536,51 @@ function replayToolCall(turn, call) {
   });
 }
 
+/**
+ * Make sure the open conversation has a socket, and keep the others open.
+ *
+ * Reconnecting is deliberate rather than reusing a live socket: the server
+ * rebinds an existing session to the new connection and restates its state, so
+ * anything that happened while this conversation was in the background — where
+ * its events were not being rendered — is reconciled from the store.
+ */
 function openConnection() {
   if (!state.project || !state.session) return;
-  connection.close();
-  connection.connect({ project_id: state.project.id, session_id: state.session.id });
+  const socket = connectionFor(state.session.id);
+  socket.close();
+  socket.connect({ project_id: state.project.id, session_id: state.session.id });
+}
+
+/**
+ * Stop the microphone belonging to the conversation being left.
+ *
+ * There is one microphone, and the policy is that it follows the conversation on
+ * screen — a chat you have navigated away from must not keep listening to the
+ * room, and its transcripts would land in a conversation nobody is reading. The
+ * conversation itself keeps working; only its ears close.
+ */
+function leaveSession() {
+  if (!state.session) return;
+  if (state.micOpen) {
+    try {
+      activeConnection().sendCommand("mic", { open: false });
+    } catch {
+      // No socket to tell; the server closes the stream with the session anyway.
+    }
+  }
+  capture.setMuted(true);
+  state.micOpen = false;
+  el.micButton.dataset.active = "false";
+  el.micButton.setAttribute("aria-pressed", "false");
+  renderMicLabel();
+}
+
+/** Drop a conversation's socket. Its conversation is gone, or being replaced. */
+function closeConnection(sessionId) {
+  const socket = connections.get(sessionId);
+  if (!socket) return;
+  socket.close();
+  connections.delete(sessionId);
 }
 
 async function sendMessage() {
@@ -2383,7 +2607,7 @@ async function sendMessage() {
     }
   }
 
-  connection.sendCommand("text", { text: message });
+  activeConnection().sendCommand("text", { text: message });
   el.composer.value = "";
   el.composer.style.height = "auto";
   clearAttachments();
@@ -2394,7 +2618,7 @@ function answerApproval(allowed, remember) {
   const pending = state.pendingApproval;
   clearApproval();
   if (!pending) return;
-  connection.sendCommand("approval", {
+  activeConnection().sendCommand("approval", {
     call_id: pending.call_id,
     allowed,
     remember,

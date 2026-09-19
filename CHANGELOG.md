@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Several conversations can work at once, in one project or across projects.**
+  The app held a single connection and closed it on every switch, so moving to
+  another conversation stopped the one you left: it carried on running on the
+  server with nothing listening for its events, and its progress and its answer had
+  no way back. Each open conversation now keeps its own connection, so a long job
+  in one can run while you read or work in another — the server has always allowed
+  this; only the browser was holding it back. A conversation that is working shows
+  it in the sidebar with a pulse, and marks itself **needs you** for an approval or
+  **reply** when an answer is waiting, so you can see what needs attention without
+  opening each one.
+- Conversations keep working when you switch project, not only when you switch
+  chat. Their transcripts are replayed from the store when you return, so nothing
+  that happened while you were away is lost.
+- The microphone follows the conversation on screen: there is one microphone, and a
+  chat you have navigated away from must not keep listening to the room. The
+  conversation itself is unaffected — only its ears close.
+
 ### Fixed
 
 - **Your words are no longer thrown away while the agent is speaking.** Echo

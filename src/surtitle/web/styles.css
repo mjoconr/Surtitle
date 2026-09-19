@@ -390,6 +390,52 @@ button, input, textarea, select {
 
 .row__icon { flex: none; opacity: 0.7; }
 
+/* ------------------------------------------------- conversations at work */
+/*
+ * A conversation that is working while you read another one has to say so, or
+ * the only way to find out is to keep opening it. The row carries its own state:
+ * a pulsing dot while it works, and a short badge when it wants you or has an
+ * answer waiting.
+ */
+.row__badge {
+  flex: none;
+  align-self: center;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 10px;
+  line-height: 15px;
+  white-space: nowrap;
+  color: var(--dsw-alias-label-secondary);
+  background: var(--dsw-alias-bg-module-platform);
+}
+
+.row[data-approval="true"] .row__badge {
+  color: var(--dsw-alias-state-warn-label);
+  background: var(--dsw-alias-state-warn-tertiary);
+}
+
+.row[data-unread="true"] .row__badge {
+  color: var(--dsw-alias-state-business-primary);
+  background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 12%, transparent);
+}
+
+/* The icon slot shows progress for a conversation you are not looking at. */
+.row[data-working="true"] .row__icon {
+  color: var(--dsw-alias-state-business-primary);
+  opacity: 1;
+  animation: row-working 1.4s ease-in-out infinite;
+}
+
+@keyframes row-working {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .row[data-working="true"] .row__icon { animation: none; }
+}
+
 /* ------------------------------------------------------------- controls */
 .button {
   display: inline-flex;

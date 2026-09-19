@@ -13,6 +13,7 @@ the wire contract the browser needs to group any of it.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -669,4 +670,72 @@ class TestReasoningStaysOutOfTheModelPrompt:
 
         assert store.search_conversations("4C-117"), (
             "ordinary transcript entries must stay searchable"
+        )
+
+
+@pytest.fixture(scope="module")
+def script() -> str:
+    """The browser bundle, as text. There is no browser here, so these assert on
+    the shape of the code — the same approach the other web tests take."""
+    web = Path(__file__).resolve().parent.parent / "src" / "surtitle" / "web"
+    return (web / "js" / "app.js").read_text(encoding="utf-8")
+
+
+class TestSeveralConversationsAtOnce:
+    """One conversation must keep working while you read another.
+
+    The server has always allowed it — two sockets on two conversations both
+    answer — but the browser held a single socket and closed it on every switch.
+    The conversation you left carried on running with nothing listening for its
+    events, so its progress and its answer had no way back and the app looked
+    like it could only do one thing at a time.
+    """
+
+    def test_a_socket_is_kept_per_conversation(self, script):
+        assert "const connections = new Map();" in script, (
+            "one socket for the app is what stopped a background chat"
+        )
+        assert "function connectionFor(sessionId)" in script
+
+    def test_opening_a_conversation_does_not_close_the_others(self, script):
+        block = script[script.index("function openConnection()") :]
+        block = block[: block.index("\n}\n")]
+        assert "socket.close();" in block, "the open conversation reconnects"
+        assert "socket.connect(" in block
+        assert "connections.delete" not in block, (
+            "reconnecting must not sweep away the other conversations' sockets"
+        )
+
+    def test_events_of_another_conversation_are_not_rendered(self, script):
+        assert "function handleSessionEvent(sessionId, event)" in script
+        block = script[script.index("function handleSessionEvent(") :]
+        block = block[: block.index("\n}\n")]
+        assert "if (!open) {" in block, (
+            "a background conversation's events must not be written into the transcript on screen"
+        )
+
+    def test_a_conversation_that_wants_you_is_marked(self, script):
+        assert "awaitingApproval: true" in script
+        assert "needs you" in script, "a prompt in another conversation must be visible"
+        assert "row__badge" in script
+
+    def test_a_project_switch_leaves_running_conversations_alone(self, script):
+        block = script[script.index("async function selectProject(") :]
+        block = block[: block.index("\n}\n")]
+        assert "leaveSession()" in block, "the microphone follows the conversation on screen"
+        assert "connections.clear" not in block and "closeConnection" not in block, (
+            "switching project must not stop work in the project being left"
+        )
+
+    def test_the_microphone_is_handed_over_rather_than_shared(self, script):
+        block = script[script.index("function leaveSession()") :]
+        block = block[: block.index("\n}\n")]
+        assert 'sendCommand("mic", { open: false })' in block
+        assert "capture.setMuted(true)" in block
+
+    def test_selecting_the_open_conversation_again_is_cheap(self, script):
+        block = script[script.index("async function selectSession(") :]
+        block = block[: block.index("\n}\n")]
+        assert "if (state.session?.id === sessionId)" in block, (
+            "re-selecting the open conversation must not replay and rebuild it"
         )
