@@ -178,6 +178,11 @@ class Session:
     # refused: a turn can run for minutes, and "stop it first or wait" turns the
     # user's next thought into an error message.
     _queue: list[tuple[str, str]] = field(default_factory=list)
+    # Set while a spoken utterance is replacing the running turn. The exit of a
+    # cancelled turn drains `_queue`, and that drain would start the request
+    # waiting behind the turn that is already being replaced — see
+    # `_start_spoken_turn`.
+    _replacing_turn: bool = False
     # Per-turn accounting, reported when the turn ends. The run-wide totals live
     # in `RunStats`; these are what the turn-end record and its log line report,
     # because "how big did this turn get, and what did it say" is the question a
@@ -542,8 +547,13 @@ class Session:
             log.info("queued a %s request behind the running turn: %r", source, text[:80])
             await self.emit(EventKind.USER_TEXT, text=text, source=source, queued=True)
             return
-        await self.emit(EventKind.USER_TEXT, text=text, source=source)
+        # Claim the turn before the first await. The check above and this
+        # assignment used to sit either side of `emit`: two requests arriving in
+        # one tick — one draining from the queue, one fresh — could both find no
+        # turn running and both start one, so the session ran two turns and held
+        # a handle on only the later of them.
         self._turn = asyncio.create_task(self._run_turn(text), name="agent-turn")
+        await self.emit(EventKind.USER_TEXT, text=text, source=source)
 
     def _drain_queue(self) -> None:
         """Start the next held request, once the turn that held it has finished.
@@ -551,8 +561,12 @@ class Session:
         Called from the end of `_run_turn`, including the paths where that turn
         was stopped or failed: the queued request is the user's most recent
         intent, and a turn ending for any reason is the moment to honour it.
+
+        Not while a spoken utterance is replacing the running turn, though: that
+        utterance is installed in its place, and starting the held request here as
+        well would run the two together. See `_start_spoken_turn`.
         """
-        if self._closed or not self._queue:
+        if self._closed or not self._queue or self._replacing_turn:
             return
         current = asyncio.current_task()
         if self._turn is not None and not self._turn.done() and self._turn is not current:
@@ -653,14 +667,30 @@ class Session:
             await self._start_spoken_turn(utterance)
 
     async def _start_spoken_turn(self, utterance: str) -> None:
-        """Begin a turn from what was said aloud."""
+        """Begin a turn from what was said aloud.
+
+        Speaking over the agent replaces the running turn rather than waiting
+        behind it. The replacement is done by cancelling and then installing, and
+        the cancel is the part that has to be careful: a cancelled turn's exit
+        drains `_queue` and starts whatever was waiting behind it. Assigning this
+        utterance on top of that put two turns into one session — the request that
+        had been waiting, and this one, running together with the session holding a
+        handle only on the later of them. It is the real 2026-09-19 session: two
+        `turn ended` lines seven seconds apart, two answers written into one turn,
+        and their reasoning interleaved row by row.
+        """
         # A new spoken turn: barge in on anything still playing first.
         if self._is_speaking():
             await self.barge_in()
-        if self._turn is not None and not self._turn.done():
-            self._turn.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await self._turn
+        if self._turn_in_flight():
+            # Hold the drain for exactly the exit of the turn being cancelled. The
+            # request waiting behind it keeps its place and runs when this
+            # utterance is finished.
+            self._replacing_turn = True
+            try:
+                await self.cancel_turn()
+            finally:
+                self._replacing_turn = False
         log.info(
             "utterance from audio (%d frame(s), %.2fs): %r",
             self._frames_in,

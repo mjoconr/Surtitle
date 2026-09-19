@@ -753,6 +753,23 @@ def _answer_round(text: str = "<say>Done.</say>") -> list[StreamEvent]:
     ]
 
 
+async def _blocked_turn(session):
+    """Start a real turn that stays in flight, and wait until it is blocked.
+
+    ``block_first`` holds the model's first round open, so a test can act while a
+    turn is genuinely running rather than pretending that one is.
+    """
+    model = _ScriptedModel([_answer_round()], block_first=True)
+    session.deepseek = model
+    session.registry = ToolRegistry([t for t in default_tool_list() if t.name == "list_dir"])
+    await session.handle_text("a long job")
+    for _ in range(50):
+        if model.release is not None:
+            return model
+        await asyncio.sleep(0)
+    raise AssertionError("the first turn never reached the model")
+
+
 class TestTheTurnEndingIsRecorded:
     """A turn must write down how it ended rather than leave it to be inferred.
 
@@ -982,15 +999,7 @@ class TestStopAndPush:
 
     async def _running_turn(self, session):
         """Start a real turn that stays in flight, and wait until it is blocked."""
-        model = _ScriptedModel([_answer_round()], block_first=True)
-        session.deepseek = model
-        session.registry = ToolRegistry([t for t in default_tool_list() if t.name == "list_dir"])
-        await session.handle_text("a long job")
-        for _ in range(50):
-            if model.release is not None:
-                return model
-            await asyncio.sleep(0)
-        raise AssertionError("the first turn never reached the model")
+        return await _blocked_turn(session)
 
     async def test_push_stops_the_turn_and_takes_its_place(self, wired):
         from surtitle.core.events import EventKind
@@ -1048,6 +1057,63 @@ class TestStopAndPush:
         assert session._turn is None or session._turn.done()
         kinds = [e.kind for e in self._drain(session)]
         assert EventKind.STATE in kinds, "the browser is told the turn ended"
+
+
+class TestASpokenTurnReplacesTheRunningOne:
+    """Speaking over the agent must replace the turn, not duplicate it.
+
+    Reported from the real 2026-09-19 session: two `turn ended` lines seven seconds
+    apart, two assistant messages written into one turn, and their reasoning
+    interleaved row by row. A request was waiting behind the running turn, the user
+    spoke, and `_start_spoken_turn` cancelled the turn — whose exit drains the
+    queue and starts the waiting request — and then assigned its own turn on top of
+    it. Two turns ran; the session held a handle on only the later one, so Stop
+    could not reach the other.
+    """
+
+    async def test_two_turns_never_run_at_once(self, wired, monkeypatch):
+        session, _tts, _stt = wired
+        running = 0
+        high_water = 0
+        original = type(session)._run_turn
+
+        async def counted(self, text: str) -> None:
+            nonlocal running, high_water
+            running += 1
+            high_water = max(high_water, running)
+            try:
+                await original(self, text)
+            finally:
+                running -= 1
+
+        monkeypatch.setattr(type(session), "_run_turn", counted)
+
+        model = await _blocked_turn(session)
+        await session.handle_text("waiting behind", interrupt=False)
+        assert session._queue == [("waiting behind", "typed")]
+
+        await session._start_spoken_turn("what I just said")
+
+        # Let every turn that is going to run, run to its end. The queue emptying
+        # is not enough on its own: a turn is popped off it and *then* scheduled,
+        # so the session's own handle has to be finished too.
+        for _ in range(500):
+            if (
+                running == 0
+                and not session._queue
+                and (session._turn is None or session._turn.done())
+            ):
+                break
+            await asyncio.sleep(0)
+
+        assert high_water == 1, (
+            f"{high_water} turns ran at once; the session can only track one of them"
+        )
+        assert session._queue == [], "the request waiting behind it must still run"
+        answered = [prompt[-1]["content"] for prompt in model.prompts]
+        assert answered == ["a long job", "what I just said", "waiting behind"], (
+            f"the utterance replaces the running turn and the held request follows: {answered}"
+        )
 
 
 class TestAudioForAClosedMicrophone:
