@@ -45,9 +45,37 @@ DEFAULT_READ_LINES = 400
 MAX_READ_LINES = 2000
 DEFAULT_LIST_LIMIT = 200
 MAX_SEARCH_RESULTS = 60
-# Cap on any string handed back to the model, in characters. Roughly 4 chars per
-# token, so this is about 6k tokens per tool result.
-MAX_OUTPUT_CHARS = 24_000
+# How much of one tool result the model is given, in characters.
+#
+# This is the in-turn budget, and it is the one that matters: every result of the
+# current turn stays in the request until the turn ends, so a long turn with a
+# 24,000-character cap could add a quarter of a million characters to a single
+# request — which is where a real 69k-token prompt came from against a transcript
+# of only 16k. Six thousand characters is roughly 2k tokens.
+MAX_OUTPUT_CHARS = 6_000
+# What survives a pruned result: the opening and the end.
+#
+# The middle is the safe part to lose. A file read opens with its path and line
+# numbers; a command's conclusion — the error, the count, the last rows — is at
+# the bottom. Cutting the tail instead, as this used to, threw away exactly the
+# part a command was run for.
+OUTPUT_HEAD_CHARS = 3_500
+OUTPUT_TAIL_CHARS = 2_000
+_PRUNE_MARKER = "\n... [{removed} characters elided] ...\n"
+
+
+def _elide_middle(text: str, *, head: int, tail: int) -> str:
+    """Keep the opening and the end of ``text``, and say what was dropped.
+
+    The size of the cut is written into the text, not merely flagged: a model that
+    can see "48,000 characters elided" asks for a narrower read, and one that sees
+    a silent cut believes it has read the whole file.
+    """
+    if len(text) <= head + tail:
+        return text
+    removed = len(text) - head - tail
+    return f"{text[:head]}{_PRUNE_MARKER.format(removed=removed)}{text[-tail:]}"
+
 
 # Directories that are never interesting and can be enormous.
 _SKIP_DIRS = {
@@ -99,7 +127,13 @@ class ToolResult:
     truncated: bool = False
 
     def to_model_payload(self) -> str:
-        """Serialise for the model, keeping the payload inside the budget."""
+        """Serialise for the model, keeping the payload inside the budget.
+
+        A result over the budget is pruned head-and-tail rather than cut short,
+        and the marker says how much went. That matters twice over: the model
+        keeps the part it acts on, and it can see that it is looking at an excerpt
+        — so it narrows the read instead of concluding the file ended there.
+        """
         if not self.ok:
             payload: dict[str, Any] = {"ok": False, "error": self.error or "unknown error"}
             if self.data:
@@ -113,18 +147,22 @@ class ToolResult:
         if len(text) <= MAX_OUTPUT_CHARS:
             return text
 
-        # Trim any long string field until we fit, so the model still gets the
-        # structure (paths, counts, line numbers) rather than a hard cut.
+        # Prune the longest string fields first, so the structure — paths, counts,
+        # line numbers — survives rather than being squeezed out by one field.
         payload["truncated"] = True
-        longest = max(
-            (k for k, v in payload.items() if isinstance(v, str)),
-            key=lambda k: len(payload[k]),
-            default=None,
-        )
-        if longest is not None:
-            budget = max(0, len(payload[longest]) - (len(text) - MAX_OUTPUT_CHARS) - 200)
-            payload[longest] = payload[longest][:budget] + "\n... [truncated]"
-        text = json.dumps(payload, ensure_ascii=False, default=str)
+        for key in sorted(
+            (name for name, value in payload.items() if isinstance(value, str)),
+            key=lambda name: len(payload[name]),
+            reverse=True,
+        ):
+            value = payload[key]
+            if len(value) <= OUTPUT_HEAD_CHARS + OUTPUT_TAIL_CHARS:
+                continue
+            payload[key] = _elide_middle(value, head=OUTPUT_HEAD_CHARS, tail=OUTPUT_TAIL_CHARS)
+            text = json.dumps(payload, ensure_ascii=False, default=str)
+            if len(text) <= MAX_OUTPUT_CHARS:
+                return text
+
         if len(text) > MAX_OUTPUT_CHARS:  # pragma: no cover - pathological case
             text = text[:MAX_OUTPUT_CHARS] + '"}'
         return text

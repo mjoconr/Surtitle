@@ -358,6 +358,23 @@ class TestEditFile:
 
 
 class TestModelPayloadBudget:
+    def test_a_pruned_result_keeps_its_opening_and_its_end(self, ctx):
+        """The middle is the safe part to lose; a command's conclusion is at the end.
+
+        Cutting the tail, as this used to, threw away exactly the part a command
+        was run for. And the cut is stated, because a silent truncation reads as a
+        complete file.
+        """
+        from surtitle.tools.fs_tools import MAX_OUTPUT_CHARS, ToolResult
+
+        result = ToolResult(ok=True, data={"content": "START" + "x" * 50_000 + "END"})
+        payload = result.to_model_payload()
+
+        assert "START" in payload, "the opening says what this is"
+        assert "END" in payload, "the conclusion survives"
+        assert "characters elided" in payload, "the model must know it is reading an excerpt"
+        assert len(payload) <= MAX_OUTPUT_CHARS + 100
+
     def test_large_read_is_truncated_to_the_budget(self, ctx):
         (ctx.root / "huge.txt").write_text("x" * 200_000, encoding="utf-8")
         result = read_file(ctx, "huge.txt", max_lines=2000)
