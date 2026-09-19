@@ -9,8 +9,11 @@ understanding:
 **Turn detection is acoustic.** Deepgram's Flux decides an endpoint from *what
 was said*, which is why it does not cut you off mid-thought. A streaming
 zipformer offers no such judgement, so a turn ends when you have been silent for
-long enough — with one mitigation, :func:`looks_unfinished`, which extends the
-silence when the transcript is plainly not a complete thought. It is a
+long enough. Two things soften that: :func:`looks_unfinished` and
+:func:`extension_ms` grade the wait by what the transcript looks like, giving an
+apparently unfinished thought more patience than a finished one; and the ceiling
+in :data:`~surtitle.config.Settings.local_max_utterance_ms` is a backstop against
+someone who never pauses, never a way to end a turn by clock. It remains a
 heuristic, not understanding, and ``docs/VOICE.md`` says so.
 
 **Partial results are cumulative.** The recogniser re-emits the whole utterance
@@ -55,6 +58,11 @@ _MAX_BATCHES = 64
 # recogniser itself does not report "no speech", and a level check is enough to
 # decide whether the silence clock advances.
 _RMS_FLOOR = 0.004
+# How much silence the backstop needs before it may close a turn. One full batch,
+# so it means "the speaker actually paused" rather than a gap between words: the
+# backstop exists to stop someone who never pauses, and must never be the thing
+# that cuts off someone who is still talking.
+_CEILING_PAUSE_MS = 300.0
 
 # Words that mean the sentence has not finished, so the turn stays open a little
 # longer. Deliberately short: an over-eager list makes the agent feel
@@ -129,15 +137,29 @@ def looks_unfinished(text: str) -> bool:
 def extension_ms(settings: Settings, text: str) -> int:
     """How long to be silent before ending a turn, given what was heard.
 
-    The signals are graded rather than binary, because this recogniser does not
-    punctuate: *most* finished utterances arrive with no terminal punctuation, so
-    "unfinished" alone is weak evidence and is not worth a full extension. A
-    trailing function word — "and", "the", "because" — is much stronger evidence
-    that more is coming, and earns one.
+    Turn-taking on a local model is a guess, because the recogniser emits no
+    punctuation: "the feeding conveyor is" and "the feeding conveyor is loud" are
+    the same kind of thing to it. So the guess is graded, and it leans the way the
+    cheaper mistake lies — a moment of extra patience costs nothing, cutting an
+    explanation off mid-thought costs the whole answer.
+
+    * A trailing function word ("and", "the", "because") is strong evidence that
+      more is coming, and earns the full extension.
+    * Otherwise, if the transcript cannot be *shown* to be a finished thought —
+      which, with a model that emits no punctuation, is nearly all of them — the
+      speaker gets the benefit of the doubt and part of the extension. Treating
+      "cannot prove it finished" as "finished" is what made the agent start work
+      on half an explanation.
+    * Terminal punctuation, when the model does emit it, is the one positive sign
+      that the thought closed, and gets the plain silence.
     """
+    base = settings.local_eot_silence_ms
+    extended = max(base, settings.local_eot_extend_ms)
     if _is_trailing_cue(text):
-        return max(settings.local_eot_silence_ms, settings.local_eot_extend_ms)
-    return settings.local_eot_silence_ms
+        return extended
+    if looks_unfinished(text):
+        return base + (extended - base) // 2
+    return base
 
 
 def _is_trailing_cue(text: str) -> bool:
@@ -434,8 +456,21 @@ class LocalSpeechToText:
                 await self._on_transcript(TranscriptEvent(text=text, final=False, confidence=0.0))
 
         threshold = extension_ms(self.settings, text)
-        ceiling = self.settings.local_max_utterance_ms
-        ended = self._silence_ms >= threshold or self._utterance_ms >= ceiling
+        # The ceiling is a backstop, not a turn rule: a turn ends when the thought
+        # sounds finished, and a clock cannot know that. It may only close a turn
+        # once the speaker has actually paused, so a long explanation is never cut
+        # off mid-word -- which is exactly what happened when this fired on the
+        # clock alone at 20.16 s, part-way through a sentence.
+        backstop = self._utterance_ms >= self.settings.local_max_utterance_ms
+        paused = self._silence_ms >= _CEILING_PAUSE_MS
+        if backstop and paused:
+            log.warning(
+                "turn closed by the backstop after %.1fs of continuous speech while "
+                "still unfinished; raise SURTITLE_LOCAL_MAX_UTTERANCE_MS if the "
+                "speaker needs longer",
+                self._utterance_ms / 1000.0,
+            )
+        ended = self._silence_ms >= threshold or (backstop and paused)
         if not ended and not endpoint:
             return
 

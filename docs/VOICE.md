@@ -56,15 +56,22 @@ model produced "MADE" for "Read". Proper nouns and domain jargon are exactly wha
 ## Local turn detection, and why it is weaker
 
 Flux decides the end of a turn from *what was said*. A streaming zipformer offers
-no such judgement, so `voice/local_stt.py` uses a timer with one mitigation:
+no such judgement, so `voice/local_stt.py` grades a timer by what the transcript
+looks like:
 
-1. **Trailing silence** — `SURTITLE_LOCAL_EOT_SILENCE_MS` (default 800 ms).
-2. **A completion heuristic** — if the transcript ends in a function word ("and",
-   "but", "the", "because"), the window extends to
-   `SURTITLE_LOCAL_EOT_EXTEND_MS` (default 1200 ms). Those words almost never
-   end a sentence, so waiting longer is nearly free.
-3. **A ceiling** — `SURTITLE_LOCAL_MAX_UTTERANCE_MS` (default 20 s), so a
-   monologue still becomes a turn.
+1. **Trailing silence** — `SURTITLE_LOCAL_EOT_SILENCE_MS` (default 800 ms). The
+   floor: a transcript that reads as complete still waits this long.
+2. **A completion heuristic** — the transcript tells the timer how much benefit of
+   the doubt to give. A trailing function word ("and", "but", "the", "because")
+   earns the full `SURTITLE_LOCAL_EOT_EXTEND_MS` (default 1200 ms); anything else
+   that cannot be *shown* to be finished — which, from a model that emits no
+   punctuation, is nearly everything — earns part of it. Terminal punctuation is
+   the only positive sign a thought closed.
+3. **A backstop, not a turn rule** — `SURTITLE_LOCAL_MAX_UTTERANCE_MS` (default
+   60 s). A turn ends when the thought sounds finished, and a clock cannot know
+   that, so this only bounds a speaker who never pauses: it fires on the first real
+   pause *after* that much continuous speech, and never while audio is still
+   arriving. At 20 s it used to close a turn on the clock alone, mid-word.
 
 The asymmetry is deliberate: a false positive costs a slightly longer pause before
 the agent answers; a false negative cuts you off mid-sentence. So the heuristic

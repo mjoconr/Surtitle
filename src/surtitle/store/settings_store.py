@@ -258,6 +258,17 @@ SETTINGS_FIELDS: tuple[_Field, ...] = (
         section="voice",
     ),
     _Field(
+        "local_max_utterance_ms",
+        int,
+        "Longest single spoken turn (ms)",
+        "A backstop, not a turn rule: a turn ends when you stop talking. This only "
+        "stops someone who never pauses from holding one turn open, and it fires on "
+        "the first pause after this much continuous speech — never mid-sentence.",
+        minimum=5000,
+        maximum=600000,
+        section="voice",
+    ),
+    _Field(
         "tts_speed",
         float,
         "Speaking rate",

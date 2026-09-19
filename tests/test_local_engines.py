@@ -189,8 +189,32 @@ class TestTurnPolicy:
 
         settings = make_settings(tmp_path)
         assert extension_ms(settings, "read the file and") == settings.local_eot_extend_ms
-        assert extension_ms(settings, "what is the revenue") == settings.local_eot_silence_ms
         assert extension_ms(settings, "done.") == settings.local_eot_silence_ms
+
+    def test_an_unfinished_thought_earns_part_of_the_extension(self, tmp_path):
+        """Text that cannot be shown to be complete gets the benefit of the doubt.
+
+        The recogniser emits no punctuation, so "what is the revenue" and a
+        half-finished question are indistinguishable. Treating that as a finished
+        thought is what let the agent start work on half an explanation; the
+        cheaper mistake is a moment of extra patience.
+        """
+        from surtitle.voice.local_stt import extension_ms
+
+        settings = make_settings(tmp_path)
+        base = settings.local_eot_silence_ms
+        extended = settings.local_eot_extend_ms
+
+        unfinished = extension_ms(settings, "what is the revenue")
+        assert base < unfinished < extended, (
+            f"an unfinished thought waited {unfinished}ms, which is not between the "
+            f"plain silence ({base}) and the full extension ({extended})"
+        )
+        assert extension_ms(settings, "the feeding conveyor is") == extended
+
+    # ---------------------------------------------------------------------------
+    # Local STT
+    # ---------------------------------------------------------------------------
 
     def test_extension_is_never_shorter_than_the_base_silence(self, tmp_path):
         from surtitle.voice.local_stt import extension_ms
@@ -295,6 +319,54 @@ class TestLocalStt:
         assert len(ends) == 1, "a single utterance must produce exactly one turn boundary"
         assert FakeRecognizer.next_instance.resets == 1, (
             "the stream must be reset for the next utterance"
+        )
+
+    async def test_a_long_explanation_is_not_ended_by_the_clock(self, tmp_path, monkeypatch):
+        """A turn ends when the thought does, not when a timer expires.
+
+        Observed: an explanation was cut off mid-word at exactly 20.16 s because the
+        ceiling ended the turn while the speaker was still talking. The ceiling is a
+        backstop against someone who never pauses, so it must never fire while audio
+        is still arriving.
+        """
+        FakeRecognizer.script = ["i want to investigate the feeding conveyor and"] * 400
+        engine, events = self._engine(tmp_path, monkeypatch)
+        engine.settings.local_max_utterance_ms = 1000
+        await engine.start()
+        try:
+            await asyncio.sleep(0.05)
+            # Continuous speech, far past the backstop, with no pause anywhere.
+            for _ in range(60):
+                engine.push_audio(b"\x00\x01" * 512)
+                await asyncio.sleep(0.005)
+        finally:
+            await engine.stop()
+
+        assert [e for e in events if e.is_end_of_turn] == [], (
+            "the clock ended the turn while the speaker was still talking"
+        )
+
+    async def test_the_backstop_ends_the_turn_at_the_first_real_pause(self, tmp_path, monkeypatch):
+        """It must still bound a speaker (or a noisy room) that never falls silent."""
+        FakeRecognizer.script = ["keep going now"] * 400
+        engine, events = self._engine(tmp_path, monkeypatch)
+        engine.settings.local_max_utterance_ms = 1000
+        await engine.start()
+        try:
+            await asyncio.sleep(0.05)
+            for _ in range(40):
+                engine.push_audio(b"\x00\x01" * 512)
+                await asyncio.sleep(0.005)
+            # A single quiet batch: one real pause, far short of the wait the
+            # unfinished-transcript rule would otherwise apply.
+            for _ in range(10):
+                engine.push_audio(b"\x00\x00" * 512)
+                await asyncio.sleep(0.02)
+        finally:
+            await engine.stop()
+
+        assert [e for e in events if e.is_end_of_turn], (
+            "a speaker who never pauses must still become a turn once they do"
         )
 
     async def test_suppression_drops_transcripts_while_the_agent_speaks(

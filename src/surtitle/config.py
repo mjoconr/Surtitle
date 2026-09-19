@@ -180,12 +180,17 @@ class Settings(BaseSettings):
     local_stt_int8: bool = Field(default=True, alias="SURTITLE_LOCAL_STT_INT8")
 
     # Turn detection. The local recogniser has no contextual end-of-turn model,
-    # so a turn ends on trailing silence — and, when the transcript looks
+    # so a turn ends on trailing silence — and, when the transcript reads as
     # unfinished, on a longer silence instead. See docs/VOICE.md.
     local_eot_silence_ms: int = Field(default=800, alias="SURTITLE_LOCAL_EOT_SILENCE_MS")
     local_eot_extend_ms: int = Field(default=1200, alias="SURTITLE_LOCAL_EOT_EXTEND_MS")
-    # Hard ceiling: a monologue still has to become a turn at some point.
-    local_max_utterance_ms: int = Field(default=20000, alias="SURTITLE_LOCAL_MAX_UTTERANCE_MS")
+    # A backstop, not a turn rule: a turn ends when the thought sounds finished,
+    # and a clock cannot know that. This only stops a speaker who never pauses (or
+    # a noisy room, which never looks silent) from holding one turn open forever.
+    # It fires on the first real pause *after* this much continuous speech, never
+    # while audio is still arriving — at 20 s it used to close a turn mid-word,
+    # cutting an explanation off at exactly 20.16 s.
+    local_max_utterance_ms: int = Field(default=60000, alias="SURTITLE_LOCAL_MAX_UTTERANCE_MS")
     # Where model files live. Defaults under the data directory so uninstalling
     # is still "delete one tree".
     models_dir: Path | None = Field(default=None, alias="SURTITLE_MODELS_DIR")
