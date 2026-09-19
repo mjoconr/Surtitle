@@ -1716,3 +1716,88 @@ class TestTheWorkLogIsFoldedAway:
 
         recovery = function_source(script, "recoverMissingAnswer")
         assert "appendStoredAnswer(turn, last.content, last.spoken)" in recovery
+
+
+class TestTheRendererCannotHang:
+    """A line every branch declines must still be consumed.
+
+    This is not a hypothetical: the table branch is guarded on the line *after* it,
+    the paragraph loop excludes table rows, and a line starting with `|` that is not
+    followed by another one therefore consumed nothing and left the index where it
+    was. The loop appended an empty paragraph forever — a browser tab pinned at 100%
+    CPU with the page unresponsive, on the input a Markdown table produces while it
+    is still arriving. Rendered on every delta, so the first line of any table was
+    enough.
+    """
+
+    @staticmethod
+    def _run(script: str, *, timeout: float = 20.0) -> str:
+        node = shutil.which("node")
+        if node is None:
+            pytest.skip("node is not installed")
+        module = WEB / "js" / "markdown.js"
+        full = (
+            "import { pathToFileURL } from 'node:url';"
+            f"const m = await import(pathToFileURL({json.dumps(str(module))}).href);"
+            f"{script}"
+        )
+        try:
+            result = subprocess.run(
+                [node, "--input-type=module", "-e", full],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired:
+            pytest.fail("the renderer did not finish — it is looping", pytrace=False)
+        assert result.returncode == 0, result.stderr
+        return result.stdout
+
+    def render(self, markdown: str) -> str:
+        return self._run(f"process.stdout.write(m.markdownToHtml({json.dumps(markdown)}));")
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            "| a | b |",  # a row whose row above was never a header
+            "||",
+            "|",
+            "|---|",  # a separator with nothing over it
+            "| Outlet | Address |\n",  # a header line still arriving
+            "text\n| a | b |",  # a table row as the last line
+            "###",
+            ">",
+            "---",
+            "- ",
+            "```",
+        ],
+    )
+    def test_every_lone_construct_terminates(self, line):
+        html = self.render(line)
+
+        assert html, "it has to produce something as well as finish"
+
+    def test_a_lone_table_row_is_shown_as_text(self):
+        """Degrading to text is the right failure; a stray pipe is not a hang."""
+        html = self.render("| a | b |")
+
+        assert "| a | b |" in html
+        assert "<table" not in html, "one row is not a table"
+
+    def test_no_prefix_of_a_streaming_table_hangs(self):
+        """How it was actually hit: the display channel arrives in deltas and the
+        block is re-rendered from everything so far, so every prefix of a table is
+        rendered at some point — including the ones that are a header line and
+        nothing else."""
+        table = "| Outlet | Address |\n|---|---|\n| Lagana | in town |"
+
+        output = self._run(
+            f"const text = {json.dumps(table)};"
+            "let count = 0;"
+            "for (let n = 0; n <= text.length; n += 1) { m.markdownToHtml(text.slice(0, n)); count += 1; }"
+            "process.stdout.write(count + '|' + m.markdownToHtml(text));"
+        )
+
+        count, _, final = output.partition("|")
+        assert int(count) == len(table) + 1
+        assert "<table" in final and "<td>Lagana</td>" in final, "the finished table renders"

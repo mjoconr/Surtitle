@@ -54,6 +54,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The page no longer locks up when a Markdown table arrives.** The display channel
+  is re-rendered on every streaming delta, and the renderer could not handle a line
+  beginning with `|` that was not followed by another one — which is exactly what a
+  table's first line is while it is still arriving. That line matched no branch, and
+  the paragraph loop skips table rows, so the index never moved: the loop appended an
+  empty paragraph forever and pinned the tab at 100% CPU with the page unresponsive.
+  It was found by driving a turn on a scratch project rather than by reading the
+  code, and it took a two-file project with eight tool calls to trigger. Every branch
+  now has to consume at least one line, so a construct the renderer does not know
+  degrades to text instead of to a loop. The same turn that froze the page now
+  renders its table with one long task of 229ms — the initial page build — and no
+  stall after it.
+
 - **The turn's tool log is folded away instead of dumped under the answer.** The
   server appends a listing of the turn's tool calls to the message it stores, because
   that listing is how the *model* remembers what it already did. It is not part of

@@ -130,6 +130,7 @@ export function markdownToHtml(text) {
 
   while (i < lines.length) {
     const line = lines[i];
+    const startedAt = i;
 
     if (!line.trim()) {
       i += 1;
@@ -224,7 +225,26 @@ export function markdownToHtml(text) {
       paragraph.push(lines[i]);
       i += 1;
     }
+    if (!paragraph.length) {
+      // Every branch above declined this line and the paragraph loop will not take
+      // it either, which is what a table row on its own is: a row whose row above
+      // was never a header, or one that has simply not finished arriving. Take it as
+      // text. Leaving `i` where it was spins forever, and a renderer that locks the
+      // page is worse than one that shows a stray pipe.
+      paragraph.push(line);
+      i += 1;
+    }
     out.push(`<p class="md__p">${inline(paragraph.join("\n")).replace(/\n/g, "<br />")}</p>`);
+
+    // The guarantee, for every branch anybody adds later: each pass over these
+    // lines consumes at least one of them. A construct this renderer does not know
+    // must degrade to text, never to a loop — the failure it caused was a browser
+    // tab pinned at 100% with the page unresponsive, on no more input than a table
+    // beginning to stream.
+    if (i <= startedAt) {
+      out.push(`<p class="md__p">${escapeText(line)}</p>`);
+      i = startedAt + 1;
+    }
   }
 
   return out.join("");

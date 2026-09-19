@@ -181,9 +181,11 @@ SETTINGS_FIELDS: tuple[_Field, ...] = (
         "search_provider",
         str,
         "Search provider",
-        "'automatic' uses Tavily when a key is set and the keyless DuckDuckGo "
-        "search when not. DuckDuckGo needs nothing configured and is rate-limited; "
-        "Tavily needs a key under API keys and is not.",
+        "'automatic' fetches the results here when there is no key, and uses Tavily "
+        "when there is one. Fetching them here needs nothing configured and a third "
+        "party never sees the query — it is this application reading a search page, "
+        "which is why it is rate-limited. Tavily is an API: a key under API keys, no "
+        "rate limit, and the query goes to them.",
         choices=("automatic", "duckduckgo", "tavily"),
         section="search",
     ),
