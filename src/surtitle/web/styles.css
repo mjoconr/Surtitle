@@ -936,56 +936,108 @@ button, input, textarea, select {
   font: var(--dsw-font-xxs-12);
 }
 
-.actcard__index { font-weight: 600; }
-
-.actcard__time {
-  font-variant-numeric: tabular-nums;
-  color: var(--dsw-alias-label-caption);
-}
-
-.actcard__think {
+/* One step's reasoning, whole. Tall rather than capped: this tab exists to read
+ * the reasoning, and a box that shows eight lines of a two-thousand-character
+ * paragraph is the panel it replaced.
+ */
+.thinkread {
   display: flex;
-  gap: 6px;
+  flex-direction: column;
+  min-height: 0;
+  margin-bottom: 10px;
+  border: 0.5px solid var(--dsw-alias-border-l1);
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--dsw-alias-markdown-code-block);
+}
+
+.thinkread__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   padding: 6px 10px;
-  border-left: 2px solid var(--dsw-alias-border-l3);
-}
-
-.actcard__thinkTitle {
-  flex: none;
-  color: var(--dsw-alias-label-tertiary);
-  font: var(--dsw-font-xxs-12);
-  font-weight: 600;
-}
-
-.actcard__thinkText {
-  min-width: 0;
+  background: var(--dsw-alias-bg-module-platform);
   color: var(--dsw-alias-label-secondary);
   font: var(--dsw-font-xxs-12);
-  overflow: hidden;
-  text-overflow: ellipsis;
+}
+
+.thinkread__title { font-weight: 600; }
+
+.thinkread__where,
+.thinkread__time {
+  color: var(--dsw-alias-label-caption);
+  font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 
-/* The step being worked on shows its reasoning as it grows.
- *
- * This is the one thing the panel has that the transcript keeps folded away, and
- * a one-line summary of it is not something anyone can watch. Capped, because a
- * step can think for ten thousand characters and the tools below it still matter.
- */
-.actcard__thinkLive {
-  margin-top: 2px;
-  max-height: 220px;
+/* The reasoning itself, at reading size rather than caption size: this is the one
+ * place it is meant to be read rather than glanced at. */
+.thinkread__text {
+  max-height: 52vh;
   overflow: auto;
-  color: var(--dsw-alias-label-secondary);
-  font: var(--dsw-font-xxs-12);
-  line-height: 17px;
+  padding: 10px 12px;
+  color: var(--dsw-alias-label-primary);
+  font: var(--dsw-font-xs-13);
+  line-height: 19px;
   white-space: pre-wrap;
   word-break: break-word;
 }
 
-/* Marked so the running step is findable in a long column. */
-.actcard__head[data-state="current"] .actcard__index {
+/* While a step is being written the text is still arriving, and the border says
+ * so without a spinner over the words. */
+.thinkread__text[data-state="live"] {
+  border-left: 2px solid var(--dsw-alias-state-business-primary);
+}
+
+.thinkread__jump {
+  margin-left: auto;
+  border: 0;
+  background: transparent;
+  color: var(--dsw-alias-label-tertiary);
+  font: var(--dsw-font-xxs-12);
+  cursor: pointer;
+  padding: 0;
+  white-space: nowrap;
+}
+
+.thinkread__jump:hover { color: var(--dsw-alias-label-primary); }
+
+/* One chip per reasoning step, oldest left. A long turn has fifty of them, so the
+ * row scrolls sideways instead of wrapping into a block of numbers that takes the
+ * top half of the panel.
+ */
+.thinkpick {
+  display: flex;
+  gap: 2px;
+  overflow-x: auto;
+  padding: 5px 8px;
+  border-top: 0.5px solid var(--dsw-alias-border-l1);
+  background: var(--dsw-alias-bg-module-platform);
+  scrollbar-width: thin;
+}
+
+.thinkpick__item {
+  flex: none;
+  min-width: 24px;
+  padding: 1px 6px;
+  border: 0.5px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--dsw-alias-label-tertiary);
+  font: var(--dsw-font-xxs-12);
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+
+.thinkpick__item:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+
+.thinkpick__item[aria-pressed="true"] {
+  border-color: var(--dsw-alias-state-business-primary);
   color: var(--dsw-alias-state-business-primary);
+  font-weight: 600;
 }
 
 /* The project tree, folded away.

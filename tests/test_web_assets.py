@@ -14,6 +14,8 @@ reads as a hung agent and hid the real work.
 from __future__ import annotations
 
 import re
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -34,6 +36,21 @@ def settings(tmp_path):
         SURTITLE_HOME=str(home),
         voice_enabled=False,
     )
+
+
+def function_source(script: str, name: str) -> str:
+    """One shipped function, as text.
+
+    Slicing to the first column-zero `}` is how these tests read a function, and
+    getting the slice wrong — or the string wrong — silently asserts nothing. The
+    name is checked, so a renamed function fails the test that cares about it rather
+    than quietly matching an empty block.
+    """
+    marker = f"function {name}("
+    assert marker in script, f"{marker} is not in the shipped script"
+    block = script[script.index(marker) :]
+    end = block.find("\n}\n")
+    return block if end == -1 else block[:end]
 
 
 @pytest.fixture(scope="module")
@@ -1345,33 +1362,147 @@ class TestThePanelAfterASecondLook:
         assert 'node("details", "browse")' in block, "the tree is one line until asked for"
         assert block.index("renderTouchedFiles();") < block.index('node("details", "browse")')
 
-    def test_the_process_reads_oldest_first_and_follows_the_newest(self, script):
-        """Newest-first looked live and behaved as though frozen.
+    def test_the_thinking_tab_follows_the_newest_step_until_you_pick_one(self, script):
+        """It is a reader with a history, not a column of cards.
 
-        Every new step arrived *above* whatever was on screen, so the panel seemed
-        not to change while the agent worked.
+        Following the newest by default is what makes it live; letting the reader
+        pin an older step is what makes it useful after the turn has moved on. The
+        pin has to be released when the next turn starts, or the panel stays on a
+        finished step while the agent works.
         """
-        block = script[script.index("function renderThinking(") :]
-        block = block[: block.index("\n}\n")]
+        block = function_source(script, "renderThinking")
 
-        assert ".sort((a, b) => a[0] - b[0])" in block, "oldest first, like the transcript"
-        assert "panelFollows" in block, "and follow the newest unless the reader scrolled back"
+        assert "panelFollows" in block, "follow the newest unless the reader scrolled back"
+        assert "state.thinkingStep" in block, "the reader's choice of step"
+        assert "pinned" in block, "and it wins over the newest while it is set"
 
-    def test_the_running_step_shows_its_reasoning_in_full(self, script):
-        """A one-line summary of the reasoning is not something anyone can watch."""
-        block = script[script.index("function renderThinking(") :]
-        block = block[: block.index("\n}\n")]
+        reset = function_source(script, "beginTurn")
+        assert "state.thinkingStep = null" in reset, "a new turn goes back to following the work"
 
-        assert "actcard__thinkLive" in block
-        assert "think.full" in block, "the streaming text, not the gist"
+    def test_the_history_is_the_whole_conversation_not_the_newest_turn(self, script):
+        """Measured on a real conversation: the turn with fifty-eight steps of
+        reasoning in it was turn 1, and the newest turn that reasoned had one. A
+        panel scoped to the newest turn cannot reach the reasoning worth reading,
+        which is the panel being useless with extra steps."""
+        block = function_source(script, "conversationReasoning")
+
+        assert "open.turns.values()" in block, "every turn, not the last one"
+        assert 'kind !== "assistant"' in block, "with the user's own turns skipped"
+
+    def test_a_selected_step_shows_its_whole_reasoning(self, script):
+        """The panel used to render a one-line gist per step, and after a reload it
+        had only the gist — so the tab showed less than the transcript did. The text
+        is read from the transcript's steps, which is where the whole of it is."""
+        reader = function_source(script, "renderThinking")
+        collect = function_source(script, "conversationReasoning")
+
+        assert "current.text" in reader, "the whole reasoning, not the gist"
+        assert "think.full" not in reader and "think.full" not in collect, (
+            "the activity log's copy is the gist"
+        )
+        assert "step.think.text" in collect, "read from the transcript's step"
+
+    def test_every_step_that_reasoned_can_be_picked(self, script):
+        picker = function_source(script, "thinkingPicker")
+
+        assert "thinkpick__item" in picker
+        assert "gistOf(thought.text)" in picker, "a step is identifiable before it is opened"
+        assert "picker.append(chip)" in picker, "each one goes in the row"
+        # Built and never appended is how the first version shipped: the header said
+        # "Step 1 of 1" and the row of numbers was not in the document at all.
+        assert "card.append(thinkingPicker(" in function_source(script, "renderThinking"), (
+            "and the row is put on screen"
+        )
+
+    def test_the_selected_chip_is_scrolled_into_view(self, script):
+        """The newest is the last chip, which is off the end of a sideways strip."""
+        assert "selectedChip.scrollIntoView" in function_source(script, "thinkingPicker")
+
+    def test_selecting_a_step_does_not_lose_the_live_one(self, script):
+        """Picking the newest step by hand has to go back to following it, or the
+        panel freezes a step that is still being written."""
+        assert "index === newest ? null : index" in function_source(script, "thinkingPicker")
+
+    def test_selecting_a_step_rebuilds_the_panel_rather_than_appending(self, script):
+        """Calling the tab's own renderer left the previous reader in place: two
+        cards, two rows of chips, and the click looking like it did nothing because
+        the reader above the new one is the one on screen."""
+        picker = function_source(script, "thinkingPicker")
+
+        assert "renderRightbar()" in picker
+        assert "renderThinking()" not in picker
+
+    def test_jumping_to_a_step_uses_the_step_itself(self, script):
+        """The panel can show a step from any turn, so looking one up by number in
+        "the current turn" lands on the wrong one."""
+        assert "focusStepRecord(current.step)" in function_source(script, "renderThinking")
+        assert "function focusStepRecord(step)" in script
+        assert "focusStepRecord(turn && turn.stepRows.get(Number(index)))" in function_source(
+            script, "focusStep"
+        )
 
     def test_install_diagnostics_are_not_the_first_thing_shown(self, script):
         block = script[script.index("function renderThinking(") :]
         block = block[: block.index("\n}\n")]
+        tail = block[block.index("el.rightbarBody.append(card)") :]
 
-        assert block.index("renderEnvironment()") > block.index("el.rightbarBody.append(card)"), (
+        assert "renderEnvironment()" in tail, (
             "three lines of '0 packages installed' do not belong above the work"
         )
+
+
+class TestTheTurnReadsTopToBottom:
+    """The work first, the answer last.
+
+    The answer used to be announced at the top with the steps accumulating under
+    it, so the line the agent was speaking drifted away from where the reader was
+    looking — and a turn with six steps put the answer a screenful above the work
+    it was describing. DeepSeek Harness puts the reply at the bottom, and so does
+    this now.
+    """
+
+    def test_the_steps_come_first_and_the_answer_last(self, script):
+        block = script[script.index("function beginTurn(") :]
+        block = block[: block.index("\n}\n")]
+        assistant = block[block.index("turn.append(steps") :]
+        order = assistant[: assistant.index(")") + 1]
+
+        assert order == "turn.append(steps, shown, spoken)", (
+            "steps, then what was shown, then what was said"
+        )
+
+    def test_the_containers_are_built_before_they_are_ordered(self, script):
+        """Position is decided once here, not by the order events arrive in — the
+        three are filled as the turn runs and all three are created up front."""
+        block = script[script.index("function beginTurn(") :]
+        block = block[: block.index("turn.append(")]
+
+        for container in ("const spoken", "const shown", "const steps"):
+            assert container in block
+
+
+class TestTheShippedScriptParses:
+    """A stray brace in the shipped script is a blank page, and nothing else in the
+    suite would notice: these tests read the source as text.
+
+    Skipped rather than failed where node is absent, because node is not a
+    dependency of this project — it is a convenience for catching exactly this.
+    """
+
+    def test_app_js_is_valid_javascript(self):
+        node = shutil.which("node")
+        if node is None:
+            pytest.skip("node is not installed")
+
+        source = WEB / "js" / "app.js"
+        result = subprocess.run(
+            [node, "--check", str(source)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+
+        assert result.returncode == 0, result.stderr
 
 
 class TestMutingActuallyReachesTheWorklet:

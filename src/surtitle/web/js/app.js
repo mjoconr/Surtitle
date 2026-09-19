@@ -62,6 +62,10 @@ const state = {
   // switching between them should not re-open the wrong view. Plan leads.
   rightTab: "todo",
   sessionTabs: new Map(),
+  // Which step's reasoning the Thinking tab is showing, when the reader has picked
+  // one. Null means "follow the newest", which is where they want to be while the
+  // agent is working; choosing an older step pins it until the next turn starts.
+  thinkingStep: null,
   // Files this turn has read or written, so the Files panel can lead with what
   // the agent actually touched instead of an undifferentiated project tree.
   touched: new Map(),
@@ -389,9 +393,22 @@ function beginTurn(kind) {
     return record;
   }
 
-  turn.append(spoken, shown, steps);
+  // The work first, the answer last.
+  //
+  // This is the order the turn happened in and the order it reads in: the steps,
+  // with the tool calls they contain, at the top; then whatever the agent chose to
+  // *show* — a table, a list of options — and the spoken answer at the bottom,
+  // where a reply belongs. It used to be the reverse: the answer was announced at
+  // the top and the steps accumulated underneath it, so the line being spoken
+  // drifted further from the reader's eye as the turn went on. `spoken` and `shown`
+  // are containers built here and filled as events land, so their position is a
+  // decision made once rather than a consequence of arrival order.
+  turn.append(steps, shown, spoken);
   el.turns.append(turn);
   scrollToBottom();
+  // A new turn's reasoning is what the Thinking tab should be showing, even if the
+  // reader had picked an older step to read — the panel follows the work again.
+  state.thinkingStep = null;
   const record = {
     id: Symbol("turn"),
     kind,
@@ -1470,119 +1487,172 @@ function renderEnvironment() {
 }
 
 /**
- * The Thinking tab: the turn's process, grouped by step.
+ * The Thinking tab: the conversation's reasoning, in full, as it is written.
  *
- * This is the live view of what the agent is doing, laid out the way the
- * transcript groups it — a step's reasoning, then the calls it made — so the two
- * panels describe the same work rather than one showing commands and the other
- * showing unrelated notices. Notes that belong to no step (voice engines, an
- * install) are collected at the bottom under their own heading.
+ * Reasoning is the one thing the transcript keeps folded away. Its steps each have
+ * a Think block, but reading a turn's reasoning from there means opening them one
+ * at a time, and the panel that was supposed to save you that was a column of
+ * "Step 3" cards holding a one-line gist — which told you a step had thought
+ * without showing anything it had thought.
  *
- * It is a tab rather than something always on screen because it is the *process*,
- * not the answer: the person this is for is often listening rather than reading,
- * and the panel is a choice they make when they want to see how a conclusion was
- * reached. The data it renders is still the activity log — `pushActivity` is what
- * feeds it — hence the names below.
+ * Two things make it useful, and both come from the same complaint:
  *
- * Only the summary is rendered here. A tool's output and a step's full thinking
- * are in the transcript, one disclosure away; printing a command's whole stdout
- * into this column is what buried the useful rows under a wall of text.
+ * * It **shows the text**, whole, and follows the newest as it grows — so while the
+ *   agent works this is the live view of what it is considering.
+ * * You can **go back through the history** and read any earlier step. The history
+ *   is the whole conversation, not the current turn: the turn with fifty-eight steps
+ *   of reasoning in it is almost never the last one, because the last one is the
+ *   short turn that answers. Scoping this to the newest turn put all of that out of
+ *   reach, which is the panel being useless with extra steps.
+ *
+ * The text is read from the transcript's steps rather than from `state.activity`,
+ * because the transcript is where the whole of it is: the activity log keeps the
+ * gist, and after a reload it has *only* the gist, which is how this panel came to
+ * show less than the transcript did on every conversation but the running one.
  */
 function renderThinking() {
-  const steps = new Map();
-  const loose = [];
-  for (const item of state.activity) {
-    if (item.step) {
-      if (!steps.has(item.step)) steps.set(item.step, []);
-      steps.get(item.step).push(item);
-    } else {
-      loose.push(item);
-    }
-  }
-
-  if (steps.size === 0 && loose.length === 0) {
-    el.rightbarBody.append(node("p", "empty", "Nothing has happened yet."));
+  const thoughts = conversationReasoning();
+  if (!thoughts.length) {
+    el.rightbarBody.append(node("p", "empty", "It has not had to think yet."));
+    renderDiagnostics();
+    renderEnvironment();
     return;
   }
 
-  // Oldest first, newest last, and follow the newest — the same shape as the
-  // transcript. Newest-first looked live but behaved as though it were frozen:
-  // every new step arrived *above* whatever was on screen, so the panel appeared
-  // not to change while the agent worked.
-  const newest = Math.max(...steps.keys(), 0);
-  for (const [index, items] of [...steps.entries()].sort((a, b) => a[0] - b[0])) {
-    const card = node("div", "actcard");
-    const head = node("div", "actcard__head");
-    head.append(node("span", "actcard__index", `Step ${index}`));
-    // A running estimate of how long the step's thinking took, sized from the
-    // text rather than from wall-clock timestamps. Those timestamps are not
-    // reliable at this scale — everything in a step is written within the same
-    // millisecond — and presenting that as a duration would put "0 ms" beside a
-    // paragraph of reasoning, which is worse than saying nothing.
-    const chars = items
-      .filter((item) => item.kind === "think")
-      .reduce((total, item) => total + (item.detail || "").length, 0);
-    if (chars) {
-      head.append(node("span", "actcard__time", `~${formatDuration((chars / 40) * 1000)} think`));
-    }
-    if (index === newest) head.dataset.state = "current";
-    card.append(head);
+  // Newest by default and pinned only while the reader has not chosen otherwise.
+  // `state.thinkingStep` is released when a turn starts, so the panel returns to the
+  // live end on its own rather than staying on an old step forever.
+  const newest = thoughts.length - 1;
+  const pinned = Number.isInteger(state.thinkingStep) && state.thinkingStep < thoughts.length;
+  const selected = pinned ? state.thinkingStep : newest;
+  const current = thoughts[selected];
+  const live = selected === newest && Boolean(state.currentTurn);
 
-    // The step being worked on shows its reasoning in full and keeps growing: it
-    // is the one thing here the transcript shows only inside a disclosure. Older
-    // steps keep the one-line summary, because a column of finished reasoning
-    // would bury the step that is actually running.
-    const think = items.find((item) => item.kind === "think");
-    if (think && (think.detail || think.full)) {
-      const block = node("div", "actcard__think");
-      block.append(node("span", "actcard__thinkTitle", "Think"));
-      const live = index === newest;
-      block.append(
-        node(
-          "div",
-          live ? "actcard__thinkLive" : "actcard__thinkText",
-          live && think.full ? think.full : think.detail,
-        ),
-      );
-      block.addEventListener("click", () => focusStep(index));
-      block.style.cursor = "pointer";
-      card.append(block);
-    }
+  const card = node("div", "thinkread");
+  const head = node("div", "thinkread__head");
+  head.append(node("span", "thinkread__title", `Thinking ${selected + 1} of ${thoughts.length}`));
+  head.append(
+    node("span", "thinkread__where", `turn ${current.turnNumber} · step ${current.stepIndex}`),
+  );
+  head.append(
+    node("span", "thinkread__time", `~${formatDuration((current.text.length / 40) * 1000)}`),
+  );
+  const jump = node("button", "thinkread__jump", "In transcript");
+  jump.type = "button";
+  jump.addEventListener("click", () => focusStepRecord(current.step));
+  head.append(jump);
+  card.append(head);
 
-    for (const item of items) {
-      if (item.kind === "think") continue;
-      const row = node("div", "actrow");
-      row.dataset.state = item.kind === "result" ? (item.ok ? "ok" : "error") : "run";
-      row.append(node("span", "actrow__dot"));
-      const main = node("div", "actrow__main");
-      main.append(node("div", "actrow__title", item.label));
-      if (item.detail) main.append(node("div", "actrow__detail", item.detail));
-      row.append(main);
-      if (item.duration_ms) row.append(node("span", "actrow__time", formatDuration(item.duration_ms)));
-      row.addEventListener("click", () => focusStep(index));
-      card.append(row);
-    }
-    el.rightbarBody.append(card);
-  }
+  const body = node("div", "thinkread__text", current.text);
+  body.dataset.state = live ? "live" : "done";
+  card.append(body);
 
-  if (loose.length) {
-    const section = node("div", "actcard actcard--notes");
-    section.append(node("div", "actcard__head", "Diagnostics"));
-    for (const item of [...loose].reverse()) {
-      const row = node("div", "actrow");
-      const main = node("div", "actrow__main");
-      main.append(node("div", "actrow__title", item.label));
-      if (item.detail) main.append(node("div", "actrow__detail", item.detail));
-      row.append(main);
-      section.append(row);
-    }
-    el.rightbarBody.append(section);
-  }
+  // The picker goes under the text: the reasoning is what the tab is for, and it is
+  // read from the top, so a row of numbers above it pushes the words down for the
+  // sake of navigation. One line, scrolled sideways rather than wrapped — a long
+  // turn has fifty steps, and fifty chips wrapped into a block is furniture.
+  if (thoughts.length > 1) card.append(thinkingPicker(thoughts, selected, newest));
 
-  // The environment is install diagnostics, and it was the first thing in the
-  // panel — three lines of "0 packages installed" above the work being done.
+  el.rightbarBody.append(card);
+  renderDiagnostics();
   renderEnvironment();
+
+  // Follow the words, not the panel: the reasoning is what grows, and it grows past
+  // the bottom of the box it is in.
+  if (live) body.scrollTop = body.scrollHeight;
   if (panelFollows) el.rightbarBody.scrollTop = el.rightbarBody.scrollHeight;
+}
+
+/** The row of steps you can jump to, newest last. */
+function thinkingPicker(thoughts, selected, newest) {
+  const picker = node("div", "thinkpick");
+  let selectedChip = null;
+  thoughts.forEach((thought, index) => {
+    const chip = node("button", "thinkpick__item", String(index + 1));
+    chip.type = "button";
+    chip.setAttribute("aria-pressed", String(index === selected));
+    // The gist, so a step is identifiable before it is opened.
+    chip.title = `Turn ${thought.turnNumber}, step ${thought.stepIndex}: ${gistOf(thought.text)}`;
+    chip.addEventListener("click", () => {
+      // Choosing the newest means "follow it again", not "stay here": the step is
+      // still being written and a pinned reader would freeze mid-sentence.
+      state.thinkingStep = index === newest ? null : index;
+      // `renderRightbar`, not `renderThinking`: the panel is rebuilt from empty by
+      // the former, so calling the tab's own renderer appends a second reader under
+      // the first — two cards, two rows of sixty-two chips, and the click appearing
+      // to do nothing because the reader above it is the one you can see.
+      renderRightbar();
+    });
+    if (index === selected) selectedChip = chip;
+    picker.append(chip);
+  });
+  // The selected chip is almost always the last one, which is off the end of a
+  // sideways-scrolled strip.
+  if (selectedChip) {
+    requestAnimationFrame(() => {
+      selectedChip.scrollIntoView({ block: "nearest", inline: "nearest" });
+    });
+  }
+  return picker;
+}
+
+/**
+ * Every step of every turn that reasoned, oldest first.
+ *
+ * A flat list rather than a per-turn one, because the interesting reasoning is
+ * usually in the long working turn rather than the short turn that answers, and a
+ * per-turn panel can only ever show one of them.
+ */
+function conversationReasoning() {
+  const open = view();
+  if (!open) return [];
+  const thoughts = [];
+  for (const turn of open.turns.values()) {
+    if (turn.kind !== "assistant") continue;
+    const steps = [...turn.stepRows.values()].sort((a, b) => a.index - b.index);
+    for (const step of steps) {
+      if (!step.think || !step.think.text) continue;
+      thoughts.push({
+        text: step.think.text,
+        step,
+        stepIndex: step.index,
+        turnNumber: turnNumberFor(turn),
+      });
+    }
+  }
+  return thoughts;
+}
+
+/** Which user turn a reply belongs to, counted the way the transcript reads. */
+function turnNumberFor(turn) {
+  const open = view();
+  if (!open) return 1;
+  let count = 0;
+  for (const item of open.turns.values()) {
+    if (item.kind === "user") count += 1;
+    if (item === turn) return Math.max(count, 1);
+  }
+  return Math.max(count, 1);
+}
+
+/**
+ * Everything that happened outside a step: voice engine notices, installs, the
+ * environment. Kept below the reasoning, where a diagnostic belongs.
+ */
+function renderDiagnostics() {
+  const loose = state.activity.filter((item) => !item.step);
+  if (!loose.length) return;
+  const section = node("div", "actcard actcard--notes");
+  section.append(node("div", "actcard__head", "Diagnostics"));
+  for (const item of [...loose].reverse()) {
+    const row = node("div", "actrow");
+    const main = node("div", "actrow__main");
+    main.append(node("div", "actrow__title", item.label));
+    if (item.detail) main.append(node("div", "actrow__detail", item.detail));
+    row.append(main);
+    section.append(row);
+  }
+  el.rightbarBody.append(section);
 }
 
 /** The step currently being worked on, or 0 when nothing is running. */
@@ -1597,7 +1667,17 @@ function focusStep(index) {
   const open = view();
   const turn =
     state.currentTurn || [...(open ? open.turns.values() : [])].reverse().find((t) => t.kind === "assistant");
-  const step = turn && turn.stepRows.get(Number(index));
+  focusStepRecord(turn && turn.stepRows.get(Number(index)));
+}
+
+/**
+ * The same, for a step the caller already holds.
+ *
+ * The Thinking tab can show a step from any turn in the conversation, so it cannot
+ * look one up by number in "the current turn" — that is how a jump lands on the
+ * wrong step, or on nothing at all, for everything except the newest turn.
+ */
+function focusStepRecord(step) {
   if (!step) return;
   step.head.setAttribute("aria-expanded", "true");
   step.body.hidden = false;
