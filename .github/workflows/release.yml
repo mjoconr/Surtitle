@@ -140,6 +140,17 @@ jobs:
             Download the archive matching your platform, extract it, and run
             **`./run.sh`**.
 
+            ### Updating an Intel Mac, once, by hand
+
+            This release adds the Intel build, so the updater it is meant to reach
+            cannot deliver it: 0.10.0 did not know about architectures and would
+            fetch the Apple silicon archive, which cannot start on an Intel Mac.
+            Download `surtitle-${{ github.ref_name }}-darwin-x86_64.tar.gz`,
+            extract it **over** your installation, and you are on the new updater —
+            later releases install normally. Your settings, conversations and
+            models live in the app data directory, not in the installation, so
+            nothing is lost.
+
             ### First run
 
             1. The app opens in your browser at `http://127.0.0.1:8765`.
