@@ -365,6 +365,30 @@ class TestSettingsApi:
         stored = [f for fields in body["sections"].values() for f in fields if f["stored"]]
         assert stored == []
 
+    async def test_saving_a_preference_leaves_the_shared_client_usable(self, client):
+        """A settings change must not break the next turn in a live conversation.
+
+        Observed: the model, key and base URL are all read per request, so the
+        client needs no rebuild. Saving a preference nonetheless closed it and
+        swapped in a new one, and a session holds the client it was created with —
+        so every live conversation failed its next turn with "Cannot send a
+        request, as the client has been closed", 58 seconds after the settings
+        were saved.
+        """
+        state = client.app.state.app_state
+        shared = state.deepseek
+
+        response = await client.put("/api/settings", json={"reasoning_effort": "high"})
+
+        assert response.status_code == 200
+        assert state.deepseek is shared, "the client was replaced under its running sessions"
+        # White-box on purpose: a closed httpx client is exactly the failure, and
+        # there is no other way to observe it without a live API call.
+        assert shared._client.is_closed is False, (
+            "the shared client was closed, so the next turn in every live session fails"
+        )
+        assert state.settings.reasoning_effort == "high", "the saved value never took effect"
+
 
 class TestCredentialsApi:
     async def test_env_credential_cannot_be_overwritten(self, client):

@@ -586,9 +586,18 @@ def build_api(state: AppState) -> APIRouter:
             state.settings_store.save_settings(patch)
         except SettingsValidationError as exc:
             return _error(400, str(exc), field=exc.field_name)
-        # Rebuild the client so a model change takes effect immediately.
-        await state.deepseek.aclose()
-        state.deepseek = DeepSeekClient(state.settings_store.effective())
+        # Apply the stored values onto the live Settings object. `effective()`
+        # mutates the cached instance in place, so a new model, reasoning effort or
+        # key takes effect on the next request.
+        #
+        # The DeepSeek client is deliberately neither closed nor replaced. It reads
+        # its settings per request — model, key and base URL are all resolved at
+        # call time — so a rebuild was never needed for that, and closing it was
+        # destructive: a session captures the client when it is created, so the
+        # next turn in every live conversation died with "Cannot send a request, as
+        # the client has been closed". In the log this was diagnosed from, the
+        # settings were saved 58 seconds before the spoken turn that failed.
+        state.settings_store.effective()
         return state.settings_store.describe()
 
     @api.delete("/settings")
