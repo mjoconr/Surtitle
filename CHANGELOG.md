@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-09-19
+
 ### Fixed
 
 - **A turn that did the work no longer ends without an answer.** A model round can
