@@ -52,6 +52,12 @@ _PROGRESS_STEPS = (8, 20, 45, 90, 180)
 # How many transcript messages to replay into the model as context.
 _HISTORY_LIMIT = 40
 
+# A session whose connection left mid-turn is kept for a reload to reclaim, then
+# swept. The grace period bounds how long a turn that never finishes can hold its
+# sockets open.
+_ORPHAN_SWEEP_SECONDS = 2.0
+_ORPHAN_GRACE_SECONDS = 300.0
+
 # Audio opcodes for binary WebSocket frames.
 _OP_AUDIO_IN = 0x01
 _OP_AUDIO_OUT = 0x02
@@ -1114,6 +1120,11 @@ class SessionManager:
         # or a reconnect, produces a second connection for a conversation that is
         # already live; the newest one owns it.
         self._owner: dict[str, str] = {}
+        # Sessions whose connection left while work was still in flight, and when.
+        # They are kept so a reload can reclaim the turn instead of destroying it,
+        # and swept once they fall idle or the grace period runs out.
+        self._orphaned_at: dict[str, float] = {}
+        self._sweeper: asyncio.Task[None] | None = None
 
     async def acquire(self, session: Session, token: str) -> tuple[Session, bool]:
         """Return the session this connection should use.
@@ -1131,6 +1142,7 @@ class SessionManager:
         but no action" was.
         """
         existing = self._sessions.get(session.session_id)
+        self._orphaned_at.pop(session.session_id, None)
         if existing is None:
             self._sessions[session.session_id] = session
             self._owner[session.session_id] = token
@@ -1145,13 +1157,52 @@ class SessionManager:
 
         A superseded connection finishing its handler must not close the session
         that took over from it.
+
+        Nor may a connection leave with work still running. Closing here cancelled
+        the turn, and a browser reload disconnects before it reconnects, so
+        reloading mid-turn destroyed the answer the user was waiting for: the new
+        connection found no session and started an empty one, while a pending
+        approval became unanswerable because the question outlived the only place
+        it was ever displayed.
         """
         if self._owner.get(session_id) != token:
             return
         self._owner.pop(session_id, None)
-        session = self._sessions.pop(session_id, None)
+        session = self._sessions.get(session_id)
         if session is not None:
+            if session._turn_in_flight():
+                self._orphaned_at.setdefault(session_id, asyncio.get_running_loop().time())
+                self._ensure_sweeper()
+                return
+            self._sessions.pop(session_id, None)
+            self._orphaned_at.pop(session_id, None)
             await session.close()
+
+    def _ensure_sweeper(self) -> None:
+        if self._sweeper is None or self._sweeper.done():
+            self._sweeper = asyncio.create_task(self._sweep_orphans(), name="session-sweeper")
+
+    async def _sweep_orphans(self) -> None:
+        """Close sessions left with no connection, once they stop working.
+
+        A stopped turn may still be reclaimed by a reload, so the sweep waits for
+        the work to finish; the deadline bounds how long a session that never goes
+        idle can hold its microphone and speech sockets open.
+        """
+        while True:
+            await asyncio.sleep(_ORPHAN_SWEEP_SECONDS)
+            now = asyncio.get_running_loop().time()
+            for session_id, since in list(self._orphaned_at.items()):
+                session = self._sessions.get(session_id)
+                if session is None or session_id in self._owner:
+                    self._orphaned_at.pop(session_id, None)
+                    continue
+                if session._turn_in_flight() and now - since < _ORPHAN_GRACE_SECONDS:
+                    continue
+                self._orphaned_at.pop(session_id, None)
+                self._sessions.pop(session_id, None)
+                log.info("closing orphaned session %s left with no connection", session_id)
+                await session.close()
 
     def get(self, session_id: str) -> Session | None:
         return self._sessions.get(session_id)
@@ -1163,11 +1214,18 @@ class SessionManager:
         the point is precisely to stop it listening.
         """
         self._owner.pop(session_id, None)
+        self._orphaned_at.pop(session_id, None)
         session = self._sessions.pop(session_id, None)
         if session is not None:
             await session.close()
 
     async def close_all(self) -> None:
+        if self._sweeper is not None:
+            self._sweeper.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await self._sweeper
+            self._sweeper = None
+        self._orphaned_at.clear()
         for session_id in list(self._sessions):
             await self.remove(session_id)
 

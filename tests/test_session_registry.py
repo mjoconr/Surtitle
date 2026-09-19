@@ -19,6 +19,8 @@ reconnect costs nothing and the running turn survives.
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from surtitle.core.session import Session, SessionManager
@@ -32,9 +34,15 @@ class FakeSession:
         self.label = label
         self.closed = 0
         self.rebound = 0
+        # Whether a turn is running. A session with work in flight must survive its
+        # connection leaving, so the registry asks before closing it.
+        self.in_flight = False
         # The transport the registry hands over on rebind.
         self.send = f"{label or session_id}-transport"
         self.send_audio = f"{label or session_id}-audio"
+
+    def _turn_in_flight(self) -> bool:
+        return self.in_flight
 
     def rebind(self, *, send, send_audio) -> None:
         self.rebound += 1
@@ -142,6 +150,92 @@ class TestRelease:
         manager = SessionManager()
         await manager.release("nope", "conn-1")
         assert manager.count == 0
+
+
+class TestWorkOutlivesTheConnection:
+    """A disconnect must not destroy a turn that is still running.
+
+    Observed: a browser reload disconnects before it reconnects, and the release
+    path closed the session, cancelling the turn. The reloaded page then found
+    nothing to reclaim and started an empty session — so reloading while the agent
+    was working threw the work away, and a prompt waiting for an answer became
+    unanswerable because the question only ever existed on the screen that went
+    away.
+    """
+
+    async def test_an_in_flight_turn_survives_the_socket_closing(self):
+        manager = SessionManager()
+        session = FakeSession("s1")
+        session.in_flight = True
+        await manager.acquire(session, "conn-1")
+
+        await manager.release("s1", "conn-1")
+
+        assert session.closed == 0, "the running turn was cancelled by a disconnect"
+        assert manager.get("s1") is session, "the work was forgotten, so it cannot be reclaimed"
+        await manager.close_all()
+
+    async def test_a_reload_reclaims_the_running_session(self):
+        manager = SessionManager()
+        live = FakeSession("s1", label="live")
+        live.in_flight = True
+        await manager.acquire(live, "conn-1")
+        await manager.release("s1", "conn-1")
+
+        chosen, started = await manager.acquire(FakeSession("s1"), "conn-2")
+
+        assert chosen is live, "the reload was handed a fresh session and lost the turn"
+        assert started is False
+        assert live.rebound == 1
+        await manager.close_all()
+
+    async def test_an_idle_session_is_still_closed_immediately(self):
+        manager = SessionManager()
+        session = FakeSession("s1")
+        await manager.acquire(session, "conn-1")
+
+        await manager.release("s1", "conn-1")
+
+        assert session.closed == 1, "an idle session must not be kept alive forever"
+        assert manager.count == 0
+
+    async def test_an_orphan_is_swept_once_it_stops_working(self, monkeypatch):
+        monkeypatch.setattr("surtitle.core.session._ORPHAN_SWEEP_SECONDS", 0.01)
+        monkeypatch.setattr("surtitle.core.session._ORPHAN_GRACE_SECONDS", 5.0)
+        manager = SessionManager()
+        session = FakeSession("s1")
+        session.in_flight = True
+        await manager.acquire(session, "conn-1")
+        await manager.release("s1", "conn-1")
+        assert session.closed == 0
+
+        session.in_flight = False
+        for _ in range(50):
+            await asyncio.sleep(0.01)
+            if session.closed:
+                break
+
+        assert session.closed == 1, "an orphan that finished its work was never reclaimed"
+        assert manager.count == 0
+        await manager.close_all()
+
+    async def test_a_hung_turn_is_not_kept_forever(self, monkeypatch):
+        """The grace period bounds how long a turn that never ends holds sockets."""
+        monkeypatch.setattr("surtitle.core.session._ORPHAN_SWEEP_SECONDS", 0.01)
+        monkeypatch.setattr("surtitle.core.session._ORPHAN_GRACE_SECONDS", 0.0)
+        manager = SessionManager()
+        session = FakeSession("s1")
+        session.in_flight = True
+        await manager.acquire(session, "conn-1")
+        await manager.release("s1", "conn-1")
+
+        for _ in range(50):
+            await asyncio.sleep(0.01)
+            if session.closed:
+                break
+
+        assert session.closed == 1, "a session that never goes idle was leaked"
+        await manager.close_all()
 
 
 class TestForceRemove:
