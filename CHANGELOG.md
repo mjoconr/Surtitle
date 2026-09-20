@@ -61,6 +61,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A reload no longer opens somebody else's project.** Reported as "the chat has
+  gone missing after a reload of the page", with the archive reading zero. Nothing
+  was lost — the conversation was in the store the whole time. The page reopened
+  the *first* project in the list, which is ordered by a `last_opened_at` the
+  server shares between every client and moves whenever any of them opens a
+  project, so a reload could land in a different one: the transcript was another
+  conversation, the sidebar lists only the open project so the reader's had
+  vanished from it, and the archive count was that other project's. The browser now
+  remembers which conversation it is in and reopens that; a browser that has never
+  been here still falls back to the first project.
+
+- **The Push button works when the thing that cannot wait is the message already
+  sent.** Push acted only on the composer, so with the box empty it returned
+  without a word — no request, no message, nothing on screen. From a real session:
+  a turn that ran for thirteen minutes, a request queued behind it, and a Push
+  button that did nothing, which is exactly how it was reported. Push now moves the
+  queued request to the front (a new `push` command: cancel the turn, keep the
+  queue — Stop drops it on purpose), and is disabled with an explanation when there
+  is genuinely nothing to act on. It is also offered while the agent is waiting on
+  an approval, which is a turn stopped in front of a question for the user and the
+  moment "not this, this instead" matters most.
+
 - **Switching the microphone off sends what was said instead of discarding it.**
   Turning the microphone off mid-sentence is the user saying "that is my turn", and
   it is how somebody who is not sure their pause was long enough ends a thought —
