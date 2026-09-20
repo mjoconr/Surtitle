@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The macOS archive no longer carries anything executable, so macOS no longer
+  refuses to run it.** Reported as the malware blocking system picking up "python
+  (and all its sub module) and rust (I think)" — which is what Gatekeeper says, one
+  dialog per file, about a download from a browser: it carries
+  `com.apple.quarantine` and the bundle has no Developer ID signature, so the
+  interpreter, every compiled extension module (including the Rust-built
+  `_pydantic_core` and `jiter`) and the launcher are each refused with a message
+  about malware. That is a missing signature rather than a detection, and the fix
+  is not to sign a hundred binaries but to ship none of them. macOS now builds
+  `--thin`: the sources and a launcher, in which `run.sh` fetches Python and the
+  dependencies with `uv` on the first run. Measured on one Mac: **0.6 MB instead of
+  137 MB**, `find … | grep -c Mach-O` is **0**, and a *quarantined* copy installs and
+  runs — `./run.sh --version` printed the version with the attribute still on every
+  file. What the first run installs is fetched by a program rather than a browser,
+  so it never gets the flag either, which is also why a git checkout was never
+  affected. Windows still ships the bundled runtime, where SmartScreen's "Run
+  anyway" is a prompt rather than a wall.
+
+  The trade is one network fetch on first run (a few minutes, once) instead of an
+  offline archive. `python scripts/build_release.py --with-voice-local` still builds
+  the self-contained archive for a machine with no network, which macOS *will*
+  block: [`docs/MACOS.md`](docs/MACOS.md) has that one-line fix, how to verify a
+  download against `SHA256SUMS.txt`, and what to do on a managed Mac that blocks
+  unsigned binaries outright.
+
 ## [0.15.0-rc2] - 2026-09-20
 
 ### Changed

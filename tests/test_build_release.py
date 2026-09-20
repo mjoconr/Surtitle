@@ -9,15 +9,20 @@ import the application, so the check passed for the wrong reason.
 
 from __future__ import annotations
 
+import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 from scripts import build_release
 
 
-def _touch(path):
+def _touch(path, *, executable: bool = False):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(b"")
+    if executable:
+        path.chmod(0o755)
     return path
 
 
@@ -210,6 +215,86 @@ class TestArchiveLayout:
         _touch(tmp_path / "python" / "python.exe")
         with pytest.raises(SystemExit, match=r"no run\.bat"):
             build_release.assert_archive_layout(tmp_path, "win32")
+
+
+class TestAThinArchive:
+    """macOS ships sources and a launcher, and no compiled binaries at all.
+
+    A macOS download carries ``com.apple.quarantine``, and Gatekeeper refuses each
+    *unsigned executable* in it — the bundled interpreter, every extension module,
+    one dialog apiece, each mentioning malware. Reported from a real download as
+    "python (and all its sub module) and rust (I think) all got picked up by the
+    malware blocking system". The answer is to carry nothing executable, which is
+    what these pin: a thin archive starts however it was downloaded, and everything
+    it installs arrives through ``uv`` rather than a browser.
+    """
+
+    def _thin(self, root: Path) -> Path:
+        _touch(root / "run.sh", executable=True)
+        _touch(root / "pyproject.toml")
+        _touch(root / "uv.lock")
+        _touch(root / "src" / "surtitle" / "__init__.py")
+        return root
+
+    def test_a_thin_archive_is_the_layout_it_claims(self, tmp_path):
+        build_release.assert_archive_layout(self._thin(tmp_path), "darwin", "fetched")
+
+    def test_it_must_not_carry_an_interpreter(self, tmp_path):
+        """A runtime inside it would put the user back in front of Gatekeeper."""
+        for name in ("venv", "python"):
+            root = self._thin(tmp_path / name)
+            (root / name).mkdir()
+            with pytest.raises(SystemExit, match=f"must not carry {name}"):
+                build_release.assert_archive_layout(root, "darwin", "fetched")
+
+    def test_it_needs_the_lock_and_the_metadata_to_install_from(self, tmp_path):
+        root = self._thin(tmp_path)
+        (root / "uv.lock").unlink()
+        with pytest.raises(SystemExit, match=r"needs uv\.lock"):
+            build_release.assert_archive_layout(root, "darwin", "fetched")
+
+    def test_it_needs_the_application_source(self, tmp_path):
+        root = self._thin(tmp_path)
+        shutil.rmtree(root / "src")
+        with pytest.raises(SystemExit, match="needs the application source"):
+            build_release.assert_archive_layout(root, "darwin", "fetched")
+
+    def test_it_still_needs_the_launcher(self, tmp_path):
+        root = self._thin(tmp_path)
+        (root / "run.sh").unlink()
+        with pytest.raises(SystemExit, match=r"no run\.sh"):
+            build_release.assert_archive_layout(root, "darwin", "fetched")
+
+    def test_the_manifest_says_the_runtime_is_fetched(self, tmp_path):
+        manifest = build_release.write_manifest(tmp_path, "1.2.3", runtime="fetched")
+        assert manifest["runtime"] == "fetched"
+        assert manifest["python"] == "fetched by uv", (
+            "the version of Python this build machine happens to have is not the one "
+            "the user's first run installs"
+        )
+        assert build_release.archive_runtime(tmp_path) == "fetched"
+
+    def test_a_bundled_archive_still_reads_as_bundled(self, tmp_path):
+        build_release.write_manifest(tmp_path, "1.2.3")
+        assert build_release.archive_runtime(tmp_path) == "bundled"
+
+    def test_bundling_the_engines_into_a_thin_archive_is_refused(self):
+        """Not a limitation: the engines *are* the binaries this mode avoids."""
+        result = subprocess.run(
+            [sys.executable, str(Path(build_release.__file__)), "--thin", "--with-voice-local"],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode != 0
+        assert "--thin cannot be combined" in (result.stdout + result.stderr)
+
+    def test_the_release_builds_macos_thin_and_windows_bundled(self):
+        """The workflow is where the choice is made, so the choice is asserted."""
+        workflow = (
+            Path(build_release.REPO_ROOT) / ".github" / "workflows" / "release.yml"
+        ).read_text(encoding="utf-8")
+        assert workflow.count('build_args: "--thin"') == 2, "both macOS builds go thin"
+        assert 'build_args: ""' in workflow, "Windows keeps the bundled runtime"
 
 
 class TestArchivePlatform:

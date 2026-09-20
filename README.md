@@ -42,6 +42,29 @@ it for live status, an estimate of what this run has cost in tokens and money, a
 files a new icon under the `^` arrow; drag it onto the taskbar to keep it in view.
 See [`docs/WINDOWS.md`](docs/WINDOWS.md#the-taskbar-icon).
 
+### macOS
+
+1. Download the archive for your Mac from [Releases](../../releases) —
+   `darwin-arm64` for Apple silicon, `darwin-x86_64` for Intel.
+2. Extract it and run **`./run.sh`**. The first run fetches Python and the
+   dependencies (a few minutes, once) and starts the app; nothing needs to be
+   installed first, and no system Python is required.
+
+That archive deliberately contains **no compiled binaries** — sources and a shell
+script, about a megabyte. A macOS download carries `com.apple.quarantine`, and
+Gatekeeper refuses to run each *unsigned executable* in it, one dialog per file,
+each saying macOS could not check it for malware; an archive with no executables in
+it has nothing to refuse. Everything the first run installs arrives through `uv`
+rather than a browser, so it does not carry the flag either.
+
+To bundle a runtime anyway — for a machine with no network, or to deploy the same
+folder to many Macs — build one yourself with
+`python scripts/build_release.py --with-voice-local`, and read
+[`docs/MACOS.md`](docs/MACOS.md) first: that archive is the one macOS will block,
+and the page has the one-line fix, how to verify the download against
+`SHA256SUMS.txt`, and what to do on a managed Mac that blocks unsigned binaries
+outright.
+
 To install from source instead, or to add the offline speech engines later,
 **double-click `Setup.bat`** at the top of the checkout. It needs no terminal and
 no command: it installs Python and the dependencies, offers the offline speech

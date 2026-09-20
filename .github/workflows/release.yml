@@ -62,17 +62,31 @@ jobs:
         include:
           - os: windows-latest
             artifact: windows-x64
+            # Windows keeps the bundled runtime: SmartScreen offers "More info →
+            # Run anyway", so one unsigned download is a prompt rather than a wall.
+            build_args: ""
           # Apple silicon. `macos-latest` is arm64 now, so it is not the Intel
           # image it used to be.
           - os: macos-latest
             artifact: macos-arm64
-          # Intel, which is a different image and a different archive: the build
-          # bundles a Python runtime and compiled wheels, so neither can be
-          # cross-built from the other. `macos-13` was retired by GitHub and this
-          # is the Intel image that replaced it — without it an Intel Mac has no
-          # archive that runs at all.
+            build_args: "--thin"
+          # Intel. The image is different — `macos-13` was retired by GitHub and
+          # this is what replaced it — but since macOS archives became thin the two
+          # carry the same content: the sources and a launcher, with Python and the
+          # wheels fetched by uv on first run. Both are still built and published
+          # because `surtitle.selfupdate` chooses an asset by the architecture in
+          # its name, so a Mac with no matching asset is a Mac that cannot update.
+          #
+          # Why thin: a macOS download carries `com.apple.quarantine`, and Gatekeeper
+          # refuses every unsigned executable in it — the bundled interpreter, each
+          # extension module, one dialog apiece, each saying macOS could not check it
+          # for malware. A thin archive has no Mach-O in it at all (see
+          # `docs/MACOS.md`), so there is nothing to refuse, and what uv downloads
+          # afterwards never gets the flag because a program fetched it rather than
+          # a browser.
           - os: macos-15-intel
             artifact: macos-intel
+            build_args: "--thin"
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -87,9 +101,10 @@ jobs:
       - name: Run the test suite for the platform this archive ships to
         run: uv run --frozen pytest -q
       # Must run on the target OS: compiled wheels are platform-specific, so a
-      # cross-built archive would ship the wrong binaries.
+      # cross-built archive would ship the wrong binaries. A thin archive has none,
+      # and its verifier fetches and runs it here the way a first run does.
       - name: Build the self-contained archive
-        run: uv run --frozen python scripts/build_release.py
+        run: uv run --frozen python scripts/build_release.py ${{ matrix.build_args }}
       - name: Re-verify the finished archives
         # scripts/build_release.py already extracted and smoke-tested the archive
         # it just built. This re-runs the *same* verifier over dist/, so the release
@@ -167,10 +182,17 @@ jobs:
             ### macOS
 
             Download the archive for your Mac — `arm64` for Apple silicon,
-            `x86_64` for Intel — extract it, and run **`./run.sh`**. The two are
-            not interchangeable: each carries its own Python runtime, so the wrong
-            one will not start. The updater refuses to install an archive built for
-            another architecture rather than hand you one that cannot run.
+            `x86_64` for Intel — extract it, and run **`./run.sh`**. Nothing needs
+            to be installed first: the first run fetches Python and the
+            dependencies (a few minutes, once), and after that it starts straight
+            away. Double-click **`Setup.command`** instead if you would like an
+            entry in `~/Applications` and to be asked about starting at sign-in.
+
+            This archive deliberately carries **no compiled binaries**: macOS
+            refuses to run the unsigned ones in a browser download, one dialog per
+            file, each mentioning malware. There is nothing here to refuse — it is
+            sources and a shell script — so it starts normally however you
+            downloaded it. See `docs/MACOS.md` in the archive or in the repository.
 
             ### Linux
 

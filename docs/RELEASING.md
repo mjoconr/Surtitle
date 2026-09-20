@@ -110,11 +110,23 @@ git push origin vX.Y.Z
    spent — but it is **one platform**, so it is a fast fail and not the gate.
 2. **Build** — `windows-latest`, `macos-latest` (Apple silicon) and
    `macos-15-intel`, each running the full suite *on that platform* and then
-   `scripts/build_release.py`, which smoke-tests the archive it just made. One job
-   per architecture because the archive bundles a Python runtime and compiled
-   wheels, so neither Mac build can be cross-built from the other. `macos-13` was
+   `scripts/build_release.py`, which smoke-tests the archive it just made. Windows
+   builds the self-contained archive, and needs a job per architecture because its
+   virtual environment cannot be relocated and its wheels are platform-specific.
+   macOS builds `--thin` instead — sources and a launcher, with Python and the
+   wheels fetched by `uv` on the user's first run — because a macOS download
+   carrying unsigned binaries is refused by Gatekeeper file by file
+   ([`MACOS.md`](MACOS.md)). The two Mac jobs are therefore identical in content and
+   both exist for the name: `surtitle.selfupdate` picks an asset by the architecture
+   in it, so a Mac with no matching asset cannot update itself. `macos-13` was
    retired by GitHub; `macos-15-intel` is the Intel image that replaced it, and
-   without it an Intel Mac has no archive that runs.
+   without it an Intel Mac has no archive of its own.
+
+   A thin archive is verified by installing it from scratch on the runner that
+   built it — `uv` fetches a Python and the wheels, and the launcher is run — which
+   is the only check that proves the artifact a user receives actually starts.
+   `--verify-only` stays offline and structural: a complete tree, sources that
+   compile, a valid launcher.
 
    The suite runs here, on the runner that is going to build the archive anyway,
    because a break that only shows on Windows or Intel macOS passes stage 1 and
@@ -221,13 +233,18 @@ and someone should try them:
 The in-app folder browser, the CLI, the doctor, and the HTTP API are all testable
 from anywhere and are covered by the suite.
 
-**A Mac archive can only be checked on a Mac of its own architecture.**
-`--verify-only` runs the interpreter inside the archive, so a `darwin-x86_64`
-build fails to verify on Apple silicon and a `darwin-arm64` build fails on Intel —
-`Bad CPU type in executable`, which is a fact about the machine, not the archive.
-Build the archive locally (`uv run python scripts/build_release.py`) on the Mac you
-have and verify that one; the other architecture is covered by CI's build job,
-which smoke-tests each archive on the runner that made it.
+**A self-contained Mac archive can only be checked on a Mac of its own
+architecture.** `--verify-only` runs the interpreter inside the archive, so a
+`darwin-x86_64` build fails to verify on Apple silicon and a `darwin-arm64` build
+fails on Intel — `Bad CPU type in executable`, which is a fact about the machine,
+not the archive. Build the archive locally
+(`uv run python scripts/build_release.py`) on the Mac you have and verify that one;
+the other architecture is covered by CI's build job, which smoke-tests each archive
+on the runner that made it.
+
+The thin archives a release actually ships do not have this property: they contain
+no interpreter to run, so `--verify-only` checks the tree, the sources and the
+launcher anywhere, and the installing smoke test is the build's job.
 
 ## How users actually get a release
 
