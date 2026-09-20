@@ -260,6 +260,21 @@ class SpeechToText:
         if suppressed:
             self._suppressed_transcripts = 0
 
+    async def finish_utterance(self) -> bool:
+        """Nothing to flush, so the session should send what it has.
+
+        The session asks the recogniser to close the utterance when the user
+        switches the microphone off. Flux reports the turn *so far* as it goes and
+        decides the end of it from what was said, so there is no partial left
+        inside the client to flush — the session already holds everything that has
+        been transcribed. Answering false is what tells it to deliver that.
+
+        Sending a control message instead would be guessing at a protocol this
+        client cannot test, and the two backends disagree about the vocabulary: a
+        rejected message closes the socket.
+        """
+        return False
+
     def _note_suppressed(self, text: str, *, kind: str) -> None:
         """Record a transcript discarded as the agent's own voice.
 

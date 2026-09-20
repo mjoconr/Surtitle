@@ -152,6 +152,31 @@ arrive. `SURTITLE_STT_MERGE_MAX_MS` (default 20 s) bounds the wait so a speaker 
 never pauses still gets an answer. Set the hold to 0 to commit the instant the
 engine declares the turn over.
 
+## Ending a turn by hand
+
+Switching the microphone off is the user saying "that is my turn", and it is how
+somebody who is not sure their pause was long enough ends a thought. The session
+asks the recogniser to close the utterance first, and then sends what it has; the
+turn goes through the same hold described above, so a word that lands a moment
+later still joins it.
+
+The local engine's part of that is a pad of silence queued behind the audio
+already recorded, because the recogniser is still holding the last word of the
+sentence and no more audio is coming. The turn closes when the decoder *reaches*
+the pad, so a decoder that is a little behind reports the whole utterance rather
+than a truncated one. Measured with audio arriving in real time, the turn closes
+48–84 ms after the button, and on the far-field clips used above it produces the
+same transcript as waiting for the pause:
+
+```
+pause     did we want to meet before we talk to Steve next week?
+mic off   did we want to meet before we talk to Steve next week?
+```
+
+Before this the interim transcript was simply cleared, so the whole utterance
+vanished: nothing was sent, nothing was answered, and the only way to say it again
+was to type it.
+
 The cost is up to 1.2 s of extra latency on every spoken turn. That is the trade
 the merging makes, and it is the reason the value is a setting rather than a
 constant.

@@ -93,6 +93,33 @@ _IMPLAUSIBLE_CHARS = 2
 # somebody lowers it.
 _FLUSH_MS = 800.0
 
+# How much silence :meth:`LocalSpeechToText.finish_utterance` queues when the
+# microphone is switched off mid-sentence. Longer than the turn floor above
+# because it is measured per clip rather than on average, and because it costs
+# nothing: the pad is decoded, not played, so 1.6 s of it is about 0.13 s of CPU.
+# Measured through the engine on far-field clips, decoding the same audio with an
+# 0.8/1.0/1.2 s pad left the last word or two off ("…talk to Steve" for "…talk to
+# Steve next week?") and 1.6 s completed it.
+_FINISH_PAD_MS = 1600.0
+
+# How long :meth:`LocalSpeechToText.finish_utterance` waits for the decoder to
+# reach the pad it queued. The work itself is a fraction of a second; the wait is
+# really for a backlog in front of it, and the caller cannot hold the microphone
+# toggle open for long. Nothing depends on the answer: the turn closes when the
+# pad is reached, whether that is now or a moment later.
+_FINISH_TIMEOUT_S = 2.0
+
+
+class _FlashPad(bytes):
+    """The silence :meth:`LocalSpeechToText.finish_utterance` queues.
+
+    A marker as well as audio. The decode loop closes the turn when it *reaches*
+    this batch, not when the request was made, so speech that was already queued
+    is always decoded into the turn before it ends — and a request that arrives
+    while the decoder is behind cannot cut an utterance short.
+    """
+
+
 # Words that mean the sentence has not finished, so the turn stays open a little
 # longer. Deliberately short: an over-eager list makes the agent feel
 # unresponsive, which is a worse failure than occasionally interrupting.
@@ -307,6 +334,16 @@ class LocalSpeechToText:
         self._worker: asyncio.Task[None] | None = None
         self._stopped = asyncio.Event()
         self._suppress_finals = False
+        # Set when the utterance has been closed by :meth:`finish_utterance`,
+        # which is how "that is my turn" arrives without any more audio. Read and
+        # written on the event loop, cleared at each turn boundary.
+        self._finish_requested = False
+        self._turn_closed = asyncio.Event()
+        # Whether any audio has arrived for the utterance in progress. Recorded
+        # when it is queued rather than when it is decoded, because the two are
+        # not the same thing: a decoder that is behind has heard nothing *yet*,
+        # and "nothing yet" must not be read as "nothing said".
+        self._audio_since_turn = False
 
         # Diagnostics, mirroring the hosted client so the Activity panel and the
         # log read the same whichever engine produced them.
@@ -376,6 +413,7 @@ class LocalSpeechToText:
         if self._stopped.is_set() or not frame:
             return
         self._frames_in += 1
+        self._audio_since_turn = True
         self._batch.append(frame)
         if len(self._batch) < _BATCH_FRAMES:
             return
@@ -405,6 +443,64 @@ class LocalSpeechToText:
         if suppressed:
             self._suppressed_transcripts = 0
 
+    async def finish_utterance(self) -> bool:
+        """Close the current turn, including the word the recogniser is holding.
+
+        Called when the user switches the microphone off mid-sentence: they are
+        saying "that is my turn", and no more audio is coming. A streaming
+        transducer emits a word only once it has heard the audio that follows it,
+        so without this the end of the sentence would be missing from the turn —
+        the same truncation the turn boundary avoids, arriving by another route.
+
+        The silence is pushed through the ordinary queue, so the turn boundary,
+        the final transcript and the stream reset all come out of the code that
+        handles a pause. Returns whether this engine has taken responsibility for
+        delivering the utterance: true once the pad is queued, because the turn
+        closes when the decoder reaches it even if that is a moment later. False
+        means nothing was heard, or the engine is not running, and the caller
+        should send what it has.
+
+        The wait is for the turn boundary, and it is bounded because the caller is
+        holding a microphone toggle open; a decoder that is behind simply reports
+        its turn a little later.
+        """
+        if self._stopped.is_set() or self._failed or self._worker is None:
+            return False
+        if not self._audio_since_turn and not self._spoken_text:
+            # Nothing has arrived since the last turn: there is no word being
+            # held, and a turn boundary here would only report silence.
+            return False
+        self._turn_closed.clear()
+        self._enqueue(_FlashPad(self._flush_pad()))
+        try:
+            await asyncio.wait_for(self._turn_closed.wait(), timeout=_FINISH_TIMEOUT_S)
+        except TimeoutError:
+            log.info(
+                "the recogniser is still decoding what was said; the turn will close "
+                "when it reaches the end of it"
+            )
+        return True
+
+    def _flush_pad(self) -> bytes:
+        """The silence a streaming recogniser needs to emit its last word."""
+        samples = int(self.settings.stt_sample_rate * _FINISH_PAD_MS / 1000.0)
+        return b"\x00\x00" * samples
+
+    def _enqueue(self, batch: bytes) -> None:
+        """Queue one batch ahead of the frame batching in :meth:`push_audio`."""
+        if self._batch:
+            # Whatever is buffered is older audio and has to stay in front of it.
+            with contextlib.suppress(asyncio.QueueFull):
+                self._batches.put_nowait(b"".join(self._batch))
+            self._batch.clear()
+        try:
+            self._batches.put_nowait(batch)
+        except asyncio.QueueFull:
+            with contextlib.suppress(asyncio.QueueEmpty):
+                self._batches.get_nowait()
+            with contextlib.suppress(asyncio.QueueFull):
+                self._batches.put_nowait(batch)
+
     # --- decoding --------------------------------------------------------
     async def _decode_loop(self) -> None:
         """Decode batches on one thread, translating endpoints into turns."""
@@ -431,6 +527,12 @@ class LocalSpeechToText:
                     continue
                 if batch is None:
                     return
+                if isinstance(batch, _FlashPad):
+                    # The end of what the user said has been decoded, so the turn
+                    # may be closed -- and only now, which is what keeps a request
+                    # that arrives while the decoder is behind from cutting an
+                    # utterance short.
+                    self._finish_requested = True
                 try:
                     text, endpoint = await loop.run_in_executor(_EXECUTOR, session.feed, batch)
                 except Exception as exc:
@@ -517,7 +619,17 @@ class LocalSpeechToText:
                 self._utterance_ms / 1000.0,
                 text[:40],
             )
-        ended = self._silence_ms >= threshold or (backstop and paused) or exhausted
+        ended = (
+            self._silence_ms >= threshold
+            or (backstop and paused)
+            or exhausted
+            # The user switched the microphone off, and the silence that flushes
+            # the last word has already been decoded: whatever the transcript
+            # looks like, this is the end of the turn. Note that it does not also
+            # require a pause — the flush itself revises the text, and a revision
+            # resets the silence clock.
+            or self._finish_requested
+        )
         if not ended and not endpoint:
             return
 
@@ -558,6 +670,9 @@ class LocalSpeechToText:
         if not self._suppress_finals:
             await self._on_transcript(TranscriptEvent(text="", final=True, is_end_of_turn=True))
         self._reset_utterance(session)
+        # After the session has been told, so whoever asked for this turn to close
+        # can rely on the transcript having been handed over.
+        self._turn_closed.set()
 
     def _reset_utterance(self, session: _LocalSession) -> None:
         """Clear per-utterance state after a turn boundary."""
@@ -566,6 +681,8 @@ class LocalSpeechToText:
         self._utterance_ms = 0.0
         self._spoken_text = ""
         self._emitted_text = ""
+        self._finish_requested = False
+        self._audio_since_turn = False
 
     def _note_suppressed(self, text: str) -> None:
         """Record a transcript dropped as the agent's own voice.

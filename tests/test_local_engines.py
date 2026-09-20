@@ -307,6 +307,59 @@ class TestLocalStt:
         assert decoded[-1].text == "hello there friend"
         assert decoded[-1].final is False
 
+    async def test_finishing_the_utterance_flushes_the_word_being_held(self, tmp_path, monkeypatch):
+        """Switching the microphone off must not cut the last word off the turn.
+
+        A streaming transducer emits a word only once it has heard the audio that
+        follows it, so the recogniser is still holding the end of the sentence
+        when the user reaches for the button — and no more audio is coming. The
+        pad is what releases it.
+        """
+        FakeRecognizer.script = ["repeat back to", "repeat back to me the cost"]
+        engine, events = self._engine(tmp_path, monkeypatch)
+        await engine.start()
+        try:
+            await asyncio.sleep(0.05)
+            for _ in range(10):
+                engine.push_audio(b"\x00\x01" * 512)
+            await asyncio.sleep(0.2)
+            assert not [e for e in events if e.is_end_of_turn], (
+                "the turn must still be open: the speaker has not paused"
+            )
+
+            await engine.finish_utterance()
+        finally:
+            await engine.stop()
+
+        # The flushed revision is what the session is left holding when the turn
+        # closes: a final that only repeats the last partial verbatim is not worth
+        # a second event, so the text arrives as the caption.
+        heard = [e.text for e in events if e.text and not e.is_end_of_turn]
+        assert heard[-1] == "repeat back to me the cost", (
+            f"the turn was closed without the word the recogniser was holding: {heard!r}"
+        )
+        assert [e for e in events if e.is_end_of_turn], "the turn was never closed"
+
+    async def test_finishing_with_nothing_heard_does_nothing(self, tmp_path, monkeypatch):
+        """No audio has arrived since the last turn, so there is nothing to flush."""
+        engine, events = self._engine(tmp_path, monkeypatch)
+        await engine.start()
+        try:
+            await asyncio.sleep(0.05)
+            await engine.finish_utterance()
+        finally:
+            await engine.stop()
+        assert events == [], f"an empty utterance produced {events!r}"
+
+    async def test_finishing_a_stopped_engine_returns(self, tmp_path, monkeypatch):
+        """The microphone can be switched off before or after the recogniser runs."""
+        engine, _events = self._engine(tmp_path, monkeypatch)
+        await engine.finish_utterance()  # never started
+        await engine.start()
+        await asyncio.sleep(0.05)
+        await engine.stop()
+        await engine.finish_utterance()  # already stopped
+
     async def test_an_unchanged_revision_is_not_re_emitted(self, tmp_path, monkeypatch):
         """The recogniser repeats itself every batch while the speaker pauses."""
         FakeRecognizer.script = ["same"] * 400

@@ -41,6 +41,9 @@ class FakeStt:
     def set_suppression(self, value: bool) -> None:
         self.suppressed = value
 
+    async def finish_utterance(self) -> bool:
+        return False
+
     def stop(self) -> None:  # pragma: no cover - not exercised here
         return None
 

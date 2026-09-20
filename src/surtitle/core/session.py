@@ -608,9 +608,8 @@ class Session:
             return
         self.stt.set_suppression(open_ and self._is_speaking())
         self._announce_suppression(open_ and self._is_speaking())
-        if not open_ and self._state.interim:
-            self._state.interim = ""
-            await self.emit(EventKind.INTERIM, text="")
+        if not open_:
+            await self._finish_listening()
 
     async def handle_text(self, text: str, *, interrupt: bool = False) -> None:
         """Run a typed turn, exactly as if it had been spoken.
@@ -724,6 +723,19 @@ class Session:
             # have paused. Starting a turn on silence would answer nothing.
             return
 
+        await self._schedule_utterance(utterance)
+
+    async def _schedule_utterance(self, utterance: str) -> None:
+        """Queue a finished utterance, holding briefly for the rest of the sentence.
+
+        A recogniser's end of turn is not always the end of a sentence, so what
+        was heard is delivered after a short wait, and anything arriving in that
+        wait joins it. The hold is per arrival of *new* text, not a flat delay:
+        once a full window passes with nothing further transcribed, the sentence
+        is over and waiting longer only delays the answer. That is what keeps two
+        separate questions from being run together, which a fixed hold on every
+        utterance would do to anyone who pauses between sentences.
+        """
         now = asyncio.get_running_loop().time()
         if not self._utterance_pending:
             # The first boundary of this thought: how long we may wait for the
@@ -740,6 +752,39 @@ class Session:
 
         self._utterance_buffer = utterance
         self._commit_task = asyncio.create_task(self._commit_speech(), name="speech-commit")
+
+    async def _finish_listening(self) -> None:
+        """Deliver what was heard when the microphone is switched off.
+
+        Switching the microphone off mid-sentence is the user saying "that is my
+        turn" — and it is how somebody who is not sure their pause was long enough
+        ends a thought. The transcript in hand used to be dropped here, so the
+        whole utterance vanished: nothing was sent, nothing was answered, and the
+        only way to say it again was to type it.
+
+        The recogniser is asked to close the utterance first, because a local
+        model is still holding the last word of it until it has heard the audio
+        that follows — and no more audio is coming. An engine that says it has
+        taken charge of the delivery (see ``finish_utterance``) is trusted to do
+        so, which is how a decoder that is a moment behind still reports the whole
+        sentence; the fallback below is for an engine with nothing to flush, or one
+        that is not running at all.
+        """
+        try:
+            delivered_by_engine = await self.stt.finish_utterance()
+        except Exception as exc:
+            # A recogniser that is already broken must not also eat the turn.
+            log.warning("could not close the utterance at the recogniser: %s", exc)
+            delivered_by_engine = False
+        if delivered_by_engine:
+            return
+
+        pending = self._state.interim.strip()
+        if not pending:
+            return
+        self._state.interim = ""
+        await self.emit(EventKind.INTERIM, text=pending, final=True, end_of_turn=True)
+        await self._schedule_utterance(pending)
 
     async def _commit_speech(self) -> None:
         """Deliver what was said, once speech has actually stopped.

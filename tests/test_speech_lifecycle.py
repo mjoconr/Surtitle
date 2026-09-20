@@ -166,12 +166,17 @@ class RecordingStt:
     def __init__(self) -> None:
         self.suppression: list[bool] = []
         self.audio: list[bytes] = []
+        self.finished = 0
 
     def set_suppression(self, suppressed: bool) -> None:
         self.suppression.append(suppressed)
 
     def push_audio(self, frame: bytes) -> None:
         self.audio.append(frame)
+
+    async def finish_utterance(self) -> bool:
+        self.finished += 1
+        return False
 
 
 @pytest.fixture
@@ -555,6 +560,112 @@ class TestAnUtteranceIsNotCutInHalf:
         ], "two questions asked with a pause between them are two turns"
 
 
+class TestTurningTheMicrophoneOffSendsWhatWasHeard:
+    """Switching the microphone off is the user saying "that is my turn".
+
+    Reported from a real session: the user spoke, reached for the microphone
+    button before the pause was long enough to end the turn, and the transcript
+    in hand was thrown away — nothing was sent, nothing was answered, and the
+    only way to say it again was to type it. The interim text was cleared here
+    and no turn was ever started from it.
+    """
+
+    async def test_an_interim_transcript_becomes_a_turn(self, tmp_path):
+        from surtitle.voice.stt import TranscriptEvent
+
+        session, _tts, stt = _wired_with_recorder(tmp_path)
+        await session.handle_mic(True)
+        # Live captions, but no end of turn yet: the user has not paused.
+        await session._on_transcript(
+            TranscriptEvent(text="What does the slow speed arm do", final=False)
+        )
+
+        await session.handle_mic(False)
+        await _settle(session)
+
+        assert _voice_utterances(session) == ["What does the slow speed arm do"], (
+            "the microphone going off must send what was heard, not discard it"
+        )
+        assert stt.finished == 1, "the recogniser is asked to close the utterance"
+
+    async def test_nothing_is_sent_when_nothing_was_heard(self, tmp_path):
+        session, _tts, _stt = _wired_with_recorder(tmp_path)
+        await session.handle_mic(True)
+
+        await session.handle_mic(False)
+        await _settle(session)
+
+        assert _voice_utterances(session) == [], "silence is not an utterance"
+
+    async def test_the_caption_is_finalised_rather_than_blanked(self, tmp_path):
+        """The text the user is looking at must not vanish for the hold's duration."""
+        from surtitle.voice.stt import TranscriptEvent
+
+        session, _tts, _stt = _wired_with_recorder(tmp_path)
+        await session.handle_mic(True)
+        await session._on_transcript(TranscriptEvent(text="Stop the line", final=False))
+
+        await session.handle_mic(False)
+
+        interims = [
+            event
+            for event in _drain(session)
+            if event.kind.value == "interim" and event.data.get("end_of_turn")
+        ]
+        assert [event.data.get("text") for event in interims] == ["Stop the line"], (
+            "the caption should be shown as the finished utterance, not cleared"
+        )
+
+    async def test_an_engine_that_flushes_itself_is_not_also_sent_by_the_session(self, tmp_path):
+        """The local engine pads the recogniser and reports the turn itself.
+
+        Delivering the session's interim as well would send the sentence twice —
+        and the extra copy is the text from *before* the flush, so it is the
+        truncated one.
+        """
+        from surtitle.voice.stt import TranscriptEvent
+
+        session, _tts, stt = _wired_with_recorder(tmp_path)
+
+        async def flush() -> bool:
+            # What LocalSpeechToText does when it is asked to finish: the flushed
+            # revision, then the turn boundary.
+            await session._on_transcript(
+                TranscriptEvent(text="repeat back to me the cost", final=True)
+            )
+            await session._on_transcript(TranscriptEvent(text="", final=True, is_end_of_turn=True))
+            return True
+
+        stt.finish_utterance = flush  # type: ignore[method-assign]
+        await session.handle_mic(True)
+        await session._on_transcript(TranscriptEvent(text="repeat back to", final=False))
+
+        await session.handle_mic(False)
+        await _settle(session)
+
+        assert _voice_utterances(session) == ["repeat back to me the cost"], (
+            "the flushed transcript must be delivered exactly once"
+        )
+
+    async def test_a_recogniser_that_cannot_close_a_turn_still_sends_it(self, tmp_path):
+        """The fallback: an engine that fails to flush must not lose the turn."""
+        from surtitle.voice.stt import TranscriptEvent
+
+        session, _tts, stt = _wired_with_recorder(tmp_path)
+
+        async def explode() -> bool:
+            raise RuntimeError("the socket is gone")
+
+        stt.finish_utterance = explode  # type: ignore[method-assign]
+        await session.handle_mic(True)
+        await session._on_transcript(TranscriptEvent(text="Read the pressure", final=False))
+
+        await session.handle_mic(False)
+        await _settle(session)
+
+        assert _voice_utterances(session) == ["Read the pressure"]
+
+
 class TestEchoSuppressionCannotGetStuck:
     """Suppression that outlives the agent's audio silently eats the user's words.
 
@@ -660,6 +771,14 @@ def _voice_utterances(session) -> list[str]:
         if event.kind.value == "user_text" and event.data.get("source") == "voice":
             texts.append(str(event.data.get("text", "")))
     return texts
+
+
+def _drain(session) -> list:
+    """Every event the session has queued, drained in order."""
+    events = []
+    while not session._outbox.empty():
+        events.append(session._outbox.get_nowait())
+    return events
 
 
 def _wired_with_recorder(tmp_path, **overrides):

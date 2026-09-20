@@ -61,6 +61,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Switching the microphone off sends what was said instead of discarding it.**
+  Turning the microphone off mid-sentence is the user saying "that is my turn", and
+  it is how somebody who is not sure their pause was long enough ends a thought —
+  but the transcript in hand was cleared there and no turn was started from it, so
+  the whole utterance vanished: nothing was sent, nothing was answered, and the
+  only way to say it again was to type it. The session now asks the recogniser to
+  close the utterance and then delivers what it has. For a local model that means
+  queueing the silence it needs to emit the word it is still holding, because no
+  more audio is coming: measured, an 0.8 s pad left "…talk to Steve" for "…talk to
+  Steve next week?" and 1.6 s completed it. The turn closes when the decoder
+  *reaches* that pad, so a decoder that is behind reports the whole utterance
+  rather than a truncated one. Measured with audio arriving in real time, the turn
+  closes 48–84 ms after the button.
+
 - **The install prompt quoted a size 260 MB larger than the download.** The large
   recogniser's archive also carries an fp32 encoder that the installer
   deliberately skips, and the figure shown before asking for consent counted it.
