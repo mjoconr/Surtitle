@@ -628,9 +628,34 @@ class Session:
             # Not marked queued: it is going now, and the client should treat it as
             # the current request — the turn it displaces is being cancelled.
             await self.emit(EventKind.USER_TEXT, text=cleaned, source="typed")
+            log.info("pushed a typed request through the running turn: %r", cleaned[:80])
             await self.cancel_turn()
             return
         await self._deliver(cleaned, "typed")
+
+    async def push_queued(self) -> None:
+        """Run the request waiting behind the running turn, now.
+
+        Push means "this cannot wait". With nothing typed, "this" is the request
+        the user already sent and is watching sit behind a turn — and a turn can
+        run for minutes, which is a long time to watch your own message wait. The
+        only other way forward was Stop, which deliberately drops what is queued,
+        so it threw away the very message they wanted to move.
+
+        Cancelling is the whole of it: a stopped turn drains its queue on the way
+        out, and that starts whatever was at the front of it. Nothing is dropped
+        and nothing is sent twice, because the queued request is started, not
+        re-delivered.
+        """
+        if not self._queue:
+            log.info("push with nothing waiting behind the turn; nothing to do")
+            return
+        text, source = self._queue[0]
+        log.info("pushing the queued %s request through the running turn: %r", source, text[:80])
+        if not self._turn_in_flight():
+            self._drain_queue()
+            return
+        await self.cancel_turn()
 
     def clear_queue(self) -> None:
         """Drop requests held behind the running turn. Stop means stop."""

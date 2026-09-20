@@ -1384,6 +1384,47 @@ class TestAMessageTypedWhileTheAgentWorks:
         assert 'data-queued="true"' in clear
 
 
+class TestAReloadDoesNotLoseYourPlace:
+    """Reported as "the chat has gone missing after a reload of the page", with the
+    archive reading zero.
+
+    Nothing was lost — the conversation was in the store the whole time. The client
+    reopened the *first* project in the list, which is ordered by a
+    `last_opened_at` the server shares between every client and moves whenever any
+    of them opens a project. So a reload could land in somebody else's project: the
+    transcript was another conversation, the sidebar lists only the open project so
+    the reader's had vanished from it, and the archive counted that other project's
+    (empty) archive.
+    """
+
+    def test_the_browser_remembers_the_conversation_it_is_in(self, script):
+        remember = function_source(script, "rememberPlace")
+        assert "OPEN_SESSION_KEY" in remember and "OPEN_PROJECT_KEY" in remember
+        assert "rememberPlace(session)" in function_source(script, "selectSession")
+
+    def test_startup_reopens_that_conversation(self, script):
+        assert "openWhereIWas()" in function_source(script, "main")
+        restore = function_source(script, "openWhereIWas")
+        assert "OPEN_SESSION_KEY" in restore, "the remembered conversation is what it opens"
+        assert "state.projects[0].id" in restore, (
+            "with a fall back for a browser that has not been here before"
+        )
+        assert "/api/sessions/" in restore, (
+            "and for a remembered project that has since been deleted: the "
+            "conversation still knows which project it belongs to"
+        )
+
+    def test_a_project_can_be_opened_at_a_named_conversation(self, script):
+        # Searched in the whole script rather than through `function_source`, which
+        # stops at the first balanced brace — and this signature has a default
+        # argument (`options = {}`) that balances before the body begins.
+        assert "async function selectProject(projectId, options = {})" in script
+        assert "options.sessionId" in script, (
+            "opening a project has to be able to land on the remembered conversation "
+            "rather than flashing the newest one first"
+        )
+
+
 class TestStopAndPushControls:
     """Two ways out of a turn that is taking too long.
 
@@ -1404,8 +1445,12 @@ class TestStopAndPushControls:
         block = block[: block.index("\n}\n")]
         assert "el.stopButton.hidden = !working" in block
         assert "el.pushButton.hidden = !working" in block
-        assert 'state_ === "thinking" || state_ === "tool"' in script, (
-            "speaking after a turn is not working"
+
+        working = function_source(script, "isWorking")
+        assert '"speaking"' not in working, "speaking after a turn is not working"
+        assert '"awaiting_approval"' in working, (
+            "a turn stopped in front of an approval prompt is still running, and is "
+            "exactly when the user wants to push it aside"
         )
 
     def test_stop_sends_cancel_and_push_interrupts(self, script):
@@ -1413,6 +1458,35 @@ class TestStopAndPushControls:
         assert "sendMessage({ interrupt: true })" in script
         assert "interrupt: Boolean(options && options.interrupt)" in script, (
             "the flag has to reach the wire"
+        )
+
+    def test_push_is_disabled_when_it_has_nothing_to_act_on(self, script):
+        """A button that does nothing when pressed reads as a broken button.
+
+        Reported from a real session as "the push button does not seem to work":
+        with an empty box the handler returned without a word — no request, no
+        message, nothing on screen to say why.
+        """
+        block = function_source(script, "syncComposerControls")
+        assert "el.pushButton.disabled =" in block, "Push is never disabled"
+        assert 'sendCommand("push"' in script or '"push"' in script
+
+    def test_an_empty_push_acts_on_the_message_already_waiting(self, script):
+        """A turn can run for minutes; the queued message is what cannot wait."""
+        block = script[script.index('el.pushButton.addEventListener("click"') :]
+        block = block[: block.index("\n});\n")]
+
+        assert 'sendCommand("push"' in block, (
+            "with nothing typed, Push should move the waiting request, not do nothing"
+        )
+        assert "toast(" in block, "and say so when there is genuinely nothing to push"
+
+    def test_the_queued_marker_is_what_push_looks_for(self, script):
+        """Push finds the waiting message by the marker the client already sets."""
+        assert 'data-queued="true"' in function_source(script, "queuedBubble")
+        assert "syncComposerControls()" in function_source(script, "clearQueuedMarkers"), (
+            "Push must be re-enabled while a message is waiting, and disabled again "
+            "once it starts running"
         )
 
 

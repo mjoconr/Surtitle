@@ -1402,6 +1402,10 @@ async def _dispatch(session: Session, payload: dict[str, Any]) -> None:
         # do the next thing they had lined up.
         session.clear_queue()
         await session.cancel_turn()
+    elif command.kind is CommandKind.PUSH:
+        # Push, with nothing in the box: the message the user already sent and is
+        # watching wait behind a long turn is the thing that cannot wait.
+        await session.push_queued()
     elif command.kind is CommandKind.BARGE_IN:
         # The client detects loudness, which cannot tell the user from the
         # speakers. It requests; the server decides, using transcribed speech.

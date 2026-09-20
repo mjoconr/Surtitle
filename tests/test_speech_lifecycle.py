@@ -1184,6 +1184,54 @@ class TestStopAndPush:
         kinds = [e.kind for e in self._drain(session)]
         assert EventKind.STATE in kinds, "the browser is told the turn ended"
 
+    async def test_push_with_an_empty_box_runs_the_message_that_was_waiting(self, wired):
+        """Push with nothing typed is about the message already sent.
+
+        Reported from a real session: a turn that ran for thirteen minutes, a
+        message queued behind it, and a Push button that did nothing — because the
+        box it looked in was empty. Push now moves the queued request to the
+        front, which is the only way to do it without dropping it: Stop drops the
+        queue on purpose.
+        """
+        from surtitle.server import _dispatch
+
+        session, _tts, _stt = wired
+        model = await self._running_turn(session)
+        await session.handle_text("waiting behind", interrupt=False)
+
+        await _dispatch(session, {"kind": "push"})
+        for _ in range(50):
+            if session._turn is not None and not session._turn.done():
+                await asyncio.sleep(0)
+                continue
+            if not session._queue:
+                break
+            await asyncio.sleep(0)
+
+        answered = [prompt[-1]["content"] for prompt in model.prompts]
+        assert "waiting behind" in answered, (
+            f"the queued request never ran after the push: {answered}"
+        )
+        assert answered.count("waiting behind") == 1, (
+            "it ran once: pushing starts the queued request rather than re-sending it"
+        )
+        assert session._queue == [], "and it is no longer waiting"
+
+    async def test_push_with_nothing_waiting_leaves_the_turn_alone(self, wired):
+        """Nothing to push is not a reason to stop: that is what Stop is for."""
+        from surtitle.server import _dispatch
+
+        session, _tts, _stt = wired
+        model = await self._running_turn(session)
+        before = len(model.prompts)
+
+        await _dispatch(session, {"kind": "push"})
+
+        assert len(model.prompts) == before, "no turn was started by an empty push"
+        assert session._turn is not None and not session._turn.done(), (
+            "an empty push must not cancel work in progress"
+        )
+
 
 class TestASpokenTurnReplacesTheRunningOne:
     """Speaking over the agent must replace the turn, not duplicate it.

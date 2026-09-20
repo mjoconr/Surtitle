@@ -73,6 +73,9 @@ class CommandKind(StrEnum):
     PLAYBACK = "playback"
     APPROVAL = "approval"
     CANCEL = "cancel"
+    # Push with nothing in the box: run the request waiting behind the running
+    # turn now. Distinct from Cancel, which drops that request on purpose.
+    PUSH = "push"
     SET_MODE = "set_mode"
     PING = "ping"
 

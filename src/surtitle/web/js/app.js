@@ -12,6 +12,13 @@ import { Connection, ConnectionState } from "./connection.js";
 import { markdownToHtml } from "./markdown.js";
 import { SettingsPanel } from "./settings.js";
 
+// Where the reader is in the interface, so a reload puts them back rather than
+// somewhere else. Per browser, like the microphone and speaker choices: the
+// server's "most recently opened project" is shared, so two windows move it for
+// each other.
+const OPEN_PROJECT_KEY = "surtitle.openProject";
+const OPEN_SESSION_KEY = "surtitle.openSession";
+
 const AGENT_STATE_LABELS = {
   idle: "Idle",
   listening: "Listening",
@@ -733,9 +740,13 @@ function assistantTurn() {
 
 /** Drop the queued marker from messages whose turn has now begun. */
 function clearQueuedMarkers() {
+  let cleared = false;
   for (const bubble of el.turns.querySelectorAll('.bubble[data-queued="true"]')) {
     delete bubble.dataset.queued;
+    cleared = true;
   }
+  // Push acts on a queued message; once it is running there is nothing waiting.
+  if (cleared) syncComposerControls();
 }
 
 /**
@@ -1040,6 +1051,8 @@ async function replayThenJumpToLatest(build) {
 function renderAttachments() {
   el.attachments.replaceChildren();
   el.attachments.hidden = state.attachments.length === 0;
+  // An attachment is something Push can send, same as typed text.
+  syncComposerControls();
 
   for (const [index, file] of state.attachments.entries()) {
     const chip = document.createElement("span");
@@ -1849,10 +1862,27 @@ function setAgentState(name) {
   syncComposerControls();
 }
 
-/** True while a turn is actually running, as opposed to speaking after one. */
+/** True while a turn is running, including while it waits on your approval. */
 function isWorking() {
   const state_ = el.agentState.dataset.state;
-  return state_ === "thinking" || state_ === "tool";
+  // `awaiting_approval` counts. The turn is mid-flight and stopped in front of a
+  // question for the user, which is exactly when they want to say "not this,
+  // this instead" — and leaving Stop and Push hidden then is what made Push look
+  // broken: the agent in the report was sitting on an approval prompt with no
+  // Push button on screen at all.
+  return state_ === "thinking" || state_ === "tool" || state_ === "awaiting_approval";
+}
+
+/**
+ * The message the user has sent that is waiting behind the running turn.
+ *
+ * A turn can run for minutes, and the request sent behind it is the thing Push
+ * should act on when the box is empty: it is the user's own message, already
+ * written, and the alternative used to be Stop — which drops the queue, so it
+ * threw away the message they were trying to move.
+ */
+function queuedBubble() {
+  return el.turns.querySelector('.bubble[data-queued="true"]');
 }
 
 /**
@@ -1861,11 +1891,23 @@ function isWorking() {
  * Without them there was no way to halt a running turn at all — the protocol had a
  * cancel command and the client never sent it — and no way to say "this next thing
  * matters more than what you are doing", which is the other half of that.
+ *
+ * Push is disabled when it has nothing to act on. A visible button that does
+ * nothing when pressed is how it was reported: with the box empty it returned
+ * without a message, which is indistinguishable from a broken button.
  */
 function syncComposerControls() {
   const working = isWorking();
   el.stopButton.hidden = !working;
   el.pushButton.hidden = !working;
+  const typed = Boolean(el.composer.value.trim()) || state.attachments.length > 0;
+  const queued = Boolean(queuedBubble());
+  el.pushButton.disabled = !(typed || queued);
+  el.pushButton.title = typed
+    ? "Interrupt the agent and send this now"
+    : queued
+      ? "Run the message waiting behind this turn now"
+      : "Nothing to push yet — type a message, or send one first";
   el.sendButton.title = working
     ? "Send — it will run after this turn finishes (Enter)"
     : "Send (Enter)";
@@ -2135,7 +2177,8 @@ function handleEvent(event) {
       state.lastUserText = data.text || "";
       if (queued) {
         turn.bubble.dataset.queued = "true";
-        toast("Queued — it will run as soon as this request finishes.");
+        toast("Queued — it will run as soon as this request finishes. Push runs it now.");
+        syncComposerControls();
         break;
       }
       state.currentTurn = null;
@@ -2881,7 +2924,7 @@ async function loadProjects() {
   renderProjects();
 }
 
-async function selectProject(projectId) {
+async function selectProject(projectId, options = {}) {
   const project = await api(`/api/projects/${projectId}`);
   leaveSession();
   state.project = project;
@@ -2897,11 +2940,62 @@ async function selectProject(projectId) {
   renderHeader();
   await loadFiles(".");
 
-  if (state.sessions.length === 0) {
+  // `sessionId` is the caller asking for one specific conversation — the one the
+  // reader was in before a reload. Anything else opens the newest, as before.
+  const wanted = options.sessionId;
+  if (wanted && state.sessions.some((session) => session.id === wanted)) {
+    await selectSession(wanted);
+  } else if (state.sessions.length === 0) {
     await createSession();
   } else {
     await selectSession(state.sessions[0].id);
   }
+}
+
+/** Remember where the reader is, so the next reload can put them back. */
+function rememberPlace(session) {
+  try {
+    localStorage.setItem(OPEN_SESSION_KEY, session.id);
+    if (session.project_id) localStorage.setItem(OPEN_PROJECT_KEY, session.project_id);
+  } catch {
+    // Storage can be refused outright. Forgetting the place is a small loss; a
+    // conversation that will not open is not.
+  }
+}
+
+/**
+ * Open the conversation the reader was in, rather than the one touched last.
+ *
+ * A reload landed on the first project in the list, which is ordered by
+ * `last_opened_at` — a server-side value that every client shares and any of
+ * them moves by opening a project. So a reload could drop the reader into a
+ * different project entirely: the transcript was somebody else's conversation,
+ * the sidebar lists only the open project so theirs had vanished from it, and
+ * the archive count read zero because that project had nothing archived.
+ * Reported as "the chat has gone missing after a reload of the page".
+ */
+async function openWhereIWas() {
+  const sessionId = localStorage.getItem(OPEN_SESSION_KEY);
+  const projectId = localStorage.getItem(OPEN_PROJECT_KEY);
+  const remembered = state.projects.find((project) => project.id === projectId);
+  if (remembered) {
+    await selectProject(remembered.id, { sessionId });
+    return;
+  }
+  // No project remembered, or it has since been deleted. The conversation knows
+  // which project it belongs to, so it can still be reached.
+  if (sessionId) {
+    try {
+      const session = await api(`/api/sessions/${sessionId}`);
+      if (!session.archived) {
+        await selectProject(session.project_id, { sessionId });
+        return;
+      }
+    } catch {
+      /* deleted, archived or unreachable: fall through to the first project */
+    }
+  }
+  await selectProject(state.projects[0].id);
 }
 
 async function renameProject(project) {
@@ -3099,6 +3193,7 @@ let sessionRetry = 0;
 
 async function selectSession(sessionId) {
   const session = await api(`/api/sessions/${sessionId}`);
+  rememberPlace(session);
   // The conversation may have changed while that request was in flight — a click
   // is enough. Rendering the reply into whatever is open now would put one
   // conversation's transcript in another's window.
@@ -3409,6 +3504,7 @@ async function sendMessage(options = {}) {
   el.composer.value = "";
   el.composer.style.height = "auto";
   clearAttachments();
+  syncComposerControls();
   setAgentState("thinking");
 }
 
@@ -3439,7 +3535,22 @@ el.stopButton.addEventListener("click", () => {
 });
 
 // Push: stop the turn and send this through it, rather than behind it.
-el.pushButton.addEventListener("click", () => sendMessage({ interrupt: true }));
+// Push: stop the turn and send this through it, rather than behind it. With an
+// empty box it means the message already waiting behind the turn — the only way
+// to move that forward without dropping it, which Stop does on purpose.
+el.pushButton.addEventListener("click", () => {
+  if (el.composer.value.trim() || state.attachments.length > 0) {
+    sendMessage({ interrupt: true });
+    return;
+  }
+  if (!queuedBubble()) {
+    // Reachable only if the button was clicked before it was disabled. Saying so
+    // beats returning silently, which is what made this look broken.
+    toast("Nothing to push — the box is empty and nothing is waiting.", "error");
+    return;
+  }
+  activeConnection().sendCommand("push", {});
+});
 
 el.micButton.addEventListener("click", toggleMic);
 
@@ -3526,6 +3637,8 @@ el.composer.addEventListener("keydown", (event) => {
 el.composer.addEventListener("input", () => {
   el.composer.style.height = "auto";
   el.composer.style.height = `${Math.min(160, el.composer.scrollHeight)}px`;
+  // Whether Push has anything to act on depends on the box being empty.
+  syncComposerControls();
 });
 
 // A right-click on the mic opens the device picker directly: choosing an input is
@@ -4041,7 +4154,7 @@ async function main() {
   try {
     await loadProjects();
     if (state.projects.length > 0) {
-      await selectProject(state.projects[0].id);
+      await openWhereIWas();
     } else {
       renderSessions();
       renderRightbar();
