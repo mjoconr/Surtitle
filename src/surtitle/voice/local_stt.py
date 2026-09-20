@@ -9,10 +9,12 @@ understanding:
 **Turn detection is acoustic.** Deepgram's Flux decides an endpoint from *what
 was said*, which is why it does not cut you off mid-thought. A streaming
 zipformer offers no such judgement, so a turn ends when you have been silent for
-long enough. Two things soften that: :func:`looks_unfinished` and
-:func:`extension_ms` grade the wait by what the transcript looks like, giving an
-apparently unfinished thought more patience than a finished one; and the ceiling
-in :data:`~surtitle.config.Settings.local_max_utterance_ms` is a backstop against
+long enough — helped by the fact that the default model, unlike the older ones,
+punctuates: a sentence that ends in a full stop is a thought that closed, and one
+that trails off gets more patience. Two things soften what is otherwise a timer:
+:func:`looks_unfinished` and :func:`extension_ms` grade the wait by what the
+transcript looks like; and the ceiling in
+:data:`~surtitle.config.Settings.local_max_utterance_ms` is a backstop against
 someone who never pauses, never a way to end a turn by clock. It remains a
 heuristic, not understanding, and ``docs/VOICE.md`` says so.
 
@@ -75,11 +77,21 @@ _HARD_CEILING_MS = 60_000.0
 _IMPLAUSIBLE_AFTER_MS = 10_000.0
 _IMPLAUSIBLE_CHARS = 2
 
-# How much silence the backstop needs before it may close a turn. One full batch,
-# so it means "the speaker actually paused" rather than a gap between words: the
-# backstop exists to stop someone who never pauses, and must never be the thing
-# that cuts off someone who is still talking.
-_CEILING_PAUSE_MS = 300.0
+# How much trailing silence must be in hand before *anything* may end a turn.
+#
+# A streaming transducer emits a word only once it has heard the audio that
+# follows it, so the silence after a sentence is also what flushes the last word
+# of it. Measured by decoding one clip with varying amounts of silence appended:
+#
+#     0.32 s   "I'M FROM THE CUTTER LYING OFF THE COA"
+#     0.80 s   "I'M FROM THE CUTTER LYING OFF THE COAST"
+#
+# So this bounds the ordinary silence rule and the backstop alike, whatever the
+# configured window says. A shorter one would quietly clip the end off every
+# utterance, which reads as a recognition failure rather than as a setting -- and
+# the shipped default is exactly this value, so the floor changes nothing until
+# somebody lowers it.
+_FLUSH_MS = 800.0
 
 # Words that mean the sentence has not finished, so the turn stays open a little
 # longer. Deliberately short: an over-eager list makes the agent feel
@@ -138,8 +150,9 @@ def looks_unfinished(text: str) -> bool:
     """True when a transcript is probably mid-thought.
 
     Used to extend the silence window before declaring a turn over. The signal
-    is deliberately cheap: this streaming model does not punctuate, so a
-    transcript without terminal punctuation *might* be finished and might not.
+    is deliberately cheap: not every local model punctuates — the default one
+    does, the older one does not — so a transcript without terminal punctuation
+    *might* be finished and might not.
 
     See :func:`extension_ms` for how the two strengths of signal are graded. The
     asymmetry is deliberate — a false positive costs a slightly longer pause
@@ -154,11 +167,13 @@ def looks_unfinished(text: str) -> bool:
 def extension_ms(settings: Settings, text: str) -> int:
     """How long to be silent before ending a turn, given what was heard.
 
-    Turn-taking on a local model is a guess, because the recogniser emits no
-    punctuation: "the ingest worker is" and "the ingest worker is loud" are
-    the same kind of thing to it. So the guess is graded, and it leans the way the
-    cheaper mistake lies — a moment of extra patience costs nothing, cutting an
-    explanation off mid-thought costs the whole answer.
+    Turn-taking on a local model is a guess. The default model punctuates, which
+    makes "the ingest worker is loud." distinguishable from "the ingest worker
+    is"; the older model emits no punctuation at all, and there "the ingest worker
+    is" and "the ingest worker is loud" are the same kind of thing to it. So the
+    guess is graded, and it leans the way the cheaper mistake lies — a moment of
+    extra patience costs nothing, cutting an explanation off mid-thought costs the
+    whole answer.
 
     * A trailing function word ("and", "the", "because") is strong evidence that
       more is coming, and earns the full extension.
@@ -169,8 +184,12 @@ def extension_ms(settings: Settings, text: str) -> int:
       on half an explanation.
     * Terminal punctuation, when the model does emit it, is the one positive sign
       that the thought closed, and gets the plain silence.
+
+    No answer is shorter than :data:`_FLUSH_MS`: below that the recogniser is
+    still holding the last word, so a shorter window would not end the turn
+    early — it would end it with the sentence truncated.
     """
-    base = settings.local_eot_silence_ms
+    base = max(settings.local_eot_silence_ms, _FLUSH_MS)
     extended = max(base, settings.local_eot_extend_ms)
     if _is_trailing_cue(text):
         return extended
@@ -477,9 +496,11 @@ class LocalSpeechToText:
         # sounds finished, and a clock cannot know that. It may only close a turn
         # once the speaker has actually paused, so a long explanation is never cut
         # off mid-word -- which is exactly what happened when this fired on the
-        # clock alone at 20.16 s, part-way through a sentence.
+        # clock alone at 20.16 s, part-way through a sentence. The pause it waits
+        # for is the flush, not a token one: closing sooner would cut the last word
+        # off the very sentence it is trying to rescue.
         backstop = self._utterance_ms >= self.settings.local_max_utterance_ms
-        paused = self._silence_ms >= _CEILING_PAUSE_MS
+        paused = self._silence_ms >= _FLUSH_MS
         if backstop and paused:
             log.warning(
                 "turn closed by the backstop after %.1fs of continuous speech while "

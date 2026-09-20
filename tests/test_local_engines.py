@@ -241,6 +241,28 @@ class TestTurnPolicy:
         for terminal in (".", "!", "?", "…"):
             assert looks_unfinished(f"read the report{terminal}") is False
 
+    def test_no_setting_can_close_a_turn_before_the_last_word_is_flushed(self, tmp_path):
+        """The silence that ends a turn is also what flushes the last word of it.
+
+        Decoding one clip with 0.32 s of trailing silence gave "…LYING OFF THE
+        COA" and with 0.80 s gave the whole sentence. So a window below the
+        recogniser's flush latency does not shorten the pause — it truncates the
+        sentence, which reads as a recognition failure rather than a setting.
+        """
+        from surtitle.voice.local_stt import _FLUSH_MS, extension_ms
+
+        settings = make_settings(
+            tmp_path,
+            SURTITLE_LOCAL_EOT_SILENCE_MS="200",
+            SURTITLE_LOCAL_EOT_EXTEND_MS="200",
+        )
+        assert settings.local_eot_silence_ms == 200, "the setting is accepted as written"
+        for text in ("done.", "what is the revenue", "read the file and", ""):
+            assert extension_ms(settings, text) >= _FLUSH_MS, (
+                f"{text!r} would end a turn after less silence than the recogniser "
+                f"needs to emit its last word"
+            )
+
 
 # ---------------------------------------------------------------------------
 # Local STT
@@ -357,9 +379,10 @@ class TestLocalStt:
             for _ in range(40):
                 engine.push_audio(b"\x00\x01" * 512)
                 await asyncio.sleep(0.005)
-            # A single quiet batch: one real pause, far short of the wait the
-            # unfinished-transcript rule would otherwise apply.
-            for _ in range(10):
+            # A pause long enough to flush the last word (below which nothing may
+            # end a turn) but still short of the wait an unfinished transcript
+            # would otherwise earn.
+            for _ in range(30):
                 engine.push_audio(b"\x00\x00" * 512)
                 await asyncio.sleep(0.02)
         finally:
@@ -700,7 +723,7 @@ class TestAudioThatNeverPauses:
             for _ in range(60):
                 engine.push_audio(b"\x00\x01" * 512)
                 await asyncio.sleep(0.005)
-            for _ in range(10):  # one real pause, so the turn closes
+            for _ in range(30):  # a long enough pause that the turn flushes and closes
                 engine.push_audio(b"\x00\x00" * 512)
                 await asyncio.sleep(0.02)
         finally:
