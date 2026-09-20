@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0-rc2] - 2026-09-20
+
 ### Changed
 
 - **The local recogniser is now one trained on real recordings, and it hears
