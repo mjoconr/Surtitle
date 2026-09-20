@@ -1213,3 +1213,112 @@ class TestShellIntegration:
         assert response.status_code == 400
         assert "not writable" in response.json()["error"]
         await app.state.app_state.aclose()
+
+
+class TestCheckingAProviderThatNeedsNoKey:
+    """A keyless provider has no key field, so there was no way to ask whether it is
+    there at all — which is the whole question for a model server on this machine.
+    """
+
+    async def test_an_unknown_provider_is_a_404(self, client):
+        response = await client.post("/api/providers/nonesuch/verify")
+
+        assert response.status_code == 404
+
+    async def test_a_provider_with_nothing_to_check_says_so(self, client):
+        response = await client.post("/api/providers/duckduckgo/verify")
+
+        assert response.status_code == 400
+        assert "nothing to check" in response.json()["error"]
+
+    async def test_a_local_server_that_is_not_running_says_where_it_looked(
+        self, client, monkeypatch
+    ):
+        import httpx as httpx_module
+
+        from surtitle import server as server_module
+
+        class Refusing:
+            def __init__(self, **_kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_exc):
+                return False
+
+            async def get(self, *_args, **_kwargs):
+                raise httpx_module.ConnectError("connection refused")
+
+        monkeypatch.setattr(server_module.httpx, "AsyncClient", Refusing)
+
+        response = await client.post("/api/providers/ollama/verify")
+
+        assert response.status_code == 502
+        error = response.json()["error"]
+        assert "127.0.0.1:11434" in error, "the address it tried is the useful part"
+        assert "ConnectError" in error
+
+    async def test_a_running_server_reports_what_it_offers(self, client, monkeypatch):
+        import json as json_module
+
+        import httpx as httpx_module
+
+        from surtitle import server as server_module
+
+        class Answering:
+            def __init__(self, **_kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_exc):
+                return False
+
+            async def get(self, url, headers=None):
+                assert "Authorization" not in (headers or {}), "nothing to authenticate with"
+                assert url.endswith("/models")
+                return httpx_module.Response(
+                    200,
+                    content=json_module.dumps(
+                        {"data": [{"id": "llama3.2"}, {"id": "qwen2.5"}]}
+                    ).encode(),
+                    headers={"content-type": "application/json"},
+                )
+
+        monkeypatch.setattr(server_module.httpx, "AsyncClient", Answering)
+
+        response = await client.post("/api/providers/ollama/verify")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["ok"] is True
+        assert body["models"] == ["llama3.2", "qwen2.5"]
+        assert body["url"].endswith("/models")
+
+    async def test_a_rejected_key_is_reported_against_its_field(self, client, monkeypatch):
+        import httpx as httpx_module
+
+        from surtitle import server as server_module
+
+        class Refusing:
+            def __init__(self, **_kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_exc):
+                return False
+
+            async def get(self, *_args, **_kwargs):
+                return httpx_module.Response(401, content=b"{}")
+
+        monkeypatch.setattr(server_module.httpx, "AsyncClient", Refusing)
+
+        response = await client.post("/api/providers/openrouter/verify")
+
+        assert response.status_code == 400
+        assert response.json()["field"] == "OPENROUTER_API_KEY"

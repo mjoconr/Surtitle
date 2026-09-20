@@ -14,6 +14,10 @@ on:
         description: Publish as a draft release
         type: boolean
         default: true
+      prerelease:
+        description: Mark the release as a pre-release
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -139,6 +143,12 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           draft: ${{ github.event_name == 'workflow_dispatch' && inputs.draft || false }}
+          # A pre-release is a version to try rather than one to be handed. Two
+          # things follow from marking it: GitHub's "latest release" keeps pointing
+          # at the last real one, and the updater refuses to offer a prerelease to
+          # somebody running a released build. Set for a tag like v1.2.0-rc1 by
+          # dispatching the workflow, which is why the input exists.
+          prerelease: ${{ github.event_name == 'workflow_dispatch' && inputs.prerelease || contains(github.ref_name, '-') }}
           generate_release_notes: true
           files: |
             artifacts/*

@@ -925,6 +925,21 @@ export class SettingsPanel {
       }
     }
 
+    // A provider with an endpoint can be asked whether it is there. That is the
+    // whole question for one running on this machine, and there is no key field
+    // here to hang the Test button on.
+    if (provider.base_url && provider.kind === "local") {
+      const actions = document.createElement("div");
+      actions.className = "provider__actions";
+      const test = document.createElement("button");
+      test.type = "button";
+      test.className = "button button--ghost";
+      test.textContent = "Test connection";
+      test.addEventListener("click", () => this.testProvider(provider, test, wrap));
+      actions.append(test);
+      wrap.append(actions);
+    }
+
     if (provider.docs_url) {
       const meta = document.createElement("p");
       meta.className = "provider__meta";
@@ -933,6 +948,42 @@ export class SettingsPanel {
     }
 
     return wrap;
+  }
+
+  /**
+   * Ask the server whether a provider is reachable, and say what it found.
+   *
+   * The server makes the request because the browser cannot: a local model server
+   * does not send CORS headers, so a fetch from the page would fail for a server
+   * that is running perfectly.
+   */
+  async testProvider(provider, button, wrap) {
+    button.disabled = true;
+    const was = button.textContent;
+    button.textContent = "Testing…";
+    let result = null;
+    try {
+      const response = await fetch(`/api/providers/${provider.id}/verify`, { method: "POST" });
+      result = await response.json();
+      if (!response.ok) {
+        if (this.onToast) this.onToast(result.error || "That provider could not be reached.", "error");
+        return;
+      }
+      const models = result.models || [];
+      const note = document.createElement("p");
+      note.className = "provider__meta";
+      note.textContent = models.length
+        ? `Answered at ${result.url}. It offers: ${models.slice(0, 8).join(", ")}` +
+          (models.length > 8 ? ` and ${models.length - 8} more.` : ".")
+        : `Answered at ${result.url}, but listed no models.`;
+      wrap.append(note);
+      if (this.onToast) this.onToast(`${provider.label} is answering.`, "ok");
+    } catch (cause) {
+      if (this.onToast) this.onToast(`Could not test: ${cause.message}`, "error");
+    } finally {
+      button.disabled = false;
+      button.textContent = was;
+    }
   }
 
   /**

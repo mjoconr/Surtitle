@@ -625,6 +625,58 @@ def build_api(state: AppState) -> APIRouter:
         state.settings_store.effective()
         return {"credential": state_repr.to_dict()}
 
+    @api.post("/providers/{provider_id}/verify")
+    async def verify_provider(provider_id: str) -> dict[str, Any]:
+        """Probe a provider's endpoint, with a key if it has one and without if not.
+
+        Separate from the credential check because a provider that needs no key has
+        nothing to check: with Ollama or another local model server selected, "is it
+        running, and what has it got?" is the whole question, and there was no way to
+        ask it — the Test button lives on a key field that this provider does not
+        have. Nothing is persisted; the answer is about right now.
+        """
+        spec = PROVIDER_SPECS.get(str(provider_id))
+        if spec is None:
+            return _error(404, f"There is no provider called {provider_id!r}.")
+        if not spec.discovery_path or not spec.base_url:
+            return _error(400, f"{spec.label} has nothing to check.")
+
+        url = f"{spec.base_url.rstrip('/')}{spec.discovery_path}"
+        headers: dict[str, str] = {}
+        if spec.api_key_env:
+            key = state.settings_store.credential_value(spec.api_key_env)
+            if not key:
+                return _error(
+                    400,
+                    f"{spec.label} needs a key before it can be checked.",
+                    field=spec.api_key_env,
+                )
+            headers["Authorization"] = f"Bearer {key}"
+
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(url, headers=headers)
+        except httpx.HTTPError as exc:
+            # A local server that is not running is the common case, so say where it
+            # looked rather than only what went wrong.
+            return _error(502, f"{spec.label} is not answering at {url} ({type(exc).__name__}).")
+
+        if response.status_code in (401, 403):
+            return _error(400, f"{spec.label} rejected the key.", field=spec.api_key_env)
+        if response.status_code != 200:
+            return _error(502, f"{spec.label} answered HTTP {response.status_code} at {url}.")
+
+        try:
+            payload = response.json()
+        except ValueError:
+            return _error(502, f"{spec.label} returned something that was not JSON.")
+        models = [
+            str(item.get("id"))
+            for item in payload.get("data", [])
+            if isinstance(item, dict) and item.get("id")
+        ]
+        return {"ok": True, "provider": spec.label, "models": models, "url": url}
+
     @api.post("/credentials/{ref}/verify")
     async def verify_credential(
         ref: str, body: dict[str, Any] | None = Body(None)

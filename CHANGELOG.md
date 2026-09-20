@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0-rc1] - 2026-09-20
+
+### Added
+
+- **A provider running on this machine can be tested from Settings.** The Test button
+  lived on the API-key field, and a local model server has no key field — so the one
+  question worth asking about it, "is it there, and what has it got?", could not be
+  asked from the interface at all. Its card now has **Test connection**, which goes
+  through the server rather than the page (a local model server sends no CORS headers,
+  so a fetch from the browser would fail against a server that is working perfectly)
+  and reports what the endpoint answered and which models it offers. A server that is
+  not running is reported with the address that was tried.
+
+- **A release can be marked as a pre-release.** A tag with a suffix — `v0.15.0-rc1` —
+  is published as a pre-release automatically, and dispatching the workflow can mark
+  one too. Two things follow: GitHub's *latest release* keeps pointing at the last
+  real version, and the updater already refuses to offer a prerelease to somebody
+  running a released build, so a pre-release is handed to whoever goes looking for it
+  rather than announced to everyone.
+
 ## [0.14.0] - 2026-09-20
 
 ### Added

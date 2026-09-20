@@ -139,6 +139,28 @@ the release. That is the way to find out whether the release path still works, a
 is what to reach for after changing anything in this workflow. `-f draft=true` is the
 older option and still writes a tag, which is the part that is hard to take back.
 
+## 4b. A pre-release
+
+When a change needs trying by a person rather than by CI — a provider with a real key,
+installing the local speech engines, hearing audio come out of a chosen device — a
+pre-release is the way to hand it over without it being handed to everybody:
+
+```bash
+# version becomes 0.15.0-rc1 in the three files, with a changelog section
+git tag -a v0.15.0-rc1 -m "Surtitle 0.15.0-rc1"
+git push origin v0.15.0-rc1
+```
+
+A tag with a suffix in it is published as a pre-release automatically. Two properties
+make that safe: GitHub's *latest release* keeps pointing at the last real version, and
+`is_newer` in `src/surtitle/releases.py` refuses to offer a prerelease to somebody
+running a released build — "noise they did not ask for". To mark a dispatch instead,
+pass `-f prerelease=true`.
+
+The final release then follows the ordinary path: bump to `0.15.0`, keep the section
+that the pre-release wrote, and tag. A final release supersedes its own prereleases,
+so anybody who installed the rc is offered the release.
+
 ## 5. Verify what was published, not the run
 
 A green run is not the evidence; the artifacts are.

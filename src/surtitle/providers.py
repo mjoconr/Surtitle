@@ -174,6 +174,10 @@ PROVIDER_SPECS: dict[str, ProviderSpec] = {
         needs_key=False,
         kind="builtin",
         docs_url="https://duckduckgo.com/",
+        # Nothing to probe and no key to test: this is not an API, it is a page this
+        # application reads. Left as the default it would look like an endpoint that
+        # happens to be unreachable.
+        discovery_path=None,
     ),
     "tavily": ProviderSpec(
         id="tavily",
