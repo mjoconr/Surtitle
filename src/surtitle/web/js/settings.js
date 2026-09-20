@@ -946,12 +946,17 @@ export class SettingsPanel {
     button.disabled = true;
     button.textContent = "Starting…";
     try {
-      const response = await fetch("/api/voice/install", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ kind: "all" }),
-      });
-      const payload = await response.json();
+      // No body: the endpoint installs everything it is configured for, and a body
+      // saying so would be a second place for the two to disagree.
+      const response = await fetch("/api/voice/install", { method: "POST" });
+      const payload = await response.json().catch(() => ({}));
+      if (response.status === 409) {
+        // A state rather than a fault: one is already downloading.
+        status.textContent =
+          "An install is already running. Progress is shown in the tray.";
+        button.textContent = "Installing…";
+        return;
+      }
       if (!response.ok) {
         status.textContent = payload.error || "Could not start the install.";
         button.disabled = false;

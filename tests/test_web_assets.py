@@ -1904,6 +1904,18 @@ class TestProvidersAreConfiguredWhereTheyAreUsed:
         assert 'button.textContent = "Install"' in block
         assert "startVoiceInstall" in block
 
+    def test_the_install_request_matches_what_the_endpoint_takes(self, settings_script):
+        """The endpoint installs everything it is configured for and reads no body,
+        and a second request while one is running is 409 — a state, not a fault. The
+        button used to send a body nothing read and report "could not start" for the
+        case where it had already started."""
+        block = function_source(settings_script, "startVoiceInstall")
+
+        assert 'fetch("/api/voice/install", { method: "POST" })' in block
+        assert "JSON.stringify" not in block, "there is nothing to send"
+        assert "response.status === 409" in block
+        assert "already running" in block
+
     def test_the_card_says_which_provider_is_in_use(self, settings_script):
         assert 'badge.textContent = "in use"' in settings_script
         assert "providerIsReady(provider)" in settings_script
