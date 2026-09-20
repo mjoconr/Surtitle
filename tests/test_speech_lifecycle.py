@@ -582,7 +582,10 @@ class TestEchoSuppressionCannotGetStuck:
         session._speaking = True
         session._closed = False
         session.settings.echo_suppression_max_ms = 100
-        # The last audio went out well beyond its own duration ago.
+        # The whole reply went out well beyond its own duration ago, and the
+        # synthesiser has finished — both are preconditions now.
+        session._synthesis_done = True
+        session._speech_audio_seconds = 0.5
         session._last_audio_out_seconds = 0.5
         session._last_audio_out_at = loop.time() - 10.0
         stt.set_suppression(True)
@@ -608,7 +611,9 @@ class TestEchoSuppressionCannotGetStuck:
         session._closed = False
         session._speaking = True
         session.settings.echo_suppression_max_ms = 100
-        session._last_audio_out_seconds = 4.0  # a long sentence, still in flight
+        session._synthesis_done = True
+        session._speech_audio_seconds = 4.0  # a long sentence, still in flight
+        session._last_audio_out_seconds = 4.0
         session._last_audio_out_at = loop.time()
         stt.set_suppression(True)
         session._suppression_released = False
@@ -1299,3 +1304,128 @@ class TestTheUtteranceLogReportsTheUtterance:
 
         assert "of speech" in source and "into this listening session" in source
         assert "self._seconds_at_utterance = self._audio_seconds" in source
+
+
+class TestSuppressionTracksPlaybackRatherThanSynthesis:
+    """The microphone is live again when the agent has actually stopped speaking.
+
+    Synthesis finishes first. The browser plays afterwards, and with a local voice the
+    gap is seconds — the model is loaded, the sentences are synthesised, and only then
+    does anything come out of the speaker. Suppression used to be released when
+    synthesis finished, and the watchdog that was meant to cover the rest compared the
+    silence against the *last chunk's* duration rather than everything that had been
+    sent. So it lifted suppression about 1.6s after the last chunk went out, often
+    before the reply had been heard at all, and the recogniser spent the whole reply
+    listening to the agent. From the session this was found in:
+
+        15:11:28  speaking started; echo suppression on
+        15:11:30  echo suppression had outlived the agent's audio by 1.7s; releasing it
+        15:11:31  local TTS ready (vits-piper-en_US-lessac-medium, ...)   <- not speaking yet
+        15:11:36  speaking finished; echo suppression released
+    """
+
+    async def test_the_watchdog_waits_for_the_whole_reply_not_the_last_chunk(self, wired):
+        session, _tts, stt = wired
+        loop = asyncio.get_running_loop()
+        session._closed = False
+        session._speaking = True
+        session._synthesis_done = True
+        session.settings.echo_suppression_max_ms = 100
+        # Ten seconds of reply were sent; the last chunk was a tenth of a second.
+        session._speech_audio_seconds = 10.0
+        session._last_audio_out_seconds = 0.1
+        session._last_audio_out_at = loop.time() - 2.0  # quiet for two seconds
+        stt.set_suppression(True)
+        session._suppression_released = False
+
+        watchdog = asyncio.create_task(session._watch_echo_suppression())
+        try:
+            await asyncio.sleep(0.7)
+        finally:
+            watchdog.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await watchdog
+
+        assert session._suppression_released is False, (
+            "eight seconds of that reply could still be playing"
+        )
+
+    async def test_the_watchdog_never_fires_while_still_synthesising(self, wired):
+        """This is the one that let the recogniser hear the agent: a slow local
+        synthesiser sends nothing for seconds, which looked like silence."""
+        session, _tts, stt = wired
+        loop = asyncio.get_running_loop()
+        session._closed = False
+        session._speaking = True
+        session._synthesis_done = False  # still generating
+        session.settings.echo_suppression_max_ms = 100
+        session._speech_audio_seconds = 0.0
+        session._last_audio_out_at = loop.time() - 30.0
+        stt.set_suppression(True)
+        session._suppression_released = False
+
+        watchdog = asyncio.create_task(session._watch_echo_suppression())
+        try:
+            await asyncio.sleep(0.7)
+        finally:
+            watchdog.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await watchdog
+
+        assert session._suppression_released is False, "the reply has not been heard yet"
+
+    async def test_the_browser_saying_it_drained_is_the_release(self, wired):
+        """The only party that knows when the audio stopped coming out of the
+        speaker is the one that played it."""
+        session, _tts, stt = wired
+        session._speaking = True
+        session._synthesis_done = True
+        session._speech_audio_seconds = 4.0
+        stt.set_suppression(True)
+        session._suppression_released = False
+
+        await session.handle_playback_drained()
+
+        assert session._suppression_released is True
+        assert stt.suppression[-1] is False
+
+    async def test_the_release_happens_once(self, wired):
+        session, _tts, stt = wired
+        session._speaking = True
+        session._synthesis_done = True
+        session._speech_audio_seconds = 4.0
+        stt.set_suppression(True)
+        session._suppression_released = False
+
+        await session.handle_playback_drained()
+        after_first = len(stt.suppression)
+        await session.handle_playback_drained()
+
+        assert len(stt.suppression) == after_first, "a second release is not news"
+
+    async def test_a_reply_with_no_audio_releases_immediately(self, wired):
+        """A turn that produced no speech has nothing to play, so waiting for a
+        drain that will never come would leave the microphone shut."""
+        session, _tts, stt = wired
+        session._speaking = True
+        session._speech_audio_seconds = 0.0
+        stt.set_suppression(True)
+        session._suppression_released = False
+
+        await session._on_speaking_finished()
+
+        assert session._suppression_released is True
+
+    async def test_synthesis_finishing_holds_suppression_when_audio_was_sent(self, wired):
+        session, _tts, stt = wired
+        session._speaking = True
+        session._speech_audio_seconds = 4.0
+        stt.set_suppression(True)
+        session._suppression_released = False
+
+        await session._on_speaking_finished()
+
+        assert session._suppression_released is False, (
+            "four seconds of reply are still queued in the browser"
+        )
+        assert session._synthesis_done is True

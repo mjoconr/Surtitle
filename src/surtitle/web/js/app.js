@@ -2677,6 +2677,12 @@ const playback = new Playback({
   onIdle: () => {
     capture.notifyPlayback(false);
     setAgentState(state.micOpen ? "listening" : "idle");
+    // The queue is empty and the speaker has stopped. This is the only place that
+    // knows it: the server finished *synthesising* seconds earlier, and with a local
+    // voice the gap is the model load plus the sentences still queued here. Echo
+    // suppression is released on this, because releasing it any earlier leaves the
+    // recogniser listening to the agent's own voice.
+    activeConnection()?.sendCommand("playback", { drained: true });
   },
   onBlocked: () => {
     // The agent produced speech but the browser will not play it. Say so, with

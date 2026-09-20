@@ -261,6 +261,14 @@ class Session:
     # has finished.
     _last_audio_out_at: float = 0.0
     _last_audio_out_seconds: float = 0.0
+    # Everything sent for the reply being spoken, which is what the watchdog has to
+    # wait out. It used to use the *last chunk's* duration, so with the 1.5s margin
+    # suppression was lifted about 1.6s after the last chunk was handed over —
+    # while a local synthesiser was often still loading its model and had not
+    # started speaking at all. The microphone was then live for the whole reply.
+    _speech_audio_seconds: float = 0.0
+    # Whether the synthesiser has finished handing over everything it will send.
+    _synthesis_done: bool = False
     _suppression_released: bool = False
     _suppression_watchdog: asyncio.Task[None] | None = None
     # An utterance being held for continuation: the text so far, whether a hold
@@ -1643,6 +1651,7 @@ class Session:
         """
         self._last_audio_out_at = asyncio.get_running_loop().time()
         self._last_audio_out_seconds = len(audio) / 2 / max(1, self.settings.tts_sample_rate)
+        self._speech_audio_seconds += self._last_audio_out_seconds
         self._suppression_released = False
         await self.send_audio(audio)
 
@@ -1668,7 +1677,13 @@ class Session:
                 continue
             now = asyncio.get_running_loop().time()
             silent_for = now - self._last_audio_out_at
-            if silent_for <= self._last_audio_out_seconds + margin:
+            # Only after the synthesiser has finished, and only once everything it
+            # sent could have finished playing. Without the first condition this
+            # fired while the reply was still being generated — before a note of it
+            # had been heard — and lifted suppression for the whole of it.
+            if not self._synthesis_done:
+                continue
+            if silent_for <= self._speech_audio_seconds + margin:
                 continue
             self._suppression_released = True
             log.warning(
@@ -1714,6 +1729,8 @@ class Session:
         # suppression had not actually been doing anything.
         self._last_audio_out_at = asyncio.get_running_loop().time()
         self._last_audio_out_seconds = 0.0
+        self._speech_audio_seconds = 0.0
+        self._synthesis_done = False
         self._suppression_released = False
 
         # Anything the user said while the previous turn was finishing must be
@@ -1738,17 +1755,44 @@ class Session:
         return self._turn is not None and not self._turn.done()
 
     async def _on_speaking_finished(self) -> None:
-        """Return to idle once the last sentence has been synthesised."""
+        """The synthesiser has handed over everything it will send.
+
+        Deliberately *not* the moment echo suppression is released. Synthesis ends
+        before the browser has played what it was given, and with a local voice the
+        gap is seconds — long enough that releasing here left the microphone live
+        for the whole reply. The release is `handle_playback_drained`, when the
+        browser says its queue is empty, or the watchdog if that never arrives.
+        """
         self._speaking = False
-        if self.stt is not None:
-            self.stt.set_suppression(False)
-            self._announce_suppression(False)
-        # Worth a line: while this never ran, echo suppression stayed on for the
-        # rest of the session and every later transcript was discarded — which is
-        # indistinguishable from a dead microphone, and produced no log output.
-        log.info("speaking finished; echo suppression released")
+        self._synthesis_done = True
+        # Nothing was ever sent, so there is nothing to play and nothing to guard
+        # against: releasing here is the only release that will come.
+        if not self._speech_audio_seconds:
+            await self._release_suppression("no audio was produced")
+        log.info("speaking finished synthesising; echo suppression held until playback ends")
         if self._state.state is SessionState.SPEAKING:
             self._set_state(SessionState.LISTENING if self._state.mic_open else SessionState.IDLE)
+
+    async def handle_playback_drained(self) -> None:
+        """The browser has finished playing the agent's voice.
+
+        The accurate end of "the agent is speaking", and the moment the microphone
+        stops being at risk of hearing it. The browser is the only party that knows
+        it, so it is the party that says so.
+        """
+        if not self._speaking and not self._synthesis_done:
+            return
+        await self._release_suppression("playback drained", tell_the_ui=True)
+
+    async def _release_suppression(self, why: str, *, tell_the_ui: bool = False) -> None:
+        """Let the microphone through again, once."""
+        if self._suppression_released or self.stt is None:
+            return
+        self._suppression_released = True
+        self.stt.set_suppression(False)
+        if tell_the_ui:
+            self._announce_suppression(False)
+        log.debug("echo suppression released (%s)", why)
 
     async def barge_in(self) -> None:
         """Stop speaking immediately and return to listening."""

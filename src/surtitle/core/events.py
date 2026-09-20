@@ -66,6 +66,11 @@ class CommandKind(StrEnum):
     MIC = "mic"
     TEXT = "text"
     BARGE_IN = "barge_in"
+    # The browser's playback queue has drained: the agent has actually stopped
+    # making sound. The server cannot work this out for itself — it finishes
+    # *synthesising* long before the queued audio has finished playing, and with a
+    # local voice the gap is seconds.
+    PLAYBACK = "playback"
     APPROVAL = "approval"
     CANCEL = "cancel"
     SET_MODE = "set_mode"

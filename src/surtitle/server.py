@@ -1388,6 +1388,8 @@ async def _dispatch(session: Session, payload: dict[str, Any]) -> None:
                 await session.handle_audio(base64.b64decode(encoded))
     elif command.kind is CommandKind.MIC:
         await session.handle_mic(bool(data.get("open")))
+    elif command.kind is CommandKind.PLAYBACK:
+        await session.handle_playback_drained()
     elif command.kind is CommandKind.TEXT:
         # `interrupt` is the Push action: stop what is running and take its place.
         await session.handle_text(

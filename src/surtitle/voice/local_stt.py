@@ -58,6 +58,23 @@ _MAX_BATCHES = 64
 # recogniser itself does not report "no speech", and a level check is enough to
 # decide whether the silence clock advances.
 _RMS_FLOOR = 0.004
+# When a turn is closed regardless of whether the speaker paused.
+#
+# The backstop above needs a pause as well as the clock, because a clock cannot tell a
+# finished thought from a comma — and that is right for speech. It is not enough for
+# audio that never falls quiet: measured in a real session, a room loud enough to keep
+# the silence clock at zero (the agent's own voice leaking in after suppression was
+# lifted early) produced a single utterance of **67 seconds**, decoded to the letter
+# "S". Nothing was ever going to count as a pause, so nothing was ever going to end it.
+# This ceiling is deliberately far above any spoken turn so it can only ever catch
+# that case, and it scales with a raised utterance limit.
+_HARD_CEILING_MS = 60_000.0
+# An utterance at least this long that decoded to a couple of characters is a
+# recognition failure, not speech. Handing it on costs a whole turn and an answer to
+# nothing; asking again costs a sentence.
+_IMPLAUSIBLE_AFTER_MS = 10_000.0
+_IMPLAUSIBLE_CHARS = 2
+
 # How much silence the backstop needs before it may close a turn. One full batch,
 # so it means "the speaker actually paused" rather than a gap between words: the
 # backstop exists to stop someone who never pauses, and must never be the thing
@@ -470,13 +487,40 @@ class LocalSpeechToText:
                 "speaker needs longer",
                 self._utterance_ms / 1000.0,
             )
-        ended = self._silence_ms >= threshold or (backstop and paused)
+        ceiling = max(_HARD_CEILING_MS, 3 * self.settings.local_max_utterance_ms)
+        exhausted = self._utterance_ms >= ceiling
+        if exhausted:
+            log.warning(
+                "turn closed at the %.0fs ceiling with no pause in it; %.1fs of audio produced %r",
+                ceiling / 1000.0,
+                self._utterance_ms / 1000.0,
+                text[:40],
+            )
+        ended = self._silence_ms >= threshold or (backstop and paused) or exhausted
         if not ended and not endpoint:
             return
 
         # The turn is over. Emit whatever was heard before the boundary, then the
         # boundary itself, and start a fresh stream for the next utterance.
         final_text = text
+        if (
+            final_text
+            and len(final_text) <= _IMPLAUSIBLE_CHARS
+            and self._utterance_ms >= _IMPLAUSIBLE_AFTER_MS
+        ):
+            # Not a transcript. Something was heard for ten seconds or more and the
+            # recogniser came back with a letter or two, which is a failure to decode
+            # rather than a thing somebody said.
+            log.warning(
+                "local STT decoded %r from %.1fs of audio; asking for it again rather "
+                "than passing it on",
+                final_text,
+                self._utterance_ms / 1000.0,
+            )
+            await self._report(
+                "I did not catch that — say it again.",
+            )
+            final_text = ""
         if final_text and self._suppress_finals:
             self._note_suppressed(final_text)
         elif final_text and final_text != self._emitted_text:

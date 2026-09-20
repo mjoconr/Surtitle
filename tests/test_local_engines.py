@@ -637,3 +637,97 @@ class TestLocalTts:
             await engine.stop()
         assert notices, "a failed synthesis must be reported, not silent"
         assert any("spoken" in n or "voice" in n.lower() for n in notices)
+
+
+class TestAudioThatNeverPauses:
+    """A turn ends when the thought does — unless nothing is ever going to end it.
+
+    Measured in a real session: a room loud enough to keep the silence clock at zero
+    (the agent's own voice, after echo suppression was lifted early) produced a single
+    utterance of 67 seconds, decoded to the letter "S", which then became a user turn
+    the agent answered. Every rule for ending a turn needed a pause that never came.
+    """
+
+    async def test_a_never_pausing_stretch_is_closed_by_the_ceiling(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        import logging
+
+        from surtitle.voice import local_stt
+
+        FakeRecognizer.script = ["keep going now"] * 2000
+        engine, _events = TestLocalStt()._engine(tmp_path, monkeypatch)
+        # The ceiling scales with the utterance limit, so this can be reached quickly.
+        engine.settings.local_max_utterance_ms = 100
+        monkeypatch.setattr(local_stt, "_HARD_CEILING_MS", 1000.0)
+        caplog.set_level(logging.WARNING, logger="surtitle.voice.local_stt")
+        await engine.start()
+        try:
+            await asyncio.sleep(0.05)
+            # Continuous loud audio: no batch ever counts as a pause.
+            for _ in range(120):
+                engine.push_audio(b"\x00\x01" * 512)
+                await asyncio.sleep(0.005)
+        finally:
+            await engine.stop()
+
+        assert "ceiling with no pause in it" in caplog.text, (
+            "the turn was closed by something else; this test is about the case where "
+            "nothing is ever going to pause"
+        )
+        assert FakeRecognizer.next_instance.resets >= 1, (
+            "the stream has to be reset, or the next utterance inherits this one"
+        )
+
+    async def test_a_letter_after_a_long_stretch_is_not_a_turn(self, tmp_path, monkeypatch):
+        """Passing it on costs a whole turn and an answer to nothing."""
+        from surtitle.voice import local_stt
+
+        FakeRecognizer.script = ["S"] * 2000
+        engine, events = TestLocalStt()._engine(tmp_path, monkeypatch)
+        engine.settings.local_max_utterance_ms = 100
+        monkeypatch.setattr(local_stt, "_IMPLAUSIBLE_AFTER_MS", 1000.0)
+
+        reported: list[str] = []
+
+        async def on_error(message):
+            reported.append(message)
+
+        engine._on_error = on_error
+        await engine.start()
+        try:
+            await asyncio.sleep(0.05)
+            for _ in range(60):
+                engine.push_audio(b"\x00\x01" * 512)
+                await asyncio.sleep(0.005)
+            for _ in range(10):  # one real pause, so the turn closes
+                engine.push_audio(b"\x00\x00" * 512)
+                await asyncio.sleep(0.02)
+        finally:
+            await engine.stop()
+
+        # A live caption may still show what was heard — the guarantee is that no
+        # *turn* is built from it, because a turn is answered.
+        finals = [e for e in events if e.text.strip() and e.final]
+        assert not finals, f"a decode failure became a turn: {finals!r}"
+        assert reported, "and the user is told rather than being silently ignored"
+
+    async def test_a_short_utterance_of_a_letter_is_still_a_turn(self, tmp_path, monkeypatch):
+        """The guard is about a *long* stretch decoding to nothing, not about short
+        utterances: somebody saying "no" must still be heard."""
+        FakeRecognizer.script = ["no"] * 2000
+        engine, events = TestLocalStt()._engine(tmp_path, monkeypatch)
+        await engine.start()
+        try:
+            await asyncio.sleep(0.05)
+            for _ in range(3):
+                engine.push_audio(b"\x00\x01" * 512)
+                await asyncio.sleep(0.005)
+            for _ in range(10):
+                engine.push_audio(b"\x00\x00" * 512)
+                await asyncio.sleep(0.02)
+        finally:
+            await engine.stop()
+
+        handed_on = [e for e in events if e.text and e.text.strip()]
+        assert handed_on and handed_on[-1].text == "no"

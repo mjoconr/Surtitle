@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Echo suppression now ends when the agent stops *speaking*, not when it stops
+  writing.** The microphone was going live again seconds before the reply had been
+  heard. Two things were wrong: suppression was released when the synthesiser
+  finished handing over the audio — which the browser then plays, and with a local
+  voice the gap is the model load plus everything queued — and the watchdog meant to
+  cover the rest compared the quiet against the *last chunk's* duration rather than
+  everything that had been sent. So it lifted suppression about 1.6 seconds after the
+  last chunk went out. From a real session:
+
+  ```
+  15:11:28  speaking started; echo suppression on
+  15:11:30  echo suppression had outlived the agent's audio by 1.7s; releasing it
+  15:11:31  local TTS ready (vits-piper-en_US-lessac-medium, ...)   <- not speaking yet
+  15:11:36  speaking finished; echo suppression released
+  ```
+
+  The browser now says when its playback queue drains, and that is the release; the
+  watchdog waits for the synthesiser to finish *and* for everything sent to have had
+  time to play, so it can no longer fire while the reply is still being heard. This is
+  a likely cause of the agent answering its own voice.
+
+- **An utterance that never pauses is closed at a ceiling, and a long stretch that
+  decodes to a letter is not a turn.** The backstop needs a pause as well as a clock,
+  which is right for speech and useless for a room loud enough to keep the silence
+  timer at zero — measured, one utterance reached 67 seconds of audio and decoded to
+  "S", which became a user turn the agent answered. There is now an absolute ceiling
+  far above any spoken turn, and a decode that yields a couple of characters after ten
+  seconds or more is reported rather than passed on as something somebody said.
+
 - **"Mic off" releases the microphone, and a chosen device is the one used.** Three
   things were wrong in the capture path, all of them reported from a real session:
 
