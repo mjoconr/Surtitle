@@ -1336,10 +1336,15 @@ class TestSeveralConversationsAtOnce:
         )
 
     def test_the_microphone_is_handed_over_rather_than_shared(self, script):
+        """The conversation being left must stop listening, not merely stop being
+        listened to: muting left the device open and capturing, so the operating
+        system went on showing its microphone indicator after "Mic off"."""
         block = script[script.index("function leaveSession()") :]
         block = block[: block.index("\n}\n")]
+
         assert 'sendCommand("mic", { open: false })' in block
-        assert "capture.setMuted(true)" in block
+        assert "capture.stop()" in block
+        assert "capture.setMuted(true)" not in block
 
     def test_selecting_the_open_conversation_again_is_cheap(self, script):
         block = script[script.index("async function selectSession(") :]

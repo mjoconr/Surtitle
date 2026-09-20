@@ -42,6 +42,28 @@ def settings(tmp_path):
 _COMMENTS = re.compile(r"//[^\n]*|/\*.*?\*/", re.S)
 
 
+def class_source(script: str, name: str) -> str:
+    """The body of one class, as text.
+
+    Methods are found by name, and two classes in the same file can both have a
+    `stop()` — the capture layer's and the playback layer's — so a test about one of
+    them has to say which. The returned text is what `function_source` expects, so
+    the two compose.
+    """
+    marker = f"class {name} "
+    assert marker in script, f"{marker} is not in the shipped script"
+    start = script.index("{", script.index(marker))
+    depth = 0
+    for i in range(start, len(script)):
+        if script[i] == "{":
+            depth += 1
+        elif script[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return script[script.index(marker) : i + 1]
+    raise AssertionError(f"class {name} is not closed in the shipped script")
+
+
 def function_source(script: str, name: str) -> str:
     """One shipped function or method, as text.
 
@@ -79,6 +101,12 @@ def function_source(script: str, name: str) -> str:
 
 
 @pytest.fixture(scope="module")
+def audio() -> str:
+    """The capture and playback layer, which owns the device constraints."""
+    return (WEB / "js" / "audio.js").read_text(encoding="utf-8")
+
+
+@pytest.fixture(scope="module")
 def settings_script() -> str:
     """The settings panel, which is its own module."""
     return (WEB / "js" / "settings.js").read_text(encoding="utf-8")
@@ -97,11 +125,6 @@ def html() -> str:
 @pytest.fixture(scope="module")
 def script() -> str:
     return (WEB / "js" / "app.js").read_text(encoding="utf-8")
-
-
-@pytest.fixture(scope="module")
-def audio() -> str:
-    return (WEB / "js" / "audio.js").read_text(encoding="utf-8")
 
 
 @pytest.fixture(scope="module")
@@ -2002,3 +2025,77 @@ class TestTheMicrophonePageActuallyWorks:
 
         assert "named: Boolean(device.label)" in block
         assert block.index("named: Boolean(device.label)") < block.index("device.label ||")
+
+
+class TestAChosenDeviceIsTheDeviceUsed:
+    """`ideal` reads better and is worse.
+
+    It cannot fail, which is the appeal — and it also *permits* the browser to ignore
+    the preference and use the default. Chromium does exactly that, so choosing a
+    device other than the default appeared to do nothing at all, which is what
+    arrived as "the selection of a device other than default does not work".
+    """
+
+    def test_an_explicitly_chosen_input_is_required_not_preferred(self, audio):
+        assert "deviceId = { exact: this.deviceId }" in audio
+        assert "ideal: this.deviceId" not in audio
+
+    def test_an_unplugged_choice_still_falls_back_to_the_default(self, audio):
+        """`exact` can fail, so the failure has to be handled — and it is handled
+        better than `ideal` did: the log says the chosen device was gone instead of
+        recording from a different one without saying so."""
+        assert "OverconstrainedError" in audio
+        assert "chosen input unavailable; using the default" in audio
+        assert 'this.deviceId = ""' in audio
+
+    def test_the_device_list_is_read_while_the_permission_stream_is_open(self, settings_script):
+        """A browser is only obliged to name its devices while something is
+        capturing; asking after the stream is closed is a moment too late."""
+        block = function_source(settings_script, "requestMicrophoneAccess")
+
+        assert "this.refreshDevicePickers()" in block
+        assert block.index("this.refreshDevicePickers()") < block.index("track.stop()")
+
+
+class TestSwitchingTheMicrophoneOffReleasesIt:
+    """Off has to mean off.
+
+    Turning the microphone off called `capture.setMuted(true)`, which stopped the
+    frames being *used* while the device stayed open and capturing. macOS went on
+    showing its microphone indicator, correctly, and the only thing that cleared it
+    was closing the page. Measured in a browser with a capture stream it could open
+    without a permission prompt: before, turning the microphone off stopped no tracks
+    and left every AudioContext running; after, the track is stopped and the capture
+    context is suspended, and switching back on resumes it.
+    """
+
+    def test_the_microphone_switch_stops_the_capture(self, script):
+        block = function_source(script, "toggleMic")
+
+        assert "await capture.stop()" in block, "off means the device is released"
+        assert "capture.setMuted(true)" not in block
+
+    def test_leaving_a_conversation_stops_it_too(self, script):
+        """Its own docstring says a chat you navigated away from must not keep
+        listening to the room, and muting did keep listening."""
+        block = function_source(script, "leaveSession")
+
+        assert "capture.stop()" in block
+        assert "capture.setMuted(true)" not in block
+
+    def test_stopping_suspends_the_context(self, audio):
+        """Stopping the tracks is not enough: a running AudioContext fed by a
+        MediaStreamAudioSourceNode holds the input device open at the OS level, which
+        is why the page had to be closed."""
+        block = function_source(class_source(audio, "Capture"), "stop")
+
+        assert 'this.context.state === "running"' in block
+        assert "this.context.suspend()" in block
+
+    def test_starting_again_resumes_or_rebuilds_it(self, audio):
+        """Suspending is only safe because start() copes with a suspended context —
+        it resumes it, and discards and rebuilds one that will not resume."""
+        block = function_source(class_source(audio, "Capture"), "start")
+
+        assert "_ensureRunning()" in block
+        assert "_discardContext()" in block

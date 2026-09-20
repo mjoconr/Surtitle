@@ -234,6 +234,12 @@ class Session:
     # than one that never started. See `tools/jobs.py`.
     jobs: JobRegistry = field(default_factory=JobRegistry)
     _audio_seconds: float = 0.0
+    # What the counter was at the last utterance, so the next one can report its own
+    # length. The counters run from the moment the microphone opens and are not reset
+    # per utterance, so logging them directly put the whole session's duration beside
+    # a two-second sentence — 66 seconds against a short reply — which reads as the
+    # utterance being enormous and sends a diagnosis the wrong way.
+    _seconds_at_utterance: float = 0.0
     # Diagnostics: how much audio this listening session actually delivered, and
     # how many times the microphone has been opened.
     _frames_in: int = 0
@@ -560,6 +566,7 @@ class Session:
             # toggle describes that attempt rather than the session total.
             self._frames_in = 0
             self._audio_seconds = 0.0
+            self._seconds_at_utterance = 0.0
             self._peak_in = 0.0
             self._frames_closed = 0
             self._mic_opens += 1
@@ -788,9 +795,11 @@ class Session:
                 await self.cancel_turn()
             finally:
                 self._replacing_turn = False
+        spoken_seconds = self._audio_seconds - self._seconds_at_utterance
+        self._seconds_at_utterance = self._audio_seconds
         log.info(
-            "utterance from audio (%d frame(s), %.2fs): %r",
-            self._frames_in,
+            "utterance from audio (%.2fs of speech, %.2fs into this listening session): %r",
+            spoken_seconds,
             self._audio_seconds,
             utterance[:120],
         )

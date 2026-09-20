@@ -1266,3 +1266,36 @@ class TestWhatADroppedRecognitionSocketSays:
 
         assert notices and "Check your Deepgram key and network." in (notices[0] or "")
         assert engine._ever_connected is False
+
+
+class TestTheUtteranceLogReportsTheUtterance:
+    """The counters run from the moment the microphone opens, not per utterance.
+
+    Logging them directly printed "66.18s" beside a two-second sentence, which reads
+    as the utterance being enormous — and it was read that way, in a real report,
+    before a look at the code said otherwise. The line now gives the speech since the
+    previous utterance and the session total, labelled.
+    """
+
+    def test_the_log_distinguishes_the_utterance_from_the_session(self, caplog):
+
+        from surtitle.core.session import Session
+
+        session = Session.__new__(Session)
+        session._audio_seconds = 66.18
+        session._seconds_at_utterance = 64.0
+
+        spoken = session._audio_seconds - session._seconds_at_utterance
+
+        assert round(spoken, 2) == 2.18
+        assert session._audio_seconds == 66.18, "the session total is still available"
+
+    def test_the_line_names_both(self):
+        import inspect
+
+        from surtitle.core.session import Session
+
+        source = inspect.getsource(Session._start_spoken_turn)
+
+        assert "of speech" in source and "into this listening session" in source
+        assert "self._seconds_at_utterance = self._audio_seconds" in source

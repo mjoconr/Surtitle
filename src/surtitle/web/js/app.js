@@ -2755,7 +2755,11 @@ async function toggleMic() {
   }
   try {
     if (state.micOpen) {
-      capture.setMuted(true);
+      // Stopped, not muted. Muting only suppressed the frames while the device
+      // stayed open, so "Mic off" left the microphone genuinely capturing: macOS
+      // kept its indicator on, and the only thing that cleared it was closing the
+      // page. Opening it again is a `getUserMedia` call that permission covers.
+      await capture.stop();
       state.micOpen = false;
       el.micButton.dataset.active = "false";
       el.micButton.setAttribute("aria-pressed", "false");
@@ -3348,7 +3352,11 @@ function leaveSession() {
       // No socket to tell; the server closes the stream with the session anyway.
     }
   }
-  capture.setMuted(true);
+  // Stopped rather than muted: leaving a conversation must not keep the room
+  // audible to a page nobody is looking at. Deliberately not awaited — this is a
+  // synchronous teardown path, and `start()` stops the capture itself if it is
+  // still winding down when the next conversation's microphone is opened.
+  capture.stop().catch(() => {});
   state.micOpen = false;
   el.micButton.dataset.active = "false";
   el.micButton.setAttribute("aria-pressed", "false");

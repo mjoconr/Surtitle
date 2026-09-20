@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **"Mic off" releases the microphone, and a chosen device is the one used.** Three
+  things were wrong in the capture path, all of them reported from a real session:
+
+  * Turning the microphone off *muted* it — the frames stopped being used while the
+    device stayed open and capturing. macOS went on showing its microphone indicator,
+    correctly, and the only thing that cleared it was closing the page. Off now stops
+    the capture, and stopping suspends the audio context: an AudioContext fed by a
+    microphone keeps the device open at the operating-system level even after its
+    tracks are stopped, which is why closing the page was the thing that worked.
+    Measured in a browser with a capture stream it can open without a prompt:
+    before, turning the microphone off stopped no tracks and left every context
+    running; after, the track is stopped and the context suspended, and switching
+    back on resumes it.
+  * The input constraint was `ideal`, which *permits* the browser to ignore the
+    choice and use the default — and Chromium does. Picking a device other than the
+    default therefore appeared to do nothing. It is `exact` now, with the fallback to
+    the default kept for a device that has been unplugged, which is better than
+    `ideal` was: the log says the chosen device was gone instead of recording from
+    another one silently.
+  * The device list is read while the permission stream is still open. A browser is
+    only obliged to name its devices while something is capturing, and asking after
+    the stream was closed asked a moment too late.
+
+- **The utterance log reported the listening session, not the utterance.** It printed
+  the counters that run from the moment the microphone opens, so a two-second
+  sentence was logged as "66.18s" — which was read as an enormous utterance before
+  the code said otherwise. It gives the speech since the previous utterance and the
+  session total, labelled.
+
+- **The install button's request matches the endpoint.** It sent a body the endpoint
+  does not read, and reported "could not start the install" for the 409 that means one
+  is already running.
+
 ## [0.15.0-rc1] - 2026-09-20
 
 ### Added

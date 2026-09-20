@@ -191,7 +191,9 @@ export class SettingsPanel {
       allow.disabled = true;
       const granted = await this.requestMicrophoneAccess(status);
       allow.disabled = false;
-      // Both lists: the outputs are named by the same grant.
+      // Both lists, once more with the stream closed: the browsers that only name
+      // devices while capturing have answered by now, and this is what updates the
+      // "in use"/count wording either way.
       if (granted) this.refreshDevicePickers();
     });
 
@@ -462,6 +464,10 @@ export class SettingsPanel {
     status.textContent = "Waiting for the browser's permission prompt…";
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      // Read the list while the stream is still open. A browser is only obliged to
+      // name its devices once something is capturing, and closing the stream first
+      // asks the question a moment too late.
+      this.refreshDevicePickers();
       for (const track of stream.getTracks()) track.stop();
       return true;
     } catch (error) {

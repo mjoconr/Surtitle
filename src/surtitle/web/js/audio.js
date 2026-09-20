@@ -124,10 +124,13 @@ export class Capture {
         channelCount: 1,
       },
     };
-    // `exact` would reject outright when a device has been unplugged since it was
-    // chosen, so prefer the requested device and fall back to the default rather
-    // than refusing to start.
-    if (this.deviceId) constraints.audio.deviceId = { ideal: this.deviceId };
+    // `exact`, because the device was chosen by hand. `ideal` reads better — it
+    // cannot fail — but it *permits* the browser to ignore the choice and use the
+    // default, and Chromium does exactly that, so picking a device other than the
+    // default appeared to do nothing at all. The unplugged case is handled below by
+    // falling back explicitly, which is better than `ideal`: it says in the log that
+    // the chosen device was gone instead of silently recording from another one.
+    if (this.deviceId) constraints.audio.deviceId = { exact: this.deviceId };
 
     try {
       this.stream = await navigator.mediaDevices.getUserMedia(constraints);
@@ -437,7 +440,15 @@ export class Capture {
       for (const track of this.stream.getTracks()) track.stop();
       this.stream = null;
     }
-    // The context is intentionally left open: it is reused on the next start.
+    // The context is kept, but not left *running*: an AudioContext that has been fed
+    // by a MediaStreamAudioSourceNode holds the input device open at the operating
+    // system level even after the tracks are stopped, so macOS went on showing its
+    // microphone indicator — and the only thing that cleared it was closing the page,
+    // which closes the context. Suspending releases the device; `start()` resumes it,
+    // or rebuilds it if it will not resume.
+    if (this.context && this.context.state === "running") {
+      await this.context.suspend().catch(() => {});
+    }
   }
 
   /** Release the capture context entirely. Only for page teardown. */
