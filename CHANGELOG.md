@@ -7,7 +7,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The local recogniser is now one trained on real recordings, and it hears
+  somebody across a room.** The previous default was a read-speech model, and on
+  far-field speech it did not merely do worse: over 40 AMI utterances recorded on
+  a single distant microphone — a room, several speakers, spontaneous speech — it
+  returned *nothing at all* for most of them, and normalising the level only got
+  it to 55% word error. From a real session on it, "repeat back to me" was heard
+  as "THE PATE BACK TO ME", "gallon" as "GALLUM" and "something went wrong" as
+  "SOMETHING LENT WARM", while Deepgram heard all three correctly from the same
+  audio. Measured on the development machine, CPU only:
+
+  | Local STT model | Far-field, spontaneous | Close, read | 15 dB noise | RTF |
+  |---|---|---|---|---|
+  | `streaming-zipformer-en-kroko-2025-08-06` (**new default**) | **31.6%** | 6.4% | **27.3%** | 0.08 |
+  | `streaming-zipformer-en-2023-06-26` (was the default) | 98.5% | **5.1%** | 55.5% | 0.16 |
+  | `streaming-zipformer-en-20M` | 98.8% | 24.3% | 84.0% | 0.08 |
+
+  It is also twice as fast and it punctuates and capitalises, which the turn
+  heuristic uses as a real end-of-thought signal. The two older models remain
+  selectable — the large one is still the most accurate of the three on close,
+  clearly spoken read speech — but neither is a good choice for a microphone
+  across a room.
+
+  **Upgrading costs one download.** The new default is not installed on a machine
+  that already has the others, so local speech reports it as missing until you
+  press **Install** in Settings, or run:
+
+  ```bash
+  surtitle models download streaming-zipformer-en-kroko-2025-08-06
+  ```
+
+  That is ~57 MB, and local speech does not work until it has been fetched.
+
+- **A turn can no longer end before the recogniser has flushed its last word.** A
+  streaming transducer emits a word only once it has heard the audio that follows
+  it, so the silence that ends a turn is also what flushes the end of the
+  sentence. Decoding one clip with 0.32 s of trailing silence produced "…LYING OFF
+  THE COA" and with 0.80 s produced "…LYING OFF THE COAST". A
+  `SURTITLE_LOCAL_EOT_SILENCE_MS` below 800 ms is now raised to it, for the
+  ordinary rule and the backstop alike: a shorter window does not answer sooner,
+  it truncates the end of every sentence.
+
+### Removed
+
+- **The `streaming-zipformer-en-20M` model is no longer offered.** It measured
+  24.3% word error on close read speech and 84% at 15 dB noise, and was no faster
+  than the new default on the same CPU, so it was 44 MB in every install for a
+  model there was no reason to recommend. If `SURTITLE_LOCAL_STT_MODEL` names it,
+  choose another key from `surtitle models list`; the model directory can be
+  deleted.
+
 ### Fixed
+
+- **The install prompt quoted a size 260 MB larger than the download.** The large
+  recogniser's archive also carries an fp32 encoder that the installer
+  deliberately skips, and the figure shown before asking for consent counted it.
 
 - **Echo suppression now ends when the agent stops *speaking*, not when it stops
   writing.** The microphone was going live again seconds before the reply had been

@@ -41,6 +41,25 @@ def make_settings(tmp_path: Path, **overrides) -> Settings:
     return Settings(**values)
 
 
+def place_files(settings: Settings, asset: ModelAsset, *, skip_optional: bool = False) -> None:
+    """Create an asset's files at exactly their pinned size, sparsely.
+
+    ``truncate`` rather than writing the bytes: one of the archives carries a
+    260 MB encoder, and a test has no business writing a quarter of a gigabyte to
+    check that a path resolves.
+    """
+    root = models.model_root(settings, asset)
+    for entry in asset.files:
+        if skip_optional and entry.optional:
+            continue
+        target = root / entry.name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open("r+b" if target.exists() else "wb") as handle:
+            handle.truncate(entry.size)
+    for directory in asset.requires_dirs:
+        (root / directory).mkdir(parents=True, exist_ok=True)
+
+
 def tiny_asset(archive: str, *, prefix: str = "model") -> ModelAsset:
     """A one-file asset whose checksum is computed from the real content."""
     content = b"pretend this is an ONNX file"
@@ -105,6 +124,34 @@ class TestRegistryIntegrity:
         assert settings.local_tts_model in models.MODEL_REGISTRY
         assert models.MODEL_REGISTRY[settings.local_stt_model].kind == "stt"
         assert models.MODEL_REGISTRY[settings.local_tts_model].kind == "tts"
+
+    def test_the_default_is_the_recommended_model(self):
+        """The config default and the registry's first entry have to agree.
+
+        `registry_key` reads the first entry of a kind as the recommendation, so a
+        default named separately in :mod:`surtitle.config` can drift away from it
+        -- leaving a model that is registered but never chosen and a default that
+        is never recommended.
+        """
+        settings = Settings(DEEPSEEK_API_KEY="k")
+        assert models.registry_key(kind="stt", name=None) == settings.local_stt_model
+        assert models.registry_key(kind="tts", name=None) == settings.local_tts_model
+
+    def test_the_quoted_size_leaves_out_what_is_never_downloaded(self):
+        """The install prompt asks for consent with a real figure.
+
+        One archive carries a 260 MB encoder variant that the installer skips, so
+        counting it would have overstated that model's download by a factor of
+        four -- in the one place the project promises a number the download will
+        keep.
+        """
+        for asset in models.iter_assets():
+            assert asset.total_bytes == sum(f.size for f in asset.files if not f.optional)
+        large = models.MODEL_REGISTRY["streaming-zipformer-en-2023-06-26"]
+        assert [f for f in large.files if f.optional], "this test needs an optional member"
+        assert large.total_bytes < max(f.size for f in large.files), (
+            "the optional fp32 encoder is still being counted"
+        )
 
     def test_unknown_model_name_is_reported_not_substituted(self):
         """A typo must not silently install a different voice."""
@@ -178,30 +225,63 @@ class TestResolve:
         assert caught.value.fix and "models download" in caught.value.fix
 
     def test_resolve_returns_the_paths_the_engine_needs(self, tmp_path):
-        settings = make_settings(tmp_path)
-        for kind, resolver in (("stt", models.resolve_stt), ("tts", models.resolve_tts)):
-            asset = models.MODEL_REGISTRY[
-                settings.local_stt_model if kind == "stt" else settings.local_tts_model
-            ]
-            root = models.model_root(settings, asset)
-            for entry in asset.files:
-                target = root / entry.name
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(b"x" * entry.size)
-            for directory in asset.requires_dirs:
-                (root / directory).mkdir(parents=True, exist_ok=True)
+        """Every registered model resolves, whatever its files happen to be called.
 
-            resolved = resolver(settings)
-            for key, path in resolved.items():
-                if key == "model_type":
-                    continue
-                assert Path(path).is_file() or Path(path).is_dir(), f"{key}: {path}"
-            if kind == "stt":
-                assert resolved["encoder"].endswith(".int8.onnx"), "int8 is the default"
-                assert resolved["model_type"] == "zipformer2"
-            else:
-                assert resolved["data_dir"].endswith("espeak-ng-data")
-                assert Path(resolved["data_dir"]).is_dir()
+        The STT entries do not share a naming convention -- one pins
+        ``encoder-….int8.onnx``, another plain ``encoder.onnx`` -- so resolution has
+        to be driven by the registry rather than by a name that only one of them
+        uses.
+        """
+        settings = make_settings(tmp_path)
+        for kind, resolver, attribute in (
+            ("stt", models.resolve_stt, "local_stt_model"),
+            ("tts", models.resolve_tts, "local_tts_model"),
+        ):
+            for asset in models.iter_assets(kind):
+                setattr(settings, attribute, asset.key)
+                place_files(settings, asset)
+
+                resolved = resolver(settings)
+                for key, path in resolved.items():
+                    if key == "model_type":
+                        continue
+                    assert Path(path).is_file() or Path(path).is_dir(), (
+                        f"{asset.key}: {key} is {path}"
+                    )
+                if kind == "stt":
+                    for needed in ("encoder", "decoder", "joiner", "tokens"):
+                        assert Path(resolved[needed]).is_file(), f"{asset.key}: {needed}"
+                else:
+                    assert resolved["data_dir"].endswith("espeak-ng-data")
+                    assert Path(resolved["data_dir"]).is_dir()
+
+    def test_the_int8_encoder_is_preferred_when_a_model_ships_both(self, tmp_path):
+        """`local_stt_int8` only means anything for a model that has both."""
+        settings = make_settings(tmp_path)
+        asset = models.MODEL_REGISTRY["streaming-zipformer-en-2023-06-26"]
+        settings.local_stt_model = asset.key
+        place_files(settings, asset)
+
+        int8 = models.resolve_stt(settings)
+        assert int8["encoder"].endswith(".int8.onnx"), "int8 is the default"
+        assert int8["model_type"] == "zipformer2"
+
+        settings.local_stt_int8 = False
+        fp32 = models.resolve_stt(settings)
+        assert fp32["encoder"].endswith("chunk-16-left-128.onnx")
+        assert not fp32["encoder"].endswith(".int8.onnx")
+
+    def test_a_model_that_declares_its_own_architecture_passes_no_model_type(self, tmp_path):
+        """Kroko's encoder carries the architecture in its ONNX metadata.
+
+        sherpa-onnx reads `model_type` from the metadata when it is empty, so
+        naming one here would be guessing at something the file already says.
+        """
+        settings = make_settings(tmp_path)
+        settings.local_stt_model = "streaming-zipformer-en-kroko-2025-08-06"
+        place_files(settings, models.MODEL_REGISTRY[settings.local_stt_model])
+
+        assert models.resolve_stt(settings)["model_type"] == ""
 
 
 # ---------------------------------------------------------------------------
@@ -401,23 +481,15 @@ class TestInstall:
 
     def test_an_optional_member_is_not_reported_as_missing(self, tmp_path):
         settings = make_settings(tmp_path)
-        asset = models.MODEL_REGISTRY[settings.local_stt_model]
+        # Named rather than taken from the default: only one of the registered
+        # models ships a variant it does not want, and that is the case under test.
+        asset = models.MODEL_REGISTRY["streaming-zipformer-en-2023-06-26"]
         assert [entry for entry in asset.files if entry.optional], (
             "the large STT model is expected to mark the fp32 encoder optional"
         )
-        root = models.model_root(settings, asset)
-        for entry in asset.files:
-            if entry.optional:
-                continue
-            target = root / entry.name
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(b"")
-            with target.open("r+b") as handle:
-                handle.truncate(entry.size)
-        for directory in asset.requires_dirs:
-            (root / directory).mkdir(parents=True, exist_ok=True)
+        place_files(settings, asset, skip_optional=True)
 
-        assert models.missing_files(asset, root) == [], (
+        assert models.missing_files(asset, models.model_root(settings, asset)) == [], (
             "a model without its optional file must still count as installed"
         )
 

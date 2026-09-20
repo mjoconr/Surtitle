@@ -133,15 +133,16 @@ Each direction chooses its engine independently, in Settings → Voice or with
 | Runs | hosted WebSocket | on your CPU, offline |
 | Key | required | none |
 | Cost | per minute | none |
-| Install | an API key | `uv sync --extra voice-local` + `surtitle models download` (~90 MB) |
+| Install | an API key | `uv sync --extra voice-local` + `surtitle models download` (~160 MB) |
 | Turn taking | contextual (uses what you said) | trailing silence, plus a completeness heuristic |
-| Accuracy | low word error | higher word error, especially proper nouns |
+| Accuracy | low word error | depends on the model; measured below |
 
-Local voice is genuinely usable — recognition runs at about **0.13× real time** and
-speech synthesis at **0.63–0.70×**, so it keeps ahead of playback on a laptop CPU
+Local voice is genuinely usable — recognition runs at about **0.05–0.08× real time**
+and speech synthesis at **0.63–0.70×**, so it keeps ahead of playback on a laptop CPU
 with no GPU. It is not a straight upgrade: turn detection is a timer rather than an
-understanding of what you said, and a 70 MB model transcribes proper nouns and jargon
-noticeably worse. [`docs/VOICE.md`](docs/VOICE.md) has the measured figures and the
+understanding of what you said, and a 70 MB model hears proper nouns and jargon
+noticeably worse, especially across a room. The default recogniser is chosen for that
+last case; [`docs/VOICE.md`](docs/VOICE.md) has the measured figures and the
 trade-offs, including the hybrid "local ears, hosted voice" setting, which is usually
 the right one.
 
@@ -454,7 +455,7 @@ uv run pytest -m live                # the subset that reaches the network
 uv run ruff format src tests scripts
 uv run ruff check src tests scripts
 uv run surtitle doctor           # live-probe your configuration
-uv run surtitle models download  # fetch local speech models (~90 MB)
+uv run surtitle models download  # fetch local speech models (~160 MB)
 ```
 
 The default suite is **fully offline**: every DeepSeek and Deepgram interaction is

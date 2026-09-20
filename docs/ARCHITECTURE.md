@@ -364,7 +364,7 @@ Local voice is two independent, opt-in halves of the build:
 | Flag | Adds | Result |
 |---|---|---|
 | `--with-voice-local` | the `sherpa-onnx` runtime (~30 MB) | local engines work; models download on first use |
-| `--with-local-models` | the speech models (~90 MB) | the archive is fully offline out of the box |
+| `--with-local-models` | the speech models (~160 MB) | the archive is fully offline out of the box |
 
 The default build contains neither, so the documented "extract and run, no
 network" property is unchanged and the archive stays small. `verify_archive()`

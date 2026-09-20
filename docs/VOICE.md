@@ -13,9 +13,9 @@ Each direction has two implementations, chosen independently with
 | Needs a key | yes | no |
 | Needs the network | yes | no |
 | Cost | per minute | none |
-| Install | an API key | `uv sync --extra voice-local` + `surtitle models download` (~90 MB) |
+| Install | an API key | `uv sync --extra voice-local` + `surtitle models download` (~90 MB for the default pair) |
 | Turn detection | Flux — *contextual*, uses what you said | trailing silence, plus a completeness heuristic |
-| Word errors | low | higher; measured below |
+| Word errors | low | depends on the model; measured below |
 
 They are independent, so "local ears, hosted voice" is supported and is usually
 the sensible combination — recognition is where the privacy and cost pressure is.
@@ -37,30 +37,54 @@ hosted engine is still the default.
 
 | Metric | Deepgram | Local |
 |---|---|---|
-| Recogniser real-time factor | n/a (streamed) | **0.13** (larger zipformer, int8) |
-| Recogniser model load | n/a | **~6 s**, once per session |
-| Word error, model's own test audio | — | **~4%** (larger), **~10%** (small) |
+| Recogniser real-time factor | n/a (streamed) | **0.05–0.08** (default model) |
+| Recogniser model load | n/a | **~3 s**, once per session |
+| Word error, far-field spontaneous speech | — | **~32%** (default), see below |
+| Word error, close read speech | — | **~6%** (default) |
 | First spoken audio | ~0.3–0.7 s (network RTT) | **0.7–1.9 s** (synthesis time) |
 | Voice real-time factor | n/a | **0.63–0.70** |
-| Resident memory | negligible | ~90 MB (STT) + ~60 MB (TTS) |
-| Disk | none | ~90 MB of models |
+| Resident memory | negligible | ~300 MB peak (default STT), ~210 MB (large STT) |
+| Disk | none | ~90 MB for the default pair; ~205 MB for every model |
 
 Two things follow, and both matter more than the raw figures:
 
-- **Local recognition is genuinely real-time.** At 0.13 RTF a 16-second utterance
-  decodes in about 2 seconds, spread across the utterance rather than collapsed at
-  its end, so captions appear while you speak.
+- **Local recognition is genuinely real-time.** At 0.05–0.08 RTF a 16-second
+  utterance decodes in about a second, spread across the utterance rather than
+  collapsed at its end, so captions appear while you speak.
 - **Local speech starts slowly but produces faster than it plays.** Synthesising a
   sentence costs 0.63–0.70 of that sentence's duration, so synthesis stays *ahead*
   of playback and never underruns — but the first sentence still takes 0.7–1.9 s to
   begin, because there is no server generating it in parallel with the model that
   is writing the reply.
 
-Accuracy is where the gap is real. On the models' own test audio the larger local
-model transcribed "the squalid quarter of the brothel" correctly while the small
-one produced "BRAFFLS" for a proper noun; on synthesised instructions the larger
-model produced "MADE" for "Read". Proper nouns and domain jargon are exactly what a
-70 MB model gets wrong, and often exactly what this application is asked about.
+Accuracy is where the gap is real, and *which* local model you have matters far
+more than the fact that it is local. Over 40 AMI utterances recorded on a single
+distant microphone — a room, several speakers, spontaneous speech, which is what
+this application is actually for — and 40 LibriSpeech test-other clips, which are
+read aloud into a close microphone:
+
+| Local STT model | Far-field, spontaneous | Close, read | 15 dB noise | RTF |
+|---|---|---|---|---|
+| `kroko-2025-08-06` (**default**) | **31.6%** | 6.4% | **27.3%** | 0.08 |
+| `zipformer-en-2023-06-26` | 98.5% | **5.1%** | 55.5% | 0.16 |
+
+(A third entry, `zipformer-en-20M`, was removed after the same measurement: 98.8%
+far-field, 24.3% on close read speech, and no faster than the default — 44 MB in
+every install for a model with no reason to be recommended.)
+
+The old default was trained on read speech and behaves like it: across a room it
+returned *nothing at all* for most utterances, and normalising the level only got
+it to 55%. From a real session on it — "repeat back to me" heard as "THE PATE BACK
+TO ME", "gallon" as "GALLUM", "something went wrong" as "SOMETHING LENT WARM" —
+while Deepgram, given the same audio, heard all three correctly. Kroko is trained
+on a much larger and more varied corpus of real recordings, and it is the default
+for that reason. It also **punctuates and capitalises**, which the older models do
+not: that is not cosmetic, because it is what gives the turn heuristic a real
+end-of-thought signal.
+
+The two alternatives remain selectable because they are not pointless — the large
+one is the more accurate of the three on close, clearly spoken read speech — but
+neither should be chosen for a microphone across a room.
 
 ## Local turn detection, and why it is weaker
 
@@ -73,14 +97,30 @@ looks like:
 2. **A completion heuristic** — the transcript tells the timer how much benefit of
    the doubt to give. A trailing function word ("and", "but", "the", "because")
    earns the full `SURTITLE_LOCAL_EOT_EXTEND_MS` (default 1200 ms); anything else
-   that cannot be *shown* to be finished — which, from a model that emits no
-   punctuation, is nearly everything — earns part of it. Terminal punctuation is
-   the only positive sign a thought closed.
+   that cannot be *shown* to be finished earns part of it. Terminal punctuation is
+   the one positive sign a thought closed — and the default model punctuates, so
+   that sign is real rather than theoretical. The older model emits no
+   punctuation, and for it nearly everything looks unfinished.
 3. **A backstop, not a turn rule** — `SURTITLE_LOCAL_MAX_UTTERANCE_MS` (default
    60 s). A turn ends when the thought sounds finished, and a clock cannot know
    that, so this only bounds a speaker who never pauses: it fires on the first real
    pause *after* that much continuous speech, and never while audio is still
    arriving. At 20 s it used to close a turn on the clock alone, mid-word.
+
+**No rule may act on less than 800 ms of silence**, whatever `SURTITLE_LOCAL_EOT_SILENCE_MS`
+says. A streaming transducer emits a word only once it has heard the audio that
+follows it, so the silence after a sentence is also what flushes the last word of
+it. Measured on one clip:
+
+```
+0.32 s of trailing silence   "I'M FROM THE CUTTER LYING OFF THE COA"
+0.80 s of trailing silence   "I'M FROM THE CUTTER LYING OFF THE COAST"
+```
+
+A shorter window therefore does not make the agent answer sooner — it truncates
+the end of every sentence, which reads as a recognition failure rather than as a
+setting. The shipped default is exactly the floor, so the floor changes nothing
+until somebody lowers it.
 
 The asymmetry is deliberate: a false positive costs a slightly longer pause before
 the agent answers; a false negative cuts you off mid-sentence. So the heuristic
@@ -158,8 +198,9 @@ updates a second on the wire.
 
 That shape — **replace, never append** — is exactly what `Session._accumulate`
 already expects from Flux, so no session-side merging logic differs between the
-engines. The local path emits its text already upper-cased, as the model produces
-it.
+engines. Whether the text arrives upper-cased or punctuated is up to the model:
+the default one produces ordinary sentences, the older ones produce capitals with
+no punctuation at all.
 
 ## Models
 
@@ -170,6 +211,13 @@ surtitle models list       # what is installed, and what it would cost
 surtitle models download   # fetch what is missing (asks first)
 surtitle models verify     # re-check every installed file's checksum
 ```
+
+Three English recognisers are registered — the default Kroko model plus two
+older zipformers, compared in the table above — along with one Piper voice.
+The installer fetches all of them; `SURTITLE_LOCAL_STT_MODEL` (or the Settings
+screen) chooses which one runs. The quoted download figure counts only what is
+actually written: the large model's archive also contains a 260 MB fp32 encoder
+that is deliberately skipped.
 
 Everything lands in `<app data>/models` (`SURTITLE_MODELS_DIR` overrides),
 which is why updating or replacing the application never re-downloads them, and

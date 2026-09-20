@@ -134,8 +134,14 @@ class ModelAsset:
 
     @property
     def total_bytes(self) -> int:
-        """Bytes actually needed on disk once installed."""
-        return sum(f.size for f in self.files)
+        """Bytes actually needed on disk once installed.
+
+        Optional members are excluded, because they are deliberately not
+        downloaded: counting them overstated the figure quoted in the install
+        prompt by 260 MB for the one model that ships an fp32 alternative it
+        never uses.
+        """
+        return sum(f.size for f in self.files if not f.optional)
 
     def find(self, name: str) -> ModelFile | None:
         """The required file with this exact name."""
@@ -156,50 +162,81 @@ def _f(
     return ModelFile(name=name, sha256=sha256, size=size, primary=primary, optional=optional)
 
 
-# Both STT entries come from icefall's English streaming zipformer family. They
-# are registered together because the trade is real and the user, not this
-# module, should choose it: measured on the models' own test audio on a 2019
-# Intel i9, the small model produced ~10% word error at real-time factor 0.08,
-# and the larger one ~4% at real-time factor 0.13 — the larger model is what
-# spells "brothel" and "dishonoured" correctly, and the small model is what
-# starts faster on a weak CPU.
-_LOCAL_STT_20M = ModelAsset(
-    key="streaming-zipformer-en-20M",
+# Both STT entries are English streaming zipformers, and the difference between
+# them is far larger than their labels suggest. Word error, measured on the
+# development machine (Intel i9, CPU only), over 40 AMI utterances recorded on a
+# single distant microphone -- a room, several speakers, spontaneous speech,
+# which is what this application is actually for -- and over 40 LibriSpeech
+# test-other clips, which are read aloud into a close microphone:
+#
+#     model                       AMI far-field    clean read    15 dB noise   RTF
+#     kroko-2025-08-06                  31.6 %         6.4 %         27.3 %   0.08
+#     zipformer-en-2023-06-26           98.5 %         5.1 %         55.5 %   0.16
+#     (zipformer-en-20M, removed)       98.8 %        24.3 %         84.0 %   0.08
+#
+# The 2023-06-26 model is the best of the two on clean close read speech and
+# unusable on anything else: on the far-field set it returned *nothing at all*
+# for most utterances, and gain-normalising the audio only got it to 55%. That
+# was this project's default until a real session showed the shape of it --
+# "repeat back to me" heard as "THE PATE BACK TO ME", "gallon" as "GALLUM",
+# "something went wrong" as "SOMETHING LENT WARM" -- while Deepgram, given the
+# same audio, heard all three correctly. It was trained on read speech and it
+# behaves like it. It stays registered because a headset and a quiet room are a
+# real way to use this, and there it is the more accurate of the two.
+#
+# The 20M model is gone: it was slower than either of these on this machine and
+# much worse at every condition measured, so it was 44 MB in every install for a
+# model there was never a reason to recommend.
+#
+# Kroko is trained on a much larger and more varied corpus of real recordings,
+# and it is the default for that reason. Two further consequences are load
+# bearing rather than cosmetic: it punctuates and capitalises its output, which
+# gives the turn heuristic a real end-of-thought signal (see local_stt.py), and
+# its encoder names its own architecture in the ONNX metadata, so unlike the
+# 2023-06-26 model it is built with no ``model_type``.
+_LOCAL_STT_KROKO = ModelAsset(
+    key="streaming-zipformer-en-kroko-2025-08-06",
     kind="stt",
-    label="Zipformer streaming English, small (~43 MB, fastest)",
-    archive="sherpa-onnx-streaming-zipformer-en-20M-2023-02-17.tar.bz2",
+    label="Zipformer streaming English, Kroko (~57 MB, punctuated, most accurate)",
+    archive="sherpa-onnx-streaming-zipformer-en-kroko-2025-08-06.tar.bz2",
     release=_STT_RELEASE,
-    strip_prefix="sherpa-onnx-streaming-zipformer-en-20M-2023-02-17",
+    strip_prefix="sherpa-onnx-streaming-zipformer-en-kroko-2025-08-06",
     files=(
         _f(
-            "encoder-epoch-99-avg-1.int8.onnx",
-            "3810755ce7c3ab26b42a8bcf39d191308fa27fb0f53358823ba46141d03b7eb3",
-            42845182,
+            "encoder.onnx",
+            "d4881c57449d581e0770fd53fa66c2fdc6cd167d92ece7c715e603defc96d9d4",
+            70092599,
         ),
         _f(
-            "decoder-epoch-99-avg-1.int8.onnx",
-            "21e2a2acd961b3ac72f55be2f10f1a285e1b0b0ba010d7c0b6eab141411b163c",
-            539499,
+            "decoder.onnx",
+            "455ba38466fce8d5a57e7db68a323b684079ca4d9e1dd93a740d9b2429aae3b1",
+            617488,
         ),
         _f(
-            "joiner-epoch-99-avg-1.int8.onnx",
-            "e085d73b593cf9b0707f370dbd656d58327d3fe36d80d849202ef81df02cb01e",
-            259572,
+            "joiner.onnx",
+            "d406f616736350e2a7df3e39398b78eb2fc1a2ca6973a19d3853fa3227e25b52",
+            336817,
         ),
         _f(
             "tokens.txt",
-            "49e3c2646595fd907228b3c6787069658f67b17377c60aeb8619c4551b2316fb",
-            5048,
+            "396dbeb5f4858875690716084f54e90d339679d0ba3e6b5b584f3d7589254d2d",
+            6310,
             primary=True,
         ),
     ),
-    notes="Streaming transducer: emits revised partial text while you speak.",
+    notes=(
+        "Community model from Kroko ASR, CC-BY-SA per its model card "
+        "(huggingface.co/Banafo/Kroko-ASR). Downloaded from the sherpa-onnx "
+        "release at the user's request; not redistributed here. Its encoder "
+        "declares its own architecture in the ONNX metadata, so no model_type "
+        "is passed to the engine."
+    ),
 )
 
 _LOCAL_STT_312M = ModelAsset(
     key="streaming-zipformer-en-2023-06-26",
     kind="stt",
-    label="Zipformer streaming English, large (~71 MB, more accurate)",
+    label="Zipformer streaming English, large (~71 MB, best on close, clear speech)",
     archive="sherpa-onnx-streaming-zipformer-en-2023-06-26.tar.bz2",
     release=_STT_RELEASE,
     strip_prefix="sherpa-onnx-streaming-zipformer-en-2023-06-26",
@@ -239,7 +276,9 @@ _LOCAL_STT_312M = ModelAsset(
     notes=(
         "The fp32 encoder is 260 MB and is deliberately not downloaded: the int8 "
         "one is pinned instead, and the fp32 member is an alternative the engine "
-        "can fall back to only if it is already present."
+        "can fall back to only if it is already present. Kept as an option because "
+        "it is the more accurate of the two on close, clearly spoken read speech "
+        "-- and only there; see the table above before recommending it."
     ),
 )
 
@@ -320,8 +359,10 @@ _LOCAL_TTS_PIPER = ModelAsset(
     notes="English phonemisation is espeak-ng based; its data ships in the archive.",
 )
 
+# Order is the recommendation: `registry_key` falls back to the first entry of a
+# kind when nothing is configured, so the first STT entry here is the default.
 MODEL_REGISTRY: dict[str, ModelAsset] = {
-    asset.key: asset for asset in (_LOCAL_STT_312M, _LOCAL_STT_20M, _LOCAL_TTS_PIPER)
+    asset.key: asset for asset in (_LOCAL_STT_KROKO, _LOCAL_STT_312M, _LOCAL_TTS_PIPER)
 }
 
 

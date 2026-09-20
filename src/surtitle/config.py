@@ -42,7 +42,7 @@ DEEPGRAM_TTS_MODEL = "aura-2-thalia-en"
 # Local (sherpa-onnx) defaults. These are registry keys in
 # :mod:`surtitle.voice.models`, which owns the URLs and checksums; keeping
 # the *names* here means configuration needs no import of the model layer.
-LOCAL_STT_MODEL = "streaming-zipformer-en-2023-06-26"
+LOCAL_STT_MODEL = "streaming-zipformer-en-kroko-2025-08-06"
 LOCAL_TTS_MODEL = "vits-piper-en_US-lessac-medium"
 
 

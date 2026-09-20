@@ -208,7 +208,7 @@ Menu entry open the UI when you want it. Removing it is deleting one `.lnk` from
 
 **Why updating is cheap.** The code and its virtual environment live in the
 checkout; the speech models live in `%LOCALAPPDATA%\Surtitle\models`. Updating
-replaces the code and re-verifies the models without re-downloading ~90 MB, and
+replaces the code and re-verifies the models without re-downloading ~160 MB, and
 deleting the checkout does not delete the models. Nothing is written to the
 registry, to `Program Files`, or to `PATH`.
 
@@ -340,7 +340,7 @@ Output lands in `dist\`. Useful flags:
 | `--skip-wheelhouse` | Smaller archive; offline repair is no longer possible |
 | `--keep-build` | Reuse `build\release` instead of starting fresh |
 | `--with-voice-local` | Bundle the local speech engines (~30 MB); models still download on first use |
-| `--with-local-models` | Bundle the models too (~90 MB), for a fully offline archive |
+| `--with-local-models` | Bundle the models too (~160 MB), for a fully offline archive |
 | `--verify-only` | Don't build: re-check the archive(s) already in `dist\` (or the paths you name). The same verifier the build runs, so it is also how you check a download after extracting it |
 
 The default archive contains neither local-voice piece, which keeps the documented

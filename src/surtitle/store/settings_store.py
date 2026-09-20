@@ -247,7 +247,9 @@ SETTINGS_FIELDS: tuple[_Field, ...] = (
         "local_stt_model",
         str,
         "Local speech-to-text model",
-        "Model key from `surtitle models list`. Used when the engine is local.",
+        "Model key from `surtitle models list`. Used when the engine is local. The "
+        "default is much the most accurate on speech picked up across a room; the "
+        "alternatives are only better on close, clearly spoken read speech.",
         section="stt",
     ),
     _Field(
@@ -262,7 +264,10 @@ SETTINGS_FIELDS: tuple[_Field, ...] = (
         int,
         "Local end-of-turn silence (ms)",
         "How long you must pause before a locally recognised turn is finished. "
-        "A local model has no contextual end-of-turn detector, so this is a timer.",
+        "A local model has no contextual end-of-turn detector, so this is a timer. "
+        "Values below 800 ms are raised: the recogniser still holds the last word "
+        "until that much audio has followed it, so a shorter window would truncate "
+        "the end of every sentence rather than answer sooner.",
         minimum=200,
         maximum=5000,
         section="stt",
