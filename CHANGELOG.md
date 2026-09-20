@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0-rc3] - 2026-09-21
+
 ### Changed
 
 - **The macOS archive no longer carries anything executable, so macOS no longer
