@@ -65,6 +65,41 @@ class TestAssetSelection:
 
         assert selfupdate.asset_for(payload, platform="win32", machine="AMD64").url == "win"
 
+    def test_windows_finds_its_build_when_no_machine_is_passed_in(self, monkeypatch):
+        """The regression that reached a user: no caller ever passes a machine.
+
+        `begin()` → `stage()` → `asset_for(payload)` is the whole call chain, and the
+        last call carries nothing but the payload. So the architecture must be
+        *discovered*, and on Windows there is no `os.uname` to discover it with: it
+        came back empty, the `AMD64` build matched nothing, and the update stopped
+        before its first download. Reproduced live as a release lookup that
+        succeeded, no download, and Surtitle left on the old version.
+        """
+        monkeypatch.delattr(selfupdate.os, "uname", raising=False)
+        monkeypatch.setattr(selfupdate._platform, "machine", lambda: "AMD64")
+        payload = {
+            "tag_name": "v1",
+            "assets": [
+                {"name": "surtitle-1-darwin-arm64.tar.gz", "browser_download_url": "mac"},
+                {"name": "surtitle-1-win32-AMD64.zip", "browser_download_url": "win"},
+            ],
+        }
+
+        assert selfupdate.asset_for(payload, platform="win32").url == "win"
+
+    def test_a_mac_finds_its_build_when_no_machine_is_passed_in(self, monkeypatch):
+        """The same, where the answer is read from an asset name it must not mix up."""
+        monkeypatch.setattr(selfupdate._platform, "machine", lambda: "x86_64")
+        payload = {
+            "tag_name": "v1",
+            "assets": [
+                {"name": "surtitle-1-darwin-arm64.tar.gz", "browser_download_url": "arm"},
+                {"name": "surtitle-1-darwin-x86_64.tar.gz", "browser_download_url": "intel"},
+            ],
+        }
+
+        assert selfupdate.asset_for(payload, platform="darwin").url == "intel"
+
     def test_macos_takes_the_tarball_for_its_architecture(self):
         payload = {
             "tag_name": "v1",
@@ -217,6 +252,38 @@ class TestStaging:
         assert error == ""
         assert staged == tmp_path / "Surtitle.new", "the swap must be a rename, not a copy"
         assert (staged / "BUILD-INFO.json").is_file()
+        assert (staged / "run.bat").is_file()
+
+    def test_a_windows_release_is_staged_with_nothing_but_the_payload(self, tmp_path, monkeypatch):
+        """The path an in-place update actually takes, with no machine argument.
+
+        Every other test in this class passes `machine="AMD64"`, which is exactly why
+        the bug shipped: the argument was covered and the caller was not. This one
+        calls `stage()` the way `begin()` does — payload, root and nothing else — on a
+        machine that has no `os.uname`, and asserts a download happens at all.
+        """
+        monkeypatch.delattr(selfupdate.os, "uname", raising=False)
+        monkeypatch.setattr(selfupdate._platform, "machine", lambda: "AMD64")
+        root = tmp_path / "Surtitle"
+        root.mkdir()
+        (root / "BUILD-INFO.json").write_text("{}", encoding="utf-8")
+        archive = tmp_path / "asset.zip"
+        digest = self._zip(archive)
+        name = "surtitle-9.9.9-win32-AMD64.zip"
+        opened: list[str] = []
+
+        staged, error = selfupdate.stage(
+            _settings(tmp_path),
+            _windows_payload(name),
+            root=root,
+            platform="win32",
+            opener=lambda url: opened.append(url) or archive.read_bytes(),
+            fetch_text=lambda url: f"{digest}  {name}\n",
+        )
+
+        assert error == "", "an update on Windows must not stop before it downloads"
+        assert opened, "the asset was never fetched"
+        assert staged is not None
         assert (staged / "run.bat").is_file()
 
     def test_a_checksum_mismatch_stops_the_update(self, tmp_path):
@@ -529,7 +596,8 @@ class TestTheUpdaterReportsWhatItDid:
 
 
 class TestLastAttempt:
-    """Reading the outcome, which is written by PowerShell or sh, not by Python."""
+    """Reading the outcome, written by PowerShell or sh — or, for a failure that
+    never got as far as the swap, by Python."""
 
     def test_nothing_recorded_is_none(self, tmp_path):
         assert selfupdate.last_attempt(_settings(tmp_path)) is None
@@ -571,3 +639,43 @@ class TestLastAttempt:
         selfupdate.updates_dir(settings).mkdir(parents=True, exist_ok=True)
         (selfupdate.updates_dir(settings) / "last-update.txt").write_text(text, encoding="utf-8")
         assert selfupdate.last_attempt(settings) is None
+
+
+class TestAFailureThatNeverReachedTheSwap:
+    """A staging failure is written down, because a file is what the tray reads.
+
+    Reported live as "nothing seemed to happen": the release lookup answered, no
+    download followed, and the update row went back to normal. The result file was
+    never written, because the only thing that wrote it was the swap script — which
+    is never started when the update stops before it has staged anything.
+    """
+
+    def test_a_staging_failure_reads_back_as_a_failed_attempt(self, tmp_path):
+        settings = _settings(tmp_path)
+
+        selfupdate.record_failure(settings, "that release has no build for this machine")
+
+        result = selfupdate.last_attempt(settings)
+        assert result is not None
+        assert result["ok"] is False
+        assert result["message"] == "that release has no build for this machine"
+
+    def test_the_line_has_the_shape_the_swap_scripts_write(self, tmp_path):
+        """One file and one format, whichever half of the update wrote it."""
+        settings = _settings(tmp_path)
+
+        selfupdate.record_failure(settings, "nope")
+
+        line = (selfupdate.updates_dir(settings) / "last-update.txt").read_text(encoding="utf-8")
+        stamp, status, message = line.strip().split(" ", 2)
+        assert status == "failed"
+        assert message == "nope"
+        assert float(stamp) > 0
+
+    def test_a_folder_that_cannot_be_written_does_not_raise(self, tmp_path, monkeypatch):
+        """Failing to report a failure must not become a second one."""
+        blocker = tmp_path / "blocked"
+        blocker.write_text("not a directory", encoding="utf-8")
+        monkeypatch.setattr(selfupdate, "updates_dir", lambda settings=None: blocker)
+
+        selfupdate.record_failure(_settings(tmp_path), "nope")

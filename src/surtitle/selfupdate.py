@@ -25,10 +25,12 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import os
+import platform as _platform
 import shutil
 import subprocess
 import sys
 import tarfile
+import time
 import zipfile
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -46,6 +48,7 @@ __all__ = [
     "install_root",
     "last_attempt",
     "log_path",
+    "record_failure",
     "stage",
     "supported",
     "updates_dir",
@@ -81,6 +84,22 @@ def _asset_architecture(name: str) -> str | None:
         if token in lowered:
             return token
     return None
+
+
+def _machine_name() -> str:
+    """This machine's architecture, in the words the asset names use.
+
+    ``platform.machine()`` is the call ``scripts/build_release.py`` spells the
+    architecture into an asset name with, so it is the call that should read one
+    back: ``AMD64`` on Windows, ``arm64`` or ``x86_64`` on macOS. ``os.uname``
+    agrees wherever it exists, but Windows has no such function — and Windows is
+    both the platform whose names are the hardest to read and the one with nobody
+    at the keyboard to read them.
+    """
+    try:
+        return _platform.machine().lower()
+    except Exception:  # pragma: no cover - a platform that cannot answer at all
+        return ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -180,17 +199,13 @@ def asset_for(
     """
     tag = str(payload.get("tag_name") or "").strip()
     here = platform or sys.platform
-    # A machine that was passed in is authoritative; `os.uname` is only how one is
-    # discovered. Gating the *argument* on `hasattr(os, "uname")` — which Windows
-    # does not have — threw away the machine on exactly the platform whose archive
-    # names are hardest to read (`AMD64`), and every Windows update then found no
-    # asset at all.
-    if machine:
-        machine_arch = machine.lower()
-    elif hasattr(os, "uname"):
-        machine_arch = os.uname().machine.lower()
-    else:  # pragma: no cover - a platform with neither; treat as architecture-free
-        machine_arch = ""
+    # A machine that was passed in is authoritative; the rest of the time it is
+    # discovered, and discovering it must not depend on `os.uname` — Windows has none.
+    # Asking the *argument* whether the machine existed was one bug here, fixed
+    # before; the other was that no caller ever passes one, so on Windows the
+    # architecture came back empty, no asset matched, and every update stopped
+    # before its first download with "no build for this machine".
+    machine_arch = machine.lower() if machine else _machine_name()
     wanted_suffix = ".zip" if here == "win32" else ".tar.gz"
     wanted_platform = "win32" if here == "win32" else ("darwin" if here == "darwin" else "linux")
     wanted_arch = _ARCH_TOKENS.get(machine_arch, ())
@@ -655,6 +670,29 @@ def last_attempt(settings: Settings | None = None) -> dict[str, Any] | None:
         "message": message.strip(),
         "log": str(log_path(settings)),
     }
+
+
+def record_failure(settings: Settings, message: str) -> None:
+    """Write a failed attempt where the tray, the dialog and ``surtitle status`` read it.
+
+    The updater script writes this file itself when the *swap* fails, because that
+    happens after this process has exited and a file is the only channel it has.
+    A failure while *staging* — no build for this machine, no checksum, a folder
+    that cannot be written — happens while the app is still running, and until now
+    was written nowhere: the job ended, the update row went back to "Update to the
+    latest release…", and an attempt that stopped before its first download left no
+    trace at all. That is how it was reported: "nothing seemed to happen".
+    """
+    try:
+        result = updates_dir(settings) / RESULT_FILENAME
+        result.parent.mkdir(parents=True, exist_ok=True)
+        result.write_text(f"{int(time.time())} failed {message.strip()}\n", encoding="utf-8")
+    except Exception:
+        # Failing to report a failure must not become a second one: this runs on the
+        # way out of an update that has already gone wrong, and the caller still has
+        # a message to return. Anything from an unwritable data directory to a
+        # settings object that cannot answer is swallowed for that reason.
+        pass
 
 
 def begin(

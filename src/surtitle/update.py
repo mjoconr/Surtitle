@@ -412,6 +412,11 @@ def _apply_release_archive(
 
     prepared, error = selfupdate.begin(settings, payload)
     if prepared is None:
+        # Written down as well as returned: the tray, the Status dialog and
+        # `surtitle status` read the last attempt from this file, and a staging
+        # failure used to leave it untouched — so an update that stopped before
+        # downloading anything looked exactly like one that never ran.
+        selfupdate.record_failure(settings, error)
         return UpdateResult(False, error, [])
     return UpdateResult(
         True,

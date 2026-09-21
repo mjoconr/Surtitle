@@ -244,6 +244,36 @@ class TestReleaseArchiveUpdate:
         assert "9.9.9" in result.message
         assert "untouched" in result.message, "the data directory must be promised safe"
 
+    def test_a_staging_failure_is_written_down_rather_than_left_silent(self, monkeypatch):
+        """Reported live as "nothing seemed to happen".
+
+        The release lookup succeeded and no download followed, because no asset
+        matched this machine. A failure that stops before the swap writes no result
+        file, and the tray reads the last attempt from exactly that file — so the row
+        went back to "Update to the latest release…" and nothing anywhere said why.
+        """
+        monkeypatch.setattr(updater, "git_checkout", lambda: None)
+        monkeypatch.setattr("surtitle.selfupdate.supported", lambda *a, **k: True)
+        monkeypatch.setattr(
+            "surtitle.selfupdate.release", lambda *a, **k: {"tag_name": "v9.9.9", "assets": []}
+        )
+        reason = "that release has no build for this machine's platform and architecture"
+        monkeypatch.setattr(
+            "surtitle.selfupdate.begin", lambda settings, payload, **k: (None, reason)
+        )
+        written: list[tuple[object, str]] = []
+        monkeypatch.setattr(
+            "surtitle.selfupdate.record_failure",
+            lambda settings, message: written.append((settings, message)),
+        )
+        settings = object()
+
+        result = updater.apply("release", settings=settings)
+
+        assert result.ok is False
+        assert result.message == reason
+        assert written == [(settings, reason)], "the tray reads the last attempt from a file"
+
     def test_already_being_on_the_release_does_not_download_it(self, monkeypatch):
         import surtitle
 

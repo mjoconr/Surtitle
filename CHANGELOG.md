@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **An in-place update on Windows finds its build again, and says so when it cannot.**
+  Reported from a real Windows install running the pre-release: the tray offered
+  0.15.0, the release lookup answered, the download never started, and Surtitle
+  stayed on the old version with nothing said anywhere. The architecture check added
+  in 0.11.0 — the one that keeps a Mac from being handed the wrong build — reads the
+  machine's name with `os.uname`, which **Windows does not have**, and no caller
+  passes the name in: `begin()` → `stage()` → `asset_for(payload)` carries nothing but
+  the payload. So the architecture came back empty, the `AMD64` asset matched
+  nothing, and every Windows update stopped before its first download. It is read
+  with `platform.machine()` now — the same call `scripts/build_release.py` spells the
+  name into the asset with, which is what keeps the two halves of a release agreeing.
+
+  The second half is why it looked like nothing happened at all: the file the tray
+  reads the last attempt from is written by the *swap* script, and this failure
+  happened before any swap script existed, so the update row simply went back to
+  "Update to the latest release…". A failure that stops during staging is now written
+  to that same file, which puts **Last update failed — …** in the tray, in the Status
+  dialog and in `surtitle status`, with the reason and the path to the log.
+
 ## [0.15.0] - 2026-09-21
 
 ### Added
