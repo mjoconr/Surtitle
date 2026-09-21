@@ -7,50 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
+## [0.15.0] - 2026-09-21
 
-- **A fresh install says where the offline speech engines come from.** Reported
-  from the new macOS archive: it fetched its environment, started, and then the
-  local engines failed with an import error — while `models status` listed every
-  model as installed. The engines are a *separate* optional extra (~30 MB), never
-  bundled by a release, and the models are files they load; nothing said which of
-  the two was missing. `run.sh` now says so on its first run, naming both routes
-  (**Settings ▸ Voice → Install**, or `uv sync --extra voice-local`), and the
-  import error does the same instead of opening with a terminal command and
-  `pip install 'surtitle[voice-local]'` — pip that a `uv`-made environment does not
-  have. `docs/MACOS.md` and `docs/VOICE.md` carry the distinction as well, since it
-  is the one that makes "everything is installed" and "it will not start" both true.
+### Added
 
-## [0.15.0-rc3] - 2026-09-21
+- **A provider running on this machine can be tested from Settings.** The Test button
+  lived on the API-key field, and a local model server has no key field — so the one
+  question worth asking about it, "is it there, and what has it got?", could not be
+  asked from the interface at all. Its card now has **Test connection**, which goes
+  through the server rather than the page (a local model server sends no CORS headers,
+  so a fetch from the browser would fail against a server that is working perfectly)
+  and reports what the endpoint answered and which models it offers. A server that is
+  not running is reported with the address that was tried.
 
-### Changed
-
-- **The macOS archive no longer carries anything executable, so macOS no longer
-  refuses to run it.** Reported as the malware blocking system picking up "python
-  (and all its sub module) and rust (I think)" — which is what Gatekeeper says, one
-  dialog per file, about a download from a browser: it carries
-  `com.apple.quarantine` and the bundle has no Developer ID signature, so the
-  interpreter, every compiled extension module (including the Rust-built
-  `_pydantic_core` and `jiter`) and the launcher are each refused with a message
-  about malware. That is a missing signature rather than a detection, and the fix
-  is not to sign a hundred binaries but to ship none of them. macOS now builds
-  `--thin`: the sources and a launcher, in which `run.sh` fetches Python and the
-  dependencies with `uv` on the first run. Measured on one Mac: **0.6 MB instead of
-  137 MB**, `find … | grep -c Mach-O` is **0**, and a *quarantined* copy installs and
-  runs — `./run.sh --version` printed the version with the attribute still on every
-  file. What the first run installs is fetched by a program rather than a browser,
-  so it never gets the flag either, which is also why a git checkout was never
-  affected. Windows still ships the bundled runtime, where SmartScreen's "Run
-  anyway" is a prompt rather than a wall.
-
-  The trade is one network fetch on first run (a few minutes, once) instead of an
-  offline archive. `python scripts/build_release.py --with-voice-local` still builds
-  the self-contained archive for a machine with no network, which macOS *will*
-  block: [`docs/MACOS.md`](docs/MACOS.md) has that one-line fix, how to verify a
-  download against `SHA256SUMS.txt`, and what to do on a managed Mac that blocks
-  unsigned binaries outright.
-
-## [0.15.0-rc2] - 2026-09-20
+- **A release can be marked as a pre-release.** A tag with a suffix — `v0.15.0-rc1` —
+  is published as a pre-release automatically, and dispatching the workflow can mark
+  one too. Two things follow: GitHub's *latest release* keeps pointing at the last
+  real version, and the updater already refuses to offer a prerelease to somebody
+  running a released build, so a pre-release is handed to whoever goes looking for it
+  rather than announced to everyone.
 
 ### Changed
 
@@ -94,6 +69,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `SURTITLE_LOCAL_EOT_SILENCE_MS` below 800 ms is now raised to it, for the
   ordinary rule and the backstop alike: a shorter window does not answer sooner,
   it truncates the end of every sentence.
+
+- **The macOS archive no longer carries anything executable, so macOS no longer
+  refuses to run it.** Reported as the malware blocking system picking up "python
+  (and all its sub module) and rust (I think)" — which is what Gatekeeper says, one
+  dialog per file, about a download from a browser: it carries
+  `com.apple.quarantine` and the bundle has no Developer ID signature, so the
+  interpreter, every compiled extension module (including the Rust-built
+  `_pydantic_core` and `jiter`) and the launcher are each refused with a message
+  about malware. That is a missing signature rather than a detection, and the fix
+  is not to sign a hundred binaries but to ship none of them. macOS now builds
+  `--thin`: the sources and a launcher, in which `run.sh` fetches Python and the
+  dependencies with `uv` on the first run. Measured on one Mac: **0.6 MB instead of
+  137 MB**, `find … | grep -c Mach-O` is **0**, and a *quarantined* copy installs and
+  runs — `./run.sh --version` printed the version with the attribute still on every
+  file. What the first run installs is fetched by a program rather than a browser,
+  so it never gets the flag either, which is also why a git checkout was never
+  affected. Windows still ships the bundled runtime, where SmartScreen's "Run
+  anyway" is a prompt rather than a wall.
+
+  The trade is one network fetch on first run (a few minutes, once) instead of an
+  offline archive. `python scripts/build_release.py --with-voice-local` still builds
+  the self-contained archive for a machine with no network, which macOS *will*
+  block: [`docs/MACOS.md`](docs/MACOS.md) has that one-line fix, how to verify a
+  download against `SHA256SUMS.txt`, and what to do on a managed Mac that blocks
+  unsigned binaries outright.
 
 ### Removed
 
@@ -208,25 +208,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   does not read, and reported "could not start the install" for the 409 that means one
   is already running.
 
-## [0.15.0-rc1] - 2026-09-20
-
-### Added
-
-- **A provider running on this machine can be tested from Settings.** The Test button
-  lived on the API-key field, and a local model server has no key field — so the one
-  question worth asking about it, "is it there, and what has it got?", could not be
-  asked from the interface at all. Its card now has **Test connection**, which goes
-  through the server rather than the page (a local model server sends no CORS headers,
-  so a fetch from the browser would fail against a server that is working perfectly)
-  and reports what the endpoint answered and which models it offers. A server that is
-  not running is reported with the address that was tried.
-
-- **A release can be marked as a pre-release.** A tag with a suffix — `v0.15.0-rc1` —
-  is published as a pre-release automatically, and dispatching the workflow can mark
-  one too. Two things follow: GitHub's *latest release* keeps pointing at the last
-  real version, and the updater already refuses to offer a prerelease to somebody
-  running a released build, so a pre-release is handed to whoever goes looking for it
-  rather than announced to everyone.
+- **A fresh install says where the offline speech engines come from.** Reported
+  from the new macOS archive: it fetched its environment, started, and then the
+  local engines failed with an import error — while `models status` listed every
+  model as installed. The engines are a *separate* optional extra (~30 MB), never
+  bundled by a release, and the models are files they load; nothing said which of
+  the two was missing. `run.sh` now says so on its first run, naming both routes
+  (**Settings ▸ Voice → Install**, or `uv sync --extra voice-local`), and the
+  import error does the same instead of opening with a terminal command and
+  `pip install 'surtitle[voice-local]'` — pip that a `uv`-made environment does not
+  have. `docs/MACOS.md` and `docs/VOICE.md` carry the distinction as well, since it
+  is the one that makes "everything is installed" and "it will not start" both true.
 
 ## [0.14.0] - 2026-09-20
 

@@ -1,6 +1,6 @@
 [project]
 name = "surtitle"
-version = "0.15.0-rc3"
+version = "0.15.0"
 description = "Voice-first agentic workbench — talk to an agent that reads your documents, writes and runs code, and answers out loud. Hear the conclusion, not the log."
 readme = "README.md"
 license = "MIT"
