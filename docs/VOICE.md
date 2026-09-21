@@ -26,8 +26,13 @@ the sensible combination — recognition is where the privacy and cost pressure 
 > `voice-local` extra is missing from the active venv, and the session then fails
 > with no `local STT ready` line in `surtitle.log`. `scripts/run.sh` does not
 > repair this: with an existing `.venv` it launches without syncing, and its
-> first-run bootstrap runs `uv sync --inexact` with no extra. The fix is an
-> explicit `uv sync --extra voice-local`, then restart the server.
+> first-run bootstrap runs `uv sync --inexact` with no extra — it now says so on
+> that first run rather than leaving it to be discovered from the error. Two ways
+> out, and both install the same extra: **Settings ▸ Voice**, choose local and press
+> **Install**, which runs `uv sync --extra voice-local` in the folder Surtitle lives
+> in; or run that command yourself from that folder and restart. Reported from a
+> fresh macOS install, where every model was present and the engines were not, and
+> nothing on screen said which of the two was missing.
 
 ## What the two engines are, measured
 

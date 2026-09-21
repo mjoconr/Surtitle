@@ -124,6 +124,15 @@ if UV="$(find_uv)"; then
   if ! "$UV" sync --inexact; then
     die "uv sync failed. Run 'uv sync' yourself to see the full output."
   fi
+  # The engines that recognise and speak on this machine are an optional extra, and
+  # this bootstrap deliberately does not install 30 MB nobody asked for. Saying so
+  # here is the difference between a choice and a dead end: picking a local engine
+  # in Settings otherwise fails with an import error and no sign of what to do,
+  # which is how it was reported from a fresh macOS install.
+  info ""
+  info "Optional: the offline speech engines (no key, nothing leaves this machine)"
+  info "are not installed. In Settings ▸ Voice, choose local and press Install — or run"
+  info "    uv sync --extra voice-local"
   exec "$UV" run --no-sync --quiet surtitle "$@"
 fi
 

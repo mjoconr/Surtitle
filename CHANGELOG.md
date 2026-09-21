@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A fresh install says where the offline speech engines come from.** Reported
+  from the new macOS archive: it fetched its environment, started, and then the
+  local engines failed with an import error — while `models status` listed every
+  model as installed. The engines are a *separate* optional extra (~30 MB), never
+  bundled by a release, and the models are files they load; nothing said which of
+  the two was missing. `run.sh` now says so on its first run, naming both routes
+  (**Settings ▸ Voice → Install**, or `uv sync --extra voice-local`), and the
+  import error does the same instead of opening with a terminal command and
+  `pip install 'surtitle[voice-local]'` — pip that a `uv`-made environment does not
+  have. `docs/MACOS.md` and `docs/VOICE.md` carry the distinction as well, since it
+  is the one that makes "everything is installed" and "it will not start" both true.
+
 ## [0.15.0-rc3] - 2026-09-21
 
 ### Changed

@@ -553,9 +553,10 @@ class LocalSpeechToText:
             import sherpa_onnx
         except ImportError as exc:
             raise ImportError(
-                "the local voice extra is not installed. Run "
-                "`uv sync --extra voice-local` (or `pip install "
-                "'surtitle[voice-local]'`), then restart."
+                "the local speech engines are not installed — they are an "
+                "optional extra of about 30 MB. Open Settings, choose the local "
+                "voice provider, and press Install; or run `uv sync --extra "
+                "voice-local` where Surtitle is installed, then restart."
             ) from exc
         return _LocalSession(sherpa_onnx, self.settings, self._paths)
 

@@ -215,6 +215,68 @@ class TestPosixLauncherBehaviour:
         assert done.returncode == 0, done.stderr
         assert "STUB uv run --no-sync --quiet surtitle --version" in done.stdout
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="run.sh is for macOS and Linux")
+    @pytest.mark.skipif(shutil.which("bash") is None, reason="no bash available")
+    def test_the_first_run_says_the_offline_engines_are_optional(self, tmp_path):
+        """A fresh install must not leave local voice as a dead end.
+
+        Reported from a fresh macOS install: the archive fetched its environment,
+        the app started, and choosing a local engine produced an import error — with
+        the models already on disk, and nothing on screen saying the *engines* were
+        an extra of their own. The bootstrap installs what the app needs and says,
+        once, where the engines come from.
+        """
+        checkout = tmp_path / "checkout"
+        (checkout / "scripts").mkdir(parents=True)
+        shutil.copy(RUN_SH, checkout / "scripts" / "run.sh")
+
+        home = tmp_path / "home"
+        (home / ".local" / "bin").mkdir(parents=True)
+        stub = home / ".local" / "bin" / "uv"
+        stub.write_text('#!/bin/sh\necho "STUB uv $*"\n', encoding="utf-8")
+        stub.chmod(0o755)
+
+        done = subprocess.run(
+            ["bash", str(checkout / "scripts" / "run.sh"), "--version"],
+            env={"HOME": str(home), "PATH": "/usr/bin:/bin"},
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+
+        assert done.returncode == 0, done.stderr
+        assert "speech engines" in done.stdout, done.stdout
+        assert "Settings" in done.stdout, "and where to turn them on"
+        assert "voice-local" in done.stdout, (
+            "naming the extra, because the same words are in the error message and in "
+            "the diagnosis in docs/VOICE.md"
+        )
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="run.sh is for macOS and Linux")
+    @pytest.mark.skipif(shutil.which("bash") is None, reason="no bash available")
+    def test_a_warm_environment_says_nothing_about_it(self, tmp_path):
+        """It is a first-run note, not a line printed at every start."""
+        checkout = tmp_path / "checkout"
+        (checkout / "scripts").mkdir(parents=True)
+        shutil.copy(RUN_SH, checkout / "scripts" / "run.sh")
+        venv_python = checkout / ".venv" / "bin" / "python"
+        venv_python.parent.mkdir(parents=True)
+        venv_python.write_text('#!/bin/sh\necho "STUB python $*"\n', encoding="utf-8")
+        venv_python.chmod(0o755)
+
+        done = subprocess.run(
+            ["bash", str(checkout / "scripts" / "run.sh"), "--version"],
+            env={"HOME": str(tmp_path / "home"), "PATH": "/usr/bin:/bin"},
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+
+        assert done.returncode == 0, done.stderr
+        assert "speech engines" not in done.stdout
+
 
 ROOT = Path(__file__).resolve().parent.parent
 SETUP_BAT = ROOT / "Setup.bat"

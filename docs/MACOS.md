@@ -32,6 +32,39 @@ administrator rights, no system Python, and no compiler.
 Nothing is installed system-wide. The environment lives in `.venv/` inside the
 extracted folder, and the app's data in `~/Library/Application Support/Surtitle`.
 
+## The offline speech engines are a second step
+
+The first run installs what the *application* needs. The engines that recognise and
+speak **on this machine** — no API key, nothing leaving the computer — are an
+optional extra of about 30 MB, and neither this archive nor the Windows one bundles
+them. Choosing a local engine in Settings without them fails with:
+
+```
+Local speech recognition could not start (ImportError: the local speech engines
+are not installed — they are an optional extra of about 30 MB. …)
+```
+
+Two ways to install them, and neither needs the terminal:
+
+- **Settings ▸ Voice**, choose **local**, press **Install**. The tray shows progress.
+- Or double-click **`Setup.command`**, which offers the engines (and their models)
+  during setup, alongside the `~/Applications` entry and the sign-in question.
+
+From a terminal, in the extracted folder:
+
+```bash
+uv sync --extra voice-local     # or ~/.local/bin/uv if uv is not on your PATH
+```
+
+`run.sh` prints this once, on its first run, rather than leaving it to be discovered
+from an error.
+
+> **The engines and the models are different things, and the commands look similar.**
+> `./run.sh models status` lists the *model files*, which is why it can report
+> everything "installed" while the engines are missing — it inspects files and never
+> imports `sherpa_onnx`. Both are needed: the extra above, and a model such as
+> `streaming-zipformer-en-kroko-2025-08-06`.
+
 ## Why the macOS archive carries no binaries
 
 A file downloaded **in a browser** gets `com.apple.quarantine`, and macOS refuses
